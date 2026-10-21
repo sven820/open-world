@@ -247,7 +247,7 @@ export function makeSignAtlas() {
   const horizontal = SHOP_NAMES.length;
   const vertical = SHOP_NAMES.length;
 
-  const font = '"PingFang TC","Noto Sans TC","Microsoft JhengHei","Heiti TC",sans-serif';
+  const font = '"PingFang SC","Microsoft YaHei","Noto Sans SC","Noto Sans TC","PingFang TC","Microsoft JhengHei","Heiti SC",sans-serif';
 
   // horizontal (rows 0..7), 64 tiles
   for (let i = 0; i < 64; i++) {

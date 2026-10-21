@@ -87,7 +87,7 @@ export class Hud {
     if (this.player.driving) {
       const kmh = Math.abs(this.player.driveSpeed) * 3.6 * 1.7;
       this.elSpeed.textContent = Math.round(kmh) + " km/h";
-      this.elMode.textContent = this.player.inVehicle?.kind === "scooter" ? "機車" : "汽車";
+      this.elMode.textContent = this.player.inVehicle?.kind === "scooter" ? "摩托车" : "汽车";
       document.getElementById("speedo").classList.remove("hidden");
       document.getElementById("sp-num").textContent = Math.round(kmh);
       const arc = document.getElementById("sp-arc");

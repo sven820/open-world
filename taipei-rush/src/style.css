@@ -8,8 +8,8 @@
   --line: rgba(255, 255, 255, 0.14);
   --text: #f4f2ee;
   --muted: rgba(244, 242, 238, 0.6);
-  --sans: "Noto Sans TC", -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
-  --cond: "Rajdhani", "Noto Sans TC", sans-serif;
+  --sans: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  --cond: "Rajdhani", "Noto Sans SC", "Noto Sans TC", sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -75,7 +75,7 @@ kbd {
 .district span { font: 500 11px/1.4 var(--sans); color: rgba(244,242,238,.55); letter-spacing: .08em; }
 
 .hud-bl { position: absolute; left: 22px; bottom: 22px; display: flex; flex-direction: column; gap: 8px; }
-.mm-wrap { position: relative; width: 156px; height: 156px; border-radius: 50%; overflow: hidden; box-shadow: 0 8px 30px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.14); }
+.mm-wrap { position: relative; width: 156px; height: 156px; border-radius: 50%; overflow: hidden; box-shadow: 0 8px 30px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.14); pointer-events: auto; cursor: pointer; }
 #minimap { width: 156px; height: 156px; display: block; background: #0b1014; }
 .mm-ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: inset 0 0 28px rgba(0,0,0,.7); pointer-events: none; }
 .mm-n { position: absolute; top: 5px; left: 50%; transform: translateX(-50%); font: 700 10px/1 var(--cond); color: #ff5a5a; z-index: 2; text-shadow: 0 1px 3px #000; }

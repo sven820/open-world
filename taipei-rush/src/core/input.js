@@ -13,9 +13,18 @@ export class Input {
       if (e.repeat) return;
       this.downKeys.add(e.code);
       this.pressedSet.add(e.code);
+      // Layout-robust fallback: on some (non-QWERTY) layouts the letter printed
+      // on the key maps to a different e.code. Also register the produced letter,
+      // so pressing "D" always works regardless of physical key position.
+      const ch = e.key && e.key.length === 1 ? e.key.toUpperCase() : "";
+      if (ch >= "A" && ch <= "Z") { this.downKeys.add("Key" + ch); this.pressedSet.add("Key" + ch); }
       if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) e.preventDefault();
     };
-    this._onKeyUp = (e) => this.downKeys.delete(e.code);
+    this._onKeyUp = (e) => {
+      this.downKeys.delete(e.code);
+      const ch = e.key && e.key.length === 1 ? e.key.toUpperCase() : "";
+      if (ch >= "A" && ch <= "Z") this.downKeys.delete("Key" + ch);
+    };
     this._onMouseMove = (e) => {
       if (this.locked) {
         this.mouseDX += e.movementX || 0;

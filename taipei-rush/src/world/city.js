@@ -660,10 +660,12 @@ export class City {
     const hIdx = Math.floor(Math.random() * 64);
     const r = signTileRect(hIdx);
     let sg;
-    if (facing === "n") sg = signQuad(sw, sh, (x0 + x1) / 2, sy, z0 - 0.1, Math.PI, r.u0, r.v0, r.u1, r.v1);
-    else if (facing === "s") sg = signQuad(sw, sh, (x0 + x1) / 2, sy, z1 + 0.1, 0, r.u0, r.v0, r.u1, r.v1);
-    else if (facing === "w") sg = signQuad(sw, sh, x0 - 0.1, sy, (z0 + z1) / 2, -Math.PI / 2, r.u0, r.v0, r.u1, r.v1);
-    else sg = signQuad(sw, sh, x1 + 0.1, sy, (z0 + z1) / 2, Math.PI / 2, r.u0, r.v0, r.u1, r.v1);
+    // NOTE: keep sign panel clearly in front of its backing box (front face at ±0.10)
+    // to avoid z-fighting flicker / black lines.
+    if (facing === "n") sg = signQuad(sw, sh, (x0 + x1) / 2, sy, z0 - 0.14, Math.PI, r.u0, r.v0, r.u1, r.v1);
+    else if (facing === "s") sg = signQuad(sw, sh, (x0 + x1) / 2, sy, z1 + 0.14, 0, r.u0, r.v0, r.u1, r.v1);
+    else if (facing === "w") sg = signQuad(sw, sh, x0 - 0.14, sy, (z0 + z1) / 2, -Math.PI / 2, r.u0, r.v0, r.u1, r.v1);
+    else sg = signQuad(sw, sh, x1 + 0.14, sy, (z0 + z1) / 2, Math.PI / 2, r.u0, r.v0, r.u1, r.v1);
     this.signBatch.add(sg);
     // sign backing
     const bw = sw + 0.12;
@@ -847,6 +849,11 @@ export class City {
       metalness: 0.0,
       side: THREE.DoubleSide,
       transparent: false,
+      // pull signs slightly toward the camera in depth so they never z-fight
+      // with the backing box or wall they sit on
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
     });
     this.signMaterial = signMat;
     const signs = this.signBatch.build(signMat, { castShadow: false, receiveShadow: false });

@@ -13,6 +13,7 @@ window.addEventListener("error", (e) => window.__errs.push(String(e.message) + "
 window.addEventListener("unhandledrejection", (e) => window.__errs.push("promise:" + String(e.reason && e.reason.stack || e.reason)));
 
 const canvas = document.getElementById("game-canvas");
+canvas.tabIndex = 0; // make canvas focusable so keyboard input lands on the game
 const engine = new Engine(canvas);
 const input = new Input(canvas);
 const env = new Environment(engine.scene, engine.renderer);
@@ -38,13 +39,13 @@ function setProgress(p, stage) {
 }
 
 async function boot() {
-  setProgress(0.08, "正在對齊臺北街區座標…");
+  setProgress(0.08, "正在对齐台北街区坐标…");
   await city.ready;
-  setProgress(0.35, "正在生成街廓與建築…");
+  setProgress(0.35, "正在生成街廓与建筑…");
   await new Promise((r) => setTimeout(r, 30));
-  setProgress(0.62, "正在佈置店家招牌與街燈…");
+  setProgress(0.62, "正在布置店家招牌与街灯…");
   buildLandmarks(engine.scene, city);
-  setProgress(0.78, "正在喚醒行人與車流…");
+  setProgress(0.78, "正在唤醒行人与车流…");
   traffic = new Traffic(engine.scene, city, 40);
   city.traffic = traffic;
   peds = new PedestrianCrowd(engine.scene, city, 240);
@@ -53,7 +54,7 @@ async function boot() {
   await player.ready;
   hud = new Hud(city, player, env);
   window.__game = { engine, env, city, traffic, peds, player, hud };
-  setProgress(1.0, "就緒");
+  setProgress(1.0, "就绪");
   await new Promise((r) => setTimeout(r, 250));
   loader.classList.add("hidden");
   menuEl.classList.remove("hidden");
@@ -62,16 +63,24 @@ async function boot() {
 
 // ---- UI wiring ----
 document.getElementById("btn-start").addEventListener("click", startGame);
-document.getElementById("btn-character").addEventListener("click", () => hud.showNotify("角色：阿傑 · 西門町長大，擅長騎車", 2600));
-document.getElementById("btn-settings").addEventListener("click", () => hud.showNotify("設定：視角靈敏度 / 音量（示意）", 2600));
+document.getElementById("btn-character").addEventListener("click", () => hud.showNotify("角色：阿杰 · 西门町长大，擅长骑车", 2600));
+document.getElementById("btn-settings").addEventListener("click", () => hud.showNotify("设置：视角灵敏度 / 音量（示意）", 2600));
 document.getElementById("bm-close").addEventListener("click", closeBigMap);
-clickPlay.addEventListener("click", () => input.requestLock());
+clickPlay.addEventListener("click", () => { canvas.focus(); input.requestLock(); });
+// clicking the game view (re)focuses the canvas so keyboard input keeps working
+canvas.addEventListener("pointerdown", () => canvas.focus());
+// click the minimap to open / close the big map (same as pressing M)
+document.getElementById("minimap").addEventListener("click", (e) => {
+  e.stopPropagation();
+  bigOpen ? closeBigMap() : openBigMap();
+});
 
 function startGame() {
   menuEl.classList.add("hidden");
   hudEl.classList.remove("hidden");
   started = true;
   player.setEnabled(true);
+  canvas.focus();
 }
 
 input.onLockChange = (locked) => {
@@ -85,7 +94,7 @@ function openBigMap() {
   bigmapEl().classList.remove("hidden");
   input.exitLock();
   clickPlay.classList.add("hidden");
-  hud.showNotify("大臺北地圖 · WASD 平移 · 滾輪縮放 · M 關閉", 2600);
+  hud.showNotify("大台北地图 · WASD 平移 · 滚轮缩放 · M 关闭", 2600);
 }
 function closeBigMap() {
   bigOpen = false;

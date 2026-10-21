@@ -1,13 +1,13 @@
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#0b0c10" />
-  <title>臺北狂飆 · Taipei Rush</title>
+  <title>台北狂飙 · Taipei Rush</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&family=Noto+Sans+TC:wght@400;500;700;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
@@ -17,13 +17,13 @@
     <div class="ld-grid"></div>
     <div class="ld-center">
       <div class="ld-logo">
-        <div class="ld-badge"><span>臺</span><span>北</span></div>
+        <div class="ld-badge"><span>台</span><span>北</span></div>
         <div class="ld-word">
-          <h1>狂飆</h1>
-          <p>臺北 <b>TAIPEI</b> RUSH</p>
+          <h1>狂飙</h1>
+          <p>台北 <b>TAIPEI</b> RUSH</p>
         </div>
       </div>
-      <div class="ld-stage" id="ld-stage">正在建構城市…</div>
+      <div class="ld-stage" id="ld-stage">正在构建城市…</div>
       <div class="ld-track"><div class="ld-fill" id="ld-fill"></div></div>
       <div class="ld-row"><span id="ld-pct">0%</span><span class="ld-hint">STREETS · SHOPS · PEOPLE · TRAFFIC</span></div>
     </div>
@@ -39,9 +39,9 @@
 
     <div class="hud-tr">
       <div class="district">
-        <h2 id="hud-district-zh">西門町</h2>
+        <h2 id="hud-district-zh">西门町</h2>
         <p id="hud-district-en">XIMENDING</p>
-        <span id="hud-district-sub">潮流 · 電影院與街頭</span>
+        <span id="hud-district-sub">潮流 · 电影院与街头</span>
       </div>
     </div>
 
@@ -58,12 +58,12 @@
     </div>
 
     <div class="hud-bc">
-      <div class="prompt hidden" id="hud-prompt"><kbd>F</kbd><span>上車</span></div>
-      <div class="tip" id="hud-tip">WASD 移動 · 滑鼠轉視角 · Shift 奔跑 · Space 跳躍 · F 上車 · M 地圖</div>
+      <div class="prompt hidden" id="hud-prompt"><kbd>F</kbd><span>上车</span></div>
+      <div class="tip" id="hud-tip">WASD 移动 · 鼠标转视角 · Shift 奔跑 · Space 跳跃 · F 上车 · M 地图</div>
     </div>
 
     <div class="hud-br">
-      <div class="controls-mini"><kbd>M</kbd> 地圖　<kbd>F</kbd> 上下車　<kbd>C</kbd> 視角</div>
+      <div class="controls-mini"><kbd>M</kbd> 地图　<kbd>F</kbd> 上下车　<kbd>C</kbd> 视角</div>
     </div>
 
     <div class="speedo hidden" id="speedo">
@@ -77,34 +77,34 @@
   <div id="menu" class="hidden">
     <div class="menu-inner">
       <div class="menu-logo">
-        <div class="ml-badge"><span>臺</span><span>北</span></div>
-        <div class="ml-word"><h1>狂飆</h1><p>TAIPEI <b>RUSH</b></p></div>
+        <div class="ml-badge"><span>台</span><span>北</span></div>
+        <div class="ml-word"><h1>狂飙</h1><p>TAIPEI <b>RUSH</b></p></div>
       </div>
-      <p class="menu-sub">免下載 · 開放世界 · 臺北街頭</p>
-      <button class="btn primary" id="btn-start">開始遊戲 <span>START</span></button>
+      <p class="menu-sub">免下载 · 开放世界 · 台北街头</p>
+      <button class="btn primary" id="btn-start">开始游戏 <span>START</span></button>
       <div class="menu-row">
-        <button class="btn" id="btn-character">選擇角色 <span>CHARACTER</span></button>
-        <button class="btn" id="btn-settings">設定 <span>SETTINGS</span></button>
+        <button class="btn" id="btn-character">选择角色 <span>CHARACTER</span></button>
+        <button class="btn" id="btn-settings">设置 <span>SETTINGS</span></button>
       </div>
       <div class="menu-controls">
-        <div><kbd>W A S D</kbd> 移動</div>
-        <div><kbd>滑鼠</kbd> 視角</div>
+        <div><kbd>W A S D</kbd> 移动</div>
+        <div><kbd>鼠标</kbd> 视角</div>
         <div><kbd>Shift</kbd> 奔跑</div>
-        <div><kbd>Space</kbd> 跳躍</div>
-        <div><kbd>F</kbd> 上車 / 下車</div>
-        <div><kbd>M</kbd> 地圖</div>
+        <div><kbd>Space</kbd> 跳跃</div>
+        <div><kbd>F</kbd> 上车 / 下车</div>
+        <div><kbd>M</kbd> 地图</div>
       </div>
-      <div class="menu-note">環境復刻 · 程序化臺北街區 · Three.js r169</div>
+      <div class="menu-note">环境复刻 · 程序化台北街区 · Three.js r169</div>
     </div>
   </div>
 
   <div id="bigmap" class="hidden">
-    <div class="bm-head"><h3>大臺北 <small>GREATER TAIPEI</small></h3><span id="bm-close">✕</span></div>
+    <div class="bm-head"><h3>大台北 <small>GREATER TAIPEI</small></h3><span id="bm-close">✕</span></div>
     <canvas id="bigmap-canvas" width="1100" height="620"></canvas>
-    <div class="bm-foot"><span>WASD 移動地圖 · 滾輪縮放</span><span id="bm-pos">—</span></div>
+    <div class="bm-foot"><span>WASD 移动地图 · 滚轮缩放</span><span id="bm-pos">—</span></div>
   </div>
 
-  <div id="click-to-play" class="hidden"><div><kbd>點擊畫面</kbd> 以控制視角</div></div>
+  <div id="click-to-play" class="hidden"><div><kbd>点击画面</kbd> 以控制视角</div></div>
 
   <div id="fps" class="hidden"></div>
 
