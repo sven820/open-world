@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-LEPE10L3C8"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-LEPE10L3C8');
+    </script>
+    <script>(function(){try{
+var L={},K=new RegExp("^(taipei-rush-|hong-kong-gta-|gta-travel-|tgta-device-)"),X=new RegExp("(cloud|auth|pkce|session|probe|handoff|identities)"),S=["taipei-rush-save-v1","hong-kong-gta-save-v1"];
+var ls=window.localStorage,to=L[location.hostname];
+if(to){var items={},n=0;
+for(var i=0;i<ls.length;i++){var k=ls.key(i);if(k&&K.test(k)&&!X.test(k)){items[k]=ls.getItem(k);n++;}}
+var h='';
+if(n){var b=btoa(unescape(encodeURIComponent(JSON.stringify({v:1,from:location.hostname,items:items})))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');if(b.length<1500000)h='#tr-handoff='+b;}
+window.__trHandoff=1;location.replace(to+location.pathname+location.search+h);return;}
+var m=/^#tr-handoff=([A-Za-z0-9_-]+)$/.exec(location.hash);if(!m)return;
+history.replaceState(history.state,'',location.pathname+location.search);
+var b64=m[1].replace(/-/g,'+').replace(/_/g,'/');while(b64.length%4)b64+='=';
+var d=JSON.parse(decodeURIComponent(escape(atob(b64))));if(!d||d.v!==1||!d.items)return;
+function parse(s){try{return JSON.parse(s);}catch(e){return null;}}
+function len(a){return a&&a.length||0;}
+function score(s){if(!s||typeof s!=='object')return [-1,0,0,0];var st=s.stats||{};return [len(s.completedMissions),len(s.collectibles),+st.playTime||0,Date.parse(s.lastPlayedAt||'')||0];}
+function better(a,b){var x=score(a),y=score(b);for(var i=0;i<4;i++){if(y[i]!==x[i])return y[i]>x[i];}return false;}
+var moved=0;
+for(var k in d.items){if(!Object.prototype.hasOwnProperty.call(d.items,k)||!K.test(k)||X.test(k))continue;
+var inc=d.items[k];if(typeof inc!=='string')continue;
+if(S.indexOf(k)>=0){var id=parse(ls.getItem(k+':identities-v1'));
+if(id&&id.slots&&id.active&&id.active!=='guest'){var g=id.slots.guest||{data:null,backups:[]};
+if(g.data===null||g.data===undefined){g.data=parse(inc);}else if(JSON.stringify(g.data)!==JSON.stringify(parse(inc))){
+if(better(g.data,parse(inc))){ls.setItem(k+':handoff-v1',JSON.stringify(g.data));g.data=parse(inc);}else ls.setItem(k+':handoff-v1',inc);}
+if(!g.backups)g.backups=[];id.slots.guest=g;
+var act=id.slots[id.active];if(act&&better(act.data,parse(inc))){var bk={id:'handoff-'+Date.now()+'-'+k.length,date:new Date().toISOString(),data:parse(inc),reason:'legacy'};act.backups=[bk].concat(act.backups||[]).slice(0,3);act.undo=bk.id;}
+ls.setItem(k+':identities-v1',JSON.stringify(id));moved++;continue;}
+var mine=ls.getItem(k);
+if(mine===null){ls.setItem(k,inc);moved++;}
+else if(mine!==inc){if(better(parse(mine),parse(inc))){ls.setItem(k+':handoff-v1',mine);ls.setItem(k,inc);}else ls.setItem(k+':handoff-v1',inc);moved++;}
+continue;}
+if(ls.getItem(k)===null){ls.setItem(k,inc);moved++;}}
+ls.setItem('taipei-rush-handoff-v1',JSON.stringify({from:String(d.from||''),at:Date.now(),moved:moved}));
+}catch(e){}})();</script>
+    <script>(function(){try{var q=new URLSearchParams(location.search),r=q.get('region'),rec=null;
+try{rec=JSON.parse(localStorage.getItem("gta-travel-v1")||'null');}catch(e){}
+function go(p){var s=q.toString();location.replace(p+(s?'?'+s:''));}
+if(q.has('auth'))return;
+if(r==='hong-kong'||r==='hk'){q.delete('region');go("/hong-kong/");return;}
+if(r==='taipei'||q.has('autoplay')||q.has('spawn')||q.has('cam')||q.has('menu'))return;
+if(navigator.onLine===false)return;
+var t=rec&&rec.ticket;
+if(t&&t.to==='hong-kong'&&t.from==='taipei'){go("/hong-kong/");return;}
+if(!t&&rec&&rec.at==='hong-kong')go("/hong-kong/");}catch(e){}})();</script>
+
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <title>台北 GTA｜Taipei GTA, Taipei Rush：免下載</title>
+    <meta name="description" content="台北 GTA 就是 Taipei GTA、Taipei Rush，正式名稱《去臺北狂飆》。免下載，打開 taipei-gta.org 騎機車逛西門町、夜市、臺北101。繁體、简体、English 說明都在這頁。" />
+    <meta name="keywords" content="台北 GTA,Taipei GTA,Taipei Rush,台北版gta,去臺北狂飆,臺北狂飆,台北狂飙,台北gta網址,台北gta下載,台北gta攻略,台北gta很卡,台北gta ptt" />
+    <link rel="canonical" href="https://taipei-gta.org/" />
+    <link rel="alternate" hreflang="zh-Hant-TW" href="https://taipei-gta.org/" />
+    <link rel="alternate" hreflang="zh-Hant-HK" href="https://taipei-gta.org/hong-kong/" />
+    <link rel="alternate" hreflang="x-default" href="https://taipei-gta.org/" />
+    <meta name="application-name" content="臺北狂飆" />
+    <meta name="theme-color" content="#07080c" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="format-detection" content="telephone=no" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="臺北狂飆" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="臺北狂飆" />
+    <meta property="og:title" content="台北 GTA｜Taipei GTA, Taipei Rush：免下載" />
+    <meta property="og:description" content="台北 GTA is Taipei Rush. Free in the browser at taipei-gta.org. Ride through Ximending, night markets and Taipei 101." />
+    <meta property="og:url" content="https://taipei-gta.org/" />
+    <meta property="og:image" content="https://taipei-gta.org/title/og-taipei-sq.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="1200" />
+    <meta property="og:image:alt" content="台北 GTA" />
+    <meta property="og:locale" content="zh_TW" />
+    <meta property="og:locale:alternate" content="zh_HK" />
+    <meta property="og:locale:alternate" content="en_US" />
+    <meta property="og:locale:alternate" content="zh_CN" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="台北 GTA｜Taipei GTA, Taipei Rush" />
+    <meta name="twitter:description" content="Taipei GTA / Taipei Rush. Free browser open world. No download." />
+    <meta name="twitter:image" content="https://taipei-gta.org/title/og-taipei-sq.jpg" />
+    <script type="application/ld+json">
+    {"@context":"https://schema.org","@graph":[
+      {"@type":"VideoGame","name":"台北 GTA","alternateName":["Taipei GTA","Taipei Rush","去臺北狂飆","臺北狂飆","台北狂飙","台北版GTA"],"image":"https://taipei-gta.org/title/og-taipei-sq.jpg","url":"https://taipei-gta.org/","inLanguage":["zh-Hant-TW","zh-Hans","en"],"genre":["Open world","Action"],"playMode":["SinglePlayer"],"applicationCategory":"Game","operatingSystem":"Web browser","gamePlatform":"Web browser","description":"台北 GTA, also called Taipei Rush, is a free browser open world. Traditional Chinese title: 去臺北狂飆. Ride through Ximending, night markets and Taipei 101.","offers":{"@type":"Offer","price":"0","priceCurrency":"TWD","availability":"https://schema.org/InStock"}},
+      {"@type":"FAQPage","mainEntity":[
+        {"@type":"Question","name":"台北 GTA 在哪裡玩？網址是什麼？","acceptedAnswer":{"@type":"Answer","text":"台北 GTA 的網址是 https://taipei-gta.org/ 。用 Chrome、Safari 或 Edge 打開就能玩，不用去 Steam，也不用找安裝檔。搜尋「台北gta哪裡玩」「台北gta網站」都是進這一頁。"}},
+        {"@type":"Question","name":"台北 GTA 連結是哪一個？","acceptedAnswer":{"@type":"Answer","text":"能玩的連結只有 https://taipei-gta.org/ 。PTT、Dcard、Threads 舊文若還寫著 vercel 暫存網址，請改開這個。要求下載啟動器或不明安裝檔的連結請關掉。"}},
+        {"@type":"Question","name":"台北 GTA 要下載嗎？","acceptedAnswer":{"@type":"Answer","text":"不用下載，也沒有 App。台北版 GTA 是網頁遊戲，瀏覽器打開 taipei-gta.org 即可。手機用瀏覽器的「加入主畫面」，之後可以從圖示點開，仍然不用裝安裝包。"}},
+        {"@type":"Question","name":"台北 GTA 和去臺北狂飆是同一個嗎？","acceptedAnswer":{"@type":"Answer","text":"是同一個。台北 GTA、臺北 GTA、台北版 GTA 都是《去臺北狂飆》。英文搜 Taipei GTA 或 Taipei Rush，也是這一個網址，不是另外下載的遊戲。"}},
+        {"@type":"Question","name":"台北版 GTA 是 GTA5 嗎？","acceptedAnswer":{"@type":"Answer","text":"不是 Rockstar 的 GTA5 或 GTA6，也不用購買或登入 Rockstar。這是獨立的瀏覽器開放世界，在台北街頭騎車、開車、逛地圖。"}},
+        {"@type":"Question","name":"台北 GTA 手機能玩嗎？","acceptedAnswer":{"@type":"Answer","text":"可以。請橫放：左邊搖桿移動，推到底是衝刺；右邊滑動轉視角。上車後搖桿換成油門和煞車，上下車、互動、跳躍都有按鈕。畫面比電腦簡單。直向兩根拇指和路會擠在一起。"}},
+        {"@type":"Question","name":"台北 GTA 很卡怎麼辦？","acceptedAnswer":{"@type":"Answer","text":"3D 城市吃效能，手機和舊筆電比較容易卡。先關掉其他 App 和正在播影片的分頁，插電，用穩定的 Wi-Fi。第一次慢多半是在下載場景，不是電腦壞了；第二次會用瀏覽器快取，會快一點。還是卡就改用電腦 Chrome 或 Edge。"}},
+        {"@type":"Question","name":"黑畫面或一直停在準備中 0% 怎麼辦？","acceptedAnswer":{"@type":"Answer","text":"城市是分段載入的，黑畫面先等一下，不要連按重新整理。若停在準備中 0% 超過一陣子，強制重新整理一次。看到部分街區未載入時，再整理一次通常就補上。"}},
+        {"@type":"Question","name":"台北 GTA 怎麼操作？","acceptedAnswer":{"@type":"Answer","text":"電腦：WASD 移動，滑鼠轉視角，Shift 衝刺，E 互動。機車或汽車旁邊按 F 上車。M 開地圖並設導航，T 開遊戲內手機。空白鍵走路時是跳，開車時是手煞車。主選單「操作說明」可切鍵盤、手把、觸控。"}},
+        {"@type":"Question","name":"F 和空白鍵為什麼跟想的不一樣？","acceptedAnswer":{"@type":"Answer","text":"F 對停著的車是上車；對正在開的車按下去是搶車，會被警察通緝。空白鍵在走路時跳躍，進車後變成手煞車。雨天路面滑，煞車要早一點。"}},
+        {"@type":"Question","name":"手把怎麼玩台北 GTA？","acceptedAnswer":{"@type":"Answer","text":"瀏覽器認到手把就能用。Xbox 手把上：Y 上下車，B 衝刺，X 互動，A 是跳，開車時 A 是手煞車，R3 是鏡頭。任天堂手把的 A/B、X/Y 是反的，以主選單操作說明為準。"}},
+        {"@type":"Question","name":"台北 GTA 攻略：第一次進遊戲做什麼？","acceptedAnswer":{"@type":"Answer","text":"等主選單出來，先看操作說明，再選角色。阿傑偏機車，小雯偏開車。開始遊戲後人在西門町附近，表哥阿明的引導從那裡開始。先走路再上車，用 M 看自己在哪，用 T 接任務。先騎近的路，不要一上來衝最遠的地標。"}},
+        {"@type":"Question","name":"任務和招財貓在哪裡？","acceptedAnswer":{"@type":"Answer","text":"按 T 打開遊戲內手機。任務分成主線、支線、打工、競速、文化，當下能接哪些以手機裡看到的為準。招財貓是收集要素，數量跟著你開到的版本走，收集進度在遊戲內紀錄。"}},
+        {"@type":"Question","name":"血量低了怎麼辦？茶葉蛋在哪？","acceptedAnswer":{"@type":"Answer","text":"便利商店的茶葉蛋可以回血，一顆 13 元。走進店裡，到櫃檯按互動鍵購買。被撞或被打之後，就近找一家補血最快。"}},
+        {"@type":"Question","name":"捷運怎麼搭？","acceptedAnswer":{"@type":"Answer","text":"按 T 打開手機裡的捷運，點車站會設導航。騎到入口，按互動鍵搭乘，就能快移到城市另一頭，不用自己騎完全程。"}},
+        {"@type":"Question","name":"闖紅燈或被警察追怎麼辦？","acceptedAnswer":{"@type":"Answer","text":"紅綠燈有倒數，黃燈別硬闖。搶車、撞人、打架都會提高通緝，右上角星星是等級。不要停在小地圖的搜索範圍裡，拉開距離，鑽巷子或騎樓，等星星閃完。機車鑽縫比汽車好用。"}},
+        {"@type":"Question","name":"台北 GTA 可以去哪些地方？","acceptedAnswer":{"@type":"Answer","text":"西門町是起點。同一張地圖裡還有臺北車站、臺北101、饒河夜市、大安森林公園這類台北地標，以及騎樓和巷弄。按 M 點地圖就能設導航。路寬和距離是遊戲裡的，不是真實導航。"}},
+        {"@type":"Question","name":"台北 GTA 免費嗎？要註冊嗎？進度存在哪？","acceptedAnswer":{"@type":"Answer","text":"免費，不強制註冊就能開始。進度記在這台瀏覽器裡，下次打開主選單可以繼續。換電腦、換瀏覽器或清掉網站資料後，本機進度會不見。"}},
+        {"@type":"Question","name":"可以改英文嗎？有香港版嗎？","acceptedAnswer":{"@type":"Answer","text":"主選單可以切繁中和英文。香港城市在 https://taipei-gta.org/hong-kong/ ，主選單也能切換《香港狂飆》。"}},
+        {"@type":"Question","name":"PTT 說的台北 GTA 好玩嗎？是這個網址嗎？","acceptedAnswer":{"@type":"Answer","text":"是這個站：https://taipei-gta.org/ 。它是免費網頁開放世界，畫面和任務以你打開的這一版為準。討論串若還留舊連結，請改開本頁，不要跟著不明下載走。"}},
+        {"@type":"Question","name":"What is Taipei GTA and Taipei Rush?","acceptedAnswer":{"@type":"Answer","text":"They are the same free browser game. Taipei Rush is the English title. The Traditional Chinese title is 去臺北狂飆. Open https://taipei-gta.org/ in Chrome, Safari or Edge. No download and no Rockstar account."}},
+        {"@type":"Question","name":"Do I need to download Taipei GTA?","acceptedAnswer":{"@type":"Answer","text":"No. Taipei Rush runs in the browser. On a phone, add this site to your home screen. That still is not an app install."}},
+        {"@type":"Question","name":"Can I play Taipei GTA on a phone?","acceptedAnswer":{"@type":"Answer","text":"Yes, in landscape. Push the left stick fully to sprint, and drag on the right to look around. A computer browser is smoother if the phone stutters."}},
+        {"@type":"Question","name":"Why is Taipei Rush lagging or stuck at 0%?","acceptedAnswer":{"@type":"Answer","text":"The city streams in, so wait before you refresh. A first visit is slow because the browser is downloading the world. If it stays on Preparing 0%, force-reload once. If a phone stays laggy, switch to a computer."}},
+        {"@type":"Question","name":"How do I control Taipei Rush?","acceptedAnswer":{"@type":"Answer","text":"WASD moves, the mouse looks, F enters a vehicle, E interacts, M opens the map, T opens the in-game phone. Space jumps on foot and is the handbrake while driving. Pressing F on a moving car is a carjack and alerts the police."}},
+        {"@type":"Question","name":"Is Taipei GTA official GTA 5?","acceptedAnswer":{"@type":"Answer","text":"No. It is an independent browser open world, not a Rockstar game. The menu switches between Traditional Chinese and English. Hong Kong Rush is at https://taipei-gta.org/hong-kong/."}},
+        {"@type":"Question","name":"台北 GTA 网址是什么？","acceptedAnswer":{"@type":"Answer","text":"网址是 https://taipei-gta.org/ 。Taipei GTA 和 Taipei Rush 是同一款游戏，繁体正式名称是《去臺北狂飆》。用浏览器打开就能玩，不用下载。"}},
+        {"@type":"Question","name":"台北 GTA 要下载吗？","acceptedAnswer":{"@type":"Answer","text":"不用下载，也没有安装包。手机可以把网页加到主屏幕，点图标打开，仍然是网页。"}},
+        {"@type":"Question","name":"手机玩台北 GTA 很卡怎么办？","acceptedAnswer":{"@type":"Answer","text":"请横屏。左边摇杆推到底是冲刺。第一次慢是在下载场景。还卡就换电脑浏览器。"}},
+        {"@type":"Question","name":"台北 GTA 怎么操作？","acceptedAnswer":{"@type":"Answer","text":"WASD 移动，鼠标转视角，F 上车，E 互动，M 地图，T 打开游戏里的手机。空格走路是跳，开车是手刹。对正在开的车按 F 是抢车。"}},
+        {"@type":"Question","name":"这是 GTA5 吗？可以切英文吗？","acceptedAnswer":{"@type":"Answer","text":"不是 Rockstar 的 GTA5。主菜单可以在繁体中文和 English 之间切换。香港页是 https://taipei-gta.org/hong-kong/ ，英文名 Hong Kong Rush。"}}
+      ]}
+    ]}
+    </script>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png?v=gta1" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png?v=gta1" />
+    <!-- iOS home-screen launch images, both orientations (iOS picks the one matching the launch orientation; the game
+         plays in portrait too): no blank flash before the inline loader paints. Every iPhone since the X / SE 2 + iPads.
+         Generated by src/ui/tools/splash.mjs (prints these tags). -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2868x1320.png" /> <!-- iPhone 16 / 17 Pro Max -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1320x2868.png" /> <!-- iPhone 16 / 17 Pro Max -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2796x1290.png" /> <!-- iPhone 14 / 15 Pro Max, 15 / 16 Plus -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1290x2796.png" /> <!-- iPhone 14 / 15 Pro Max, 15 / 16 Plus -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2778x1284.png" /> <!-- iPhone 12 / 13 Pro Max, 14 Plus -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1284x2778.png" /> <!-- iPhone 12 / 13 Pro Max, 14 Plus -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 420px) and (device-height: 912px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2736x1260.png" /> <!-- iPhone Air -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 420px) and (device-height: 912px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1260x2736.png" /> <!-- iPhone Air -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2688x1242.png" /> <!-- iPhone XS Max, 11 Pro Max -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1242x2688.png" /> <!-- iPhone XS Max, 11 Pro Max -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-1792x828.png" /> <!-- iPhone XR, 11 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-828x1792.png" /> <!-- iPhone XR, 11 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 414px) and (device-height: 736px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2208x1242.png" /> <!-- iPhone 8 Plus -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 414px) and (device-height: 736px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1242x2208.png" /> <!-- iPhone 8 Plus -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 402px) and (device-height: 874px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2622x1206.png" /> <!-- iPhone 16 Pro, 17, 17 Pro -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 402px) and (device-height: 874px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1206x2622.png" /> <!-- iPhone 16 Pro, 17, 17 Pro -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2556x1179.png" /> <!-- iPhone 14 / 15 Pro, 15, 16 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1179x2556.png" /> <!-- iPhone 14 / 15 Pro, 15, 16 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2532x1170.png" /> <!-- iPhone 12 / 13 / 14, 16e -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1170x2532.png" /> <!-- iPhone 12 / 13 / 14, 16e -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)" href="/splash/launch-2436x1125.png" /> <!-- iPhone X / XS / 11 Pro, 12 / 13 mini -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/splash/launch-1125x2436.png" /> <!-- iPhone X / XS / 11 Pro, 12 / 13 mini -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-1334x750.png" /> <!-- iPhone SE 2 / 3, 8 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-750x1334.png" /> <!-- iPhone SE 2 / 3, 8 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 1032px) and (device-height: 1376px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-2752x2064.png" /> <!-- iPad Pro 13" (M4) -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 1032px) and (device-height: 1376px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-2064x2752.png" /> <!-- iPad Pro 13" (M4) -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-2732x2048.png" /> <!-- iPad Pro 12.9", iPad Air 13" -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-2048x2732.png" /> <!-- iPad Pro 12.9", iPad Air 13" -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 834px) and (device-height: 1210px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-2420x1668.png" /> <!-- iPad Pro 11" (M4) -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 834px) and (device-height: 1210px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-1668x2420.png" /> <!-- iPad Pro 11" (M4) -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 834px) and (device-height: 1194px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-2388x1668.png" /> <!-- iPad Pro 11", iPad Air 11" -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 834px) and (device-height: 1194px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-1668x2388.png" /> <!-- iPad Pro 11", iPad Air 11" -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 834px) and (device-height: 1112px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-2224x1668.png" /> <!-- iPad Air 3, iPad Pro 10.5" -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 834px) and (device-height: 1112px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-1668x2224.png" /> <!-- iPad Air 3, iPad Pro 10.5" -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 820px) and (device-height: 1180px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-2360x1640.png" /> <!-- iPad Air 4 / 5, iPad 10 / A16 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 820px) and (device-height: 1180px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-1640x2360.png" /> <!-- iPad Air 4 / 5, iPad 10 / A16 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 810px) and (device-height: 1080px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-2160x1620.png" /> <!-- iPad 7 / 8 / 9 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 810px) and (device-height: 1080px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-1620x2160.png" /> <!-- iPad 7 / 8 / 9 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 768px) and (device-height: 1024px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-2048x1536.png" /> <!-- iPad 9.7", iPad mini 5 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 768px) and (device-height: 1024px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-1536x2048.png" /> <!-- iPad 9.7", iPad mini 5 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 744px) and (device-height: 1133px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)" href="/splash/launch-2266x1488.png" /> <!-- iPad mini 6 / 7 -->
+    <link rel="apple-touch-startup-image" media="screen and (device-width: 744px) and (device-height: 1133px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/splash/launch-1488x2266.png" /> <!-- iPad mini 6 / 7 -->
+    <style>html,body{overscroll-behavior:none;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-text-size-adjust:100%;-moz-text-size-adjust:100%;text-size-adjust:100%;background:#07080c;width:100%;height:100%;margin:0;overflow:hidden}body,#app{position:fixed;inset:0}#loader{--sa-l:env(safe-area-inset-left,0px);--sa-r:env(safe-area-inset-right,0px);--sa-b:env(safe-area-inset-bottom,0px);--m:clamp(20px, 3.4vw, 68px);z-index:100;color:#f4f1ea;-webkit-font-smoothing:antialiased;background:#07080c url(data:image/webp;base64,UklGRkYBAABXRUJQVlA4IDoBAABwCgCdASpAACQAPlEgi0QjoiEZWSWYOAUEs4BgYLfgON1W1Qg+4CI7ix9DLUuFOX2TCVyi+ITfVxIB2C2ZrFtVOWPpfuyVmqUDHuSGa1TuTIwIa0YV9l4X4Vv0QAD+IsioJ4aJl8hLBpZTzql3r1NHKVi8EBftQDMr3jFjfzJUdvxbjj+h8fFjqMldVX8vGYMwA/nG/K6i6F+XOjC2umv/t6MZ3kGdkNS4JdoF2clJty5i5MaNbpNrxWBc2EPORs/02N5U3SgvA2UW5ATYWvDWgoFLu8qq2MpscCg1FJTBSHZ9dx7rnN4SxAKsgtbI/WmeTEcvNHsx4pCRqNXOZ+BE/guAsyX8FmM+rxHYIYc8Oy+9Bkp039cjh5zYNwgCmkJRfo6MpX8tp9CkFBrP3M9TIHpB6P+04AAAAA==) 66% 40%/cover no-repeat;font-family:PingFang TC,Noto Sans TC,Microsoft JhengHei,Heiti TC,system-ui,sans-serif;transition:opacity .45s ease-in;position:fixed;inset:0;overflow:hidden}#loader .ld-photo img{object-fit:cover;object-position:66% 40%;opacity:0;width:100%;height:100%;transition:opacity .35s ease-out;display:block;position:absolute;inset:0}#loader .ld-photo.on img{opacity:1}#loader .ld-grade{pointer-events:none;background:linear-gradient(#05050900 63%,#0505092e 75%,#0505099e 89%,#050509e6 100%),linear-gradient(90deg,#05050980 0%,#05050900 34%),radial-gradient(at 62% 40%,#0000 55%,#0006 100%);position:absolute;inset:0}#loader .ld-logo{left:calc(var(--m) + var(--sa-l));bottom:calc(var(--m) + var(--sa-b));z-index:2;width:clamp(230px,27vw,520px);position:absolute}#loader .ld-logo svg{filter:drop-shadow(0 .6vw 1.4vw #0000008c);width:100%;height:auto;display:block;overflow:visible}#loader .ld-prog{right:calc(var(--m) + var(--sa-r));bottom:calc(var(--m) + var(--sa-b));z-index:2;width:clamp(220px,21vw,420px);position:absolute}#loader .ld-row{align-items:center;gap:12px;display:flex}#loader .ld-spin{border:2.5px solid #ffffff2e;border-top-color:#fff;border-radius:50%;flex:none;width:22px;height:22px;animation:.8s linear infinite ldSpin}@keyframes ldSpin{to{transform:rotate(360deg)}}#loader .ld-stage{text-shadow:0 1px 3px #00000080;flex:1;min-width:0;line-height:1.25}#loader .ld-stage b{letter-spacing:.04em;white-space:nowrap;text-overflow:ellipsis;font-size:clamp(14px,.85vw,18px);font-weight:700;display:block;overflow:hidden}html[lang=en] #loader .ld-stage b{letter-spacing:.01em}html[lang=en] #loader .ld-stage small{letter-spacing:.08em}#loader .ld-stage small{letter-spacing:.14em;text-transform:uppercase;color:#f4f1eab3;white-space:nowrap;text-overflow:ellipsis;margin-top:3px;font:700 clamp(10.5px,.6vw,12.5px)/1.2 Avenir Next Condensed,Bahnschrift,DIN Condensed,Roboto Condensed,Arial Narrow,sans-serif;display:block;overflow:hidden}#loader .ld-pct{font-variant-numeric:tabular-nums;letter-spacing:.02em;text-align:right;text-shadow:0 1px 4px #00000073;flex:none;min-width:2.3em;font:600 clamp(28px,2vw,42px)/1 DIN Condensed,Bahnschrift,Avenir Next Condensed,Roboto Condensed,Arial Narrow,sans-serif}#loader .ld-pct i{opacity:.6;margin-left:2px;font-size:.5em;font-style:normal}#loader .ld-track{background:#fff3;height:3px;margin-top:14px;position:relative;overflow:hidden}#loader .ld-fill{transform-origin:0;background:#fff;transition:transform .6s cubic-bezier(.3,.7,.3,1);position:absolute;inset:0;transform:scaleX(0)}#loader .ld-fill:after{content:"";background:linear-gradient(90deg,#0000,#e0262f);width:36px;position:absolute;top:-3px;bottom:-3px;right:0}#loader .ld-sweep{background:linear-gradient(90deg,#0000,#ffffff80,#0000);width:30%;animation:1.4s ease-in-out infinite ldSweep;position:absolute;top:0;bottom:0}#loader.has-pct .ld-sweep{display:none}@keyframes ldSweep{0%{transform:translate(-110%)}to{transform:translate(360%)}}#loader .ld-tip{left:50%;bottom:calc(var(--m) + var(--sa-b) - 2px);z-index:2;width:min(36vw,620px);position:absolute;transform:translate(-46%)}#loader .ld-tip-k{letter-spacing:.3em;text-transform:uppercase;color:#ff6a6f;align-items:center;gap:8px;font:700 clamp(11px,.65vw,13px)/1 PingFang TC,Noto Sans TC,Avenir Next Condensed,Bahnschrift,sans-serif;display:inline-flex}#loader .ld-tip-k:before{content:"";background:#e0262f;width:18px;height:2px}#loader .ld-tips{color:#f4f1eaeb;text-shadow:0 1px 3px #0000008c;text-wrap:pretty;margin-top:10px;font-size:clamp(14px,.9vw,19px);line-height:1.55}#loader .ld-err{z-index:3;background:#08080ceb;border-left:3px solid #e0262f;max-width:80vw;padding:18px 24px;font-size:15px;line-height:1.6;display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}#loader .ld-err button{color:#fff;cursor:pointer;pointer-events:auto;background:#d81f2a;border:1px solid #ffffff73;border-radius:4px;min-width:9em;min-height:44px;margin:16px auto 0;padding:8px 18px;font:700 15px/1.2 PingFang TC,Noto Sans TC,system-ui,sans-serif;display:block}#loader.failed .ld-err{pointer-events:auto;display:block}#loader.failed .ld-spin{border-top-color:#e0262f;animation:none}#loader #loader-bar,#loader #loader-label{display:none}@media (max-width:900px),(max-height:520px){#loader .ld-tip{display:none}#loader .ld-logo,#loader .ld-prog{width:clamp(170px,34vw,300px)}#loader .ld-pct{font-size:24px}}@media (orientation:portrait) and (max-width:1024px){#loader{background-position:64% 30%}#loader .ld-photo img{object-position:50% 30%}}@media (orientation:portrait) and (max-width:700px){#loader .ld-logo{left:50%;bottom:calc(var(--m) + var(--sa-b) + 110px);width:min(78vw,340px);transform:translate(-50%)}#loader .ld-prog{width:min(78vw,340px);left:50%;right:auto;transform:translate(-50%)}#loader .ld-grade{background:linear-gradient(#05050900 42%,#050509b8 70%,#050509f2 100%),radial-gradient(at 55% 35%,#0000 50%,#00000073 100%)}}#loader.leaving{pointer-events:none;transition:opacity .42s ease-in .24s}#loader.leaving .ld-prog,#loader.leaving .ld-tip,#loader.leaving .ld-rot{opacity:0;transition:opacity .16s linear}#loader.leaving:not(.flip) .ld-logo{opacity:0;transition:opacity .2s linear}#loader .ld-rot{left:50%;top:calc(env(safe-area-inset-top,0px) + 7vh);z-index:2;letter-spacing:.06em;white-space:nowrap;background:#08080cb8;border-left:3px solid #e0262f;align-items:center;gap:12px;padding:9px 16px 9px 12px;font-size:14px;font-weight:700;display:flex;position:absolute;transform:translate(-50%)}#loader .ld-rot i{border:2px solid #fff;border-radius:3px;width:22px;height:13px}@media (prefers-reduced-motion:reduce){#loader .ld-spin,#loader .ld-sweep{animation:none}#loader .ld-photo img{transition:none}}</style>
+    <script>!/[?&]world=1(&|$)/.test(location.search)&&["world2-CsePCphQ","worldData-saZ4o3-M","sightsData-BtAFTse6","roadClearance-E-NyMGW8","terrainTilesField-Coe0PjZR"].forEach(function(n){var l=document.createElement('link');l.rel='modulepreload';l.crossOrigin='';l.href='/a2/assets/'+n+'.js';document.head.appendChild(l)})</script>
+    <script>
+(function(){
+  var KEY="auth-ui-1";
+  function start(){
+    var s=document.createElement("script");
+    s.type="module";
+    s.crossOrigin="anonymous";
+    s.src="/a2/assets/game-BeTTx10f.js";
+    document.head.appendChild(s);
+  }
+  if(!window.caches||sessionStorage.getItem(KEY)==="1"){start();return;}
+  caches.keys().then(function(keys){
+    return Promise.all(keys.map(function(name){
+      return caches.open(name).then(function(cache){
+        return cache.keys().then(function(reqs){
+          var jobs=[];
+          for(var i=0;i<reqs.length;i++){
+            var u=reqs[i].url;
+            if(u.indexOf("ui-DbbtbA1E.js")!==-1||u.indexOf("tabs-D0FNxLu9.js")!==-1)jobs.push(cache.delete(reqs[i]));
+          }
+          return Promise.all(jobs);
+        });
+      });
+    }));
+  }).then(function(groups){
+    var n=0;
+    for(var i=0;i<groups.length;i++)for(var j=0;j<groups[i].length;j++)if(groups[i][j])n++;
+    if(n){sessionStorage.setItem(KEY,"1");location.reload();return;}
+    start();
+  }).catch(function(){start();});
+})();
+</script>
+    <link rel="modulepreload" crossorigin href="/a2/assets/modulepreload-polyfill-P2Xu9kJm.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/rolldown-runtime-DK3Fl9T5.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/three-DoD3b_mB.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/cities-SeKquO5K.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/preload-helper-BZ1Pz5am.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/BufferGeometryUtils-C4tkTgae.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/content-Dg0HcQUV.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/world-ByE2Kqts.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/actors-DYJabA8I.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/game-BeTTx10f.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/engine-KufKkl_U.js">
+    <link rel="stylesheet" crossorigin href="/a2/assets/game-BU7VZdwe.css">
+    <style>#loader .fl{position:absolute;left:50%;top:calc(env(safe-area-inset-top,0px) + 9vh);transform:translateX(-50%);z-index:3;width:min(720px,88vw);
+padding:14px 20px 16px;background:rgba(8,9,13,.78);border:1px solid rgba(255,255,255,.12);border-top:3px solid #c8102e;border-radius:10px;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
+font-family:"PingFang TC","Noto Sans TC","Microsoft JhengHei","Heiti TC",system-ui,sans-serif;color:#f4f1ea}
+#loader .fl-top{display:flex;align-items:center;gap:10px;font:800 12px "Avenir Next Condensed","Bahnschrift","DIN Condensed","Roboto Condensed","Arial Narrow",sans-serif;letter-spacing:.2em;color:#ff8a90;text-transform:uppercase}
+#loader .fl-top b{color:#fff;font-size:14px;letter-spacing:.14em;padding:2px 7px;border:1px solid rgba(255,255,255,.45);border-radius:3px}
+#loader .fl-top span{margin-left:auto;color:#cfcac0}
+#loader .fl-route{display:flex;align-items:center;gap:14px;margin-top:10px}
+#loader .fl-ap{min-width:4.6em}
+#loader .fl-ap.r{text-align:right}
+#loader .fl-ap b{display:block;font:800 34px/1 "Avenir Next Condensed","Bahnschrift","DIN Condensed","Roboto Condensed","Arial Narrow",sans-serif;letter-spacing:.02em}
+#loader .fl-ap small{display:block;margin-top:3px;font-size:13px;font-weight:800;color:#d8d3c8}
+#loader .fl-line{position:relative;flex:1;height:2px;background:repeating-linear-gradient(90deg,rgba(255,255,255,.55) 0 6px,transparent 6px 12px)}
+#loader .fl-line i{position:absolute;left:0;top:0;bottom:0;width:calc(var(--fp,0) * 1%);background:#fff;transition:width .6s cubic-bezier(.3,.7,.3,1)}
+#loader .fl-line em{position:absolute;top:50%;left:calc(var(--fp,0) * 1%);transform:translate(-50%,-55%);font-style:normal;font-size:24px;color:#fff;text-shadow:0 0 10px rgba(255,90,98,.8);transition:left .6s cubic-bezier(.3,.7,.3,1)}
+#loader .fl-eta{margin-top:10px;font-size:13px;color:#d8d3c8;display:flex;justify-content:space-between;gap:12px}
+#loader .fl-eta b{color:#fff}
+#loader.flight .ld-tip{display:none}
+@media (max-width:700px){#loader .fl{top:calc(env(safe-area-inset-top,0px) + 4vh);padding:10px 14px 12px}#loader .fl-ap b{font-size:26px}}</style>
+      <link rel="modulepreload" crossorigin href="/a2/assets/landing-CBz8YZpY.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/session-VDO6c6c0.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/tabs-D0FNxLu9.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/text-4JE4RLti.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/boot-D8riN3d6.js">
+    <link rel="modulepreload" crossorigin href="/a2/assets/controllers-6ab4eCgU.js">
+  <style>#about{max-width:40rem;margin:0 auto;padding:28px 20px 80px;color:#f4f1ea;font-family:PingFang TC,Noto Sans TC,Microsoft JhengHei,system-ui,sans-serif;line-height:1.7}#about h1{font-size:1.8rem;line-height:1.25;margin:0 0 12px}#about h2{font-size:1.15rem;margin:28px 0 8px}#about a{color:#ffb4b8}#about details{border-top:1px solid rgba(255,255,255,.14);padding:10px 0}#about summary{cursor:pointer;font-weight:700}</style>
+  </head>
+  <body>
+    <main id="about">
+      <h1>台北 GTA：Taipei GTA, Taipei Rush</h1>
+      <p>台北 GTA 是免下載的瀏覽器開放世界。英文搜尋名叫 Taipei GTA、Taipei Rush，繁體正式名稱是《去臺北狂飆》。不用 Steam、不用安裝檔，打開 <a href="https://taipei-gta.org/">https://taipei-gta.org/</a> 就能騎機車逛西門町、夜市和臺北101。主選單可在繁體中文和 English 之間切換。</p>
+      <p>簡體寫法「去台北狂飙」指的也是這一頁。要玩就開這個網址，不要另外下載。</p>
+      <h2>台北 GTA 怎麼玩</h2>
+      <p>等主選單出來，先點「操作說明」，再選角色。阿傑在萬華長大，騎車順；小雯在夜市長大，開車穩。開始之後人在西門町附近，跟著表哥阿明的引導走。先走路，再靠近機車或汽車按 F 上車。M 開地圖，T 開遊戲裡的手機接任務。捷運站入口可以快移。</p>
+      <p>空白鍵走路時是跳，進車後變成手煞車。F 對停著的車是上車，對正在開的車是搶車，會被通緝。雨天路面滑，煞車要早一點。便利商店的茶葉蛋 13 元可以回血。</p>
+      <h2>大家在搜的問題</h2>
+      <section id="faq">
+        <details open>
+          <summary>台北 GTA 在哪裡玩？網址是什麼？</summary>
+          <p>網址是 <a href="https://taipei-gta.org/">https://taipei-gta.org/</a>。Chrome、Safari、Edge 直接打開。搜尋「台北gta哪裡玩」「台北gta網站」都是進這一頁，不用去 Steam。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 連結是哪一個？</summary>
+          <p>能玩的連結只有 <a href="https://taipei-gta.org/">https://taipei-gta.org/</a>。PTT、Dcard、Threads 舊文若還寫著 vercel 暫存網址，請改開這個。要求下載啟動器或不明安裝檔的連結請關掉。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 要下載嗎？</summary>
+          <p>不用下載，也沒有 App。台北版 GTA 是網頁遊戲。手機用瀏覽器的「加入主畫面」，之後從圖示點開，仍然不用裝安裝包。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 和去臺北狂飆是同一個嗎？</summary>
+          <p>是同一個。台北 GTA、臺北 GTA、台北版 GTA 都是《去臺北狂飆》。英文搜 Taipei GTA 或 Taipei Rush，也是這一個網址，不是另外下載的遊戲。</p>
+        </details>
+        <details>
+          <summary>台北版 GTA 是 GTA5 嗎？</summary>
+          <p>不是 Rockstar 的 GTA5 或 GTA6，也不用買、不用登入 Rockstar。這是獨立的瀏覽器開放世界，在台北街頭騎車、開車、逛地圖。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 手機能玩嗎？</summary>
+          <p>可以，請橫放。左邊搖桿移動，推到底是衝刺；右邊滑動轉視角。上車後搖桿換成油門和煞車。直向時兩根拇指和路會擠在一起，畫面也比電腦簡單。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 很卡怎麼辦？</summary>
+          <p>3D 城市吃效能，手機和舊筆電比較容易卡。先關掉其他 App 和正在播影片的分頁，插電，用穩定的 Wi-Fi。第一次慢多半是在下載場景，不是電腦壞了；第二次會用瀏覽器快取，會快一點。還是卡就改用電腦 Chrome 或 Edge。</p>
+        </details>
+        <details>
+          <summary>黑畫面或一直停在準備中 0% 怎麼辦？</summary>
+          <p>城市是分段載入的。黑畫面先等一下，不要連按重新整理。若停在「準備中 0%」超過一陣子，強制重新整理一次。看到「部分街區未載入」時，再整理一次通常就補上。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 怎麼操作？</summary>
+          <p>電腦用 WASD 移動，滑鼠轉視角，Shift 衝刺，E 互動。機車或汽車旁邊按 F 上車。M 開地圖並設導航，T 開遊戲內手機。空白鍵走路時是跳，開車時是手煞車。完整按鍵在主選單的操作說明，可切鍵盤、手把、觸控。</p>
+        </details>
+        <details>
+          <summary>F 和空白鍵為什麼跟想的不一樣？</summary>
+          <p>F 對停著的車是上車；對正在開的車按下去是搶車，會被警察通緝。空白鍵在走路時跳躍，進車後變成手煞車。雨天路面滑，煞車要早一點。</p>
+        </details>
+        <details>
+          <summary>手把怎麼玩台北 GTA？</summary>
+          <p>瀏覽器認到手把就能用。Xbox 手把上：Y 上下車，B 衝刺，X 互動，A 是跳，開車時 A 是手煞車，R3 是鏡頭。任天堂手把的 A/B、X/Y 是反的，以主選單操作說明為準。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 攻略：第一次進遊戲做什麼？</summary>
+          <p>等主選單出來，先看操作說明，再選角色。阿傑偏機車，小雯偏開車。開始遊戲後人在西門町附近。先走路再上車，用 M 看自己在哪，用 T 接任務。先騎近的路，不要一上來衝最遠的地標。</p>
+        </details>
+        <details>
+          <summary>任務和招財貓在哪裡？</summary>
+          <p>按 T 打開遊戲內手機。任務分成主線、支線、打工、競速、文化，當下能接哪些以手機裡看到的為準。招財貓是收集要素，數量跟著你開到的版本走，收集進度在遊戲內紀錄。</p>
+        </details>
+        <details>
+          <summary>血量低了怎麼辦？茶葉蛋在哪？</summary>
+          <p>便利商店的茶葉蛋可以回血，一顆 13 元。走進店裡，到櫃檯按互動鍵購買。被撞或被打之後，就近找一家補血最快。</p>
+        </details>
+        <details>
+          <summary>捷運怎麼搭？</summary>
+          <p>按 T 打開手機裡的捷運，點車站會設導航。騎到入口，按互動鍵搭乘，就能快移到城市另一頭，不用自己騎完全程。</p>
+        </details>
+        <details>
+          <summary>闖紅燈或被警察追怎麼辦？</summary>
+          <p>紅綠燈有倒數，黃燈別硬闖。搶車、撞人、打架都會提高通緝，右上角星星是等級。不要停在小地圖的搜索範圍裡，拉開距離，鑽巷子或騎樓，等星星閃完。機車鑽縫比汽車好用。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 可以去哪些地方？</summary>
+          <p>西門町是起點。同一張地圖裡還有臺北車站、臺北101、饒河夜市、大安森林公園，以及騎樓和巷弄。按 M 點地圖就能設導航。路寬和距離是遊戲裡的，不是真實導航。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 免費嗎？要註冊嗎？進度存在哪？</summary>
+          <p>免費。不強制註冊就能開始。進度記在這台瀏覽器裡，下次打開主選單可以繼續。換電腦、換瀏覽器或清掉網站資料後，本機進度會不見。</p>
+        </details>
+        <details>
+          <summary>可以改英文嗎？有香港版嗎？</summary>
+          <p>主選單可以切繁中和英文。香港城市在 <a href="https://taipei-gta.org/hong-kong/">https://taipei-gta.org/hong-kong/</a>，主選單也能切換《香港狂飆》。</p>
+        </details>
+        <details>
+          <summary>PTT 說的台北 GTA 好玩嗎？是這個網址嗎？</summary>
+          <p>是這個站：<a href="https://taipei-gta.org/">https://taipei-gta.org/</a>。它是免費網頁開放世界，畫面和任務以你打開的這一版為準。討論串若還留舊連結，請改開本頁，不要跟著不明下載走。</p>
+        </details>
+      </section>
+      <section lang="en" id="faq-en">
+        <h2>Taipei GTA and Taipei Rush</h2>
+        <p>Taipei GTA and Taipei Rush are two names for one free browser game. Taipei Rush is the English title inside the game. The Traditional Chinese title is 去臺北狂飆. Open <a href="https://taipei-gta.org/">https://taipei-gta.org/</a> and ride a scooter through Ximending, night markets and Taipei 101. The menu switches between Traditional Chinese and English.</p>
+        <details>
+          <summary>What is Taipei GTA and Taipei Rush?</summary>
+          <p>They are the same free browser game. Taipei Rush is the English title. The Traditional Chinese title is 去臺北狂飆. Open https://taipei-gta.org/ in Chrome, Safari or Edge. No download and no Rockstar account.</p>
+        </details>
+        <details>
+          <summary>Do I need to download Taipei GTA?</summary>
+          <p>No. Taipei Rush runs in the browser. On a phone, add this site to your home screen. That still is not an app install.</p>
+        </details>
+        <details>
+          <summary>Can I play Taipei GTA on a phone?</summary>
+          <p>Yes, in landscape. Push the left stick fully to sprint, and drag on the right to look around. A computer browser is smoother if the phone stutters.</p>
+        </details>
+        <details>
+          <summary>Why is Taipei Rush lagging or stuck at 0%?</summary>
+          <p>The city streams in, so wait before you refresh. A first visit is slow because the browser is downloading the world. If it stays on Preparing 0%, force-reload once. If a phone stays laggy, switch to a computer.</p>
+        </details>
+        <details>
+          <summary>How do I control Taipei Rush?</summary>
+          <p>WASD moves, the mouse looks, F enters a vehicle, E interacts, M opens the map, T opens the in-game phone. Space jumps on foot and is the handbrake while driving. Pressing F on a moving car is a carjack and alerts the police.</p>
+        </details>
+        <details>
+          <summary>Is Taipei GTA official GTA 5?</summary>
+          <p>No. It is an independent browser open world, not a Rockstar game. The menu switches between Traditional Chinese and English. Hong Kong Rush is at https://taipei-gta.org/hong-kong/.</p>
+        </details>
+      </section>
+      <section lang="zh-Hans" id="faq-hans">
+        <h2>简体：台北 GTA、Taipei Rush</h2>
+        <p>台北 GTA、Taipei GTA、Taipei Rush 是同一款免费网页游戏。繁体正式名称是《去臺北狂飆》，简体常写成去台北狂飙。用浏览器打开 https://taipei-gta.org/ 就能骑摩托车逛西门町、夜市和台北101，不用下载。</p>
+        <details>
+          <summary>台北 GTA 网址是什么？</summary>
+          <p>网址是 https://taipei-gta.org/ 。Taipei GTA 和 Taipei Rush 是同一款游戏，繁体正式名称是《去臺北狂飆》。用浏览器打开就能玩，不用下载。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 要下载吗？</summary>
+          <p>不用下载，也没有安装包。手机可以把网页加到主屏幕，点图标打开，仍然是网页。</p>
+        </details>
+        <details>
+          <summary>手机玩台北 GTA 很卡怎么办？</summary>
+          <p>请横屏。左边摇杆推到底是冲刺。第一次慢是在下载场景。还卡就换电脑浏览器。</p>
+        </details>
+        <details>
+          <summary>台北 GTA 怎么操作？</summary>
+          <p>WASD 移动，鼠标转视角，F 上车，E 互动，M 地图，T 打开游戏里的手机。空格走路是跳，开车是手刹。对正在开的车按 F 是抢车。</p>
+        </details>
+        <details>
+          <summary>这是 GTA5 吗？可以切英文吗？</summary>
+          <p>不是 Rockstar 的 GTA5。主菜单可以在繁体中文和 English 之间切换。香港页是 https://taipei-gta.org/hong-kong/ ，英文名 Hong Kong Rush。</p>
+        </details>
+      </section>
+    </main>
+    <div id="app"></div>
+    <div id="loader" role="progressbar" aria-label="臺北狂飆 載入中" aria-valuemin="0" aria-valuemax="100">
+      <!-- key art: an in-game screenshot (quality ultra, dusk). Portrait phones / tablets get the tall crop around
+           Taipei 101; landscape up to 1024 px wide (phones) the 1600 px file whatever their DPR (sizes 50vw); desktops
+           1600 / 2560 px. Requested by the loader script once the entry scripts have run (data-* → real attributes),
+           never in competition with the JS boot; the inline blurred placeholder (#loader background) covers until then. -->
+      <picture class="ld-photo" aria-hidden="true">
+        <source media="(orientation: portrait) and (max-width: 1024px)" data-srcset="/title/loader-portrait.webp 960w" sizes="100vw" />
+        <img data-src="/title/loader-1600.webp" data-srcset="/title/loader-1600.webp 1600w, /title/loader-2560.webp 2560w" sizes="(max-width: 1024px) 50vw, 100vw" width="2560" height="1440" alt="" fetchpriority="high" decoding="async" />
+      </picture>
+      <div class="ld-grade" aria-hidden="true"></div>
+      <div class="ld-logo">
+        <svg viewBox="0 0 492 214" role="img" aria-label="臺北狂飆 去臺北狂飆">
+          <g font-family="'PingFang TC','Noto Sans TC','Microsoft JhengHei','Heiti TC',sans-serif">
+            <rect x="4" y="4" width="104" height="206" rx="3" fill="#d81f2a" stroke="#09090c" stroke-width="6"/>
+            <rect x="13.5" y="13.5" width="85" height="187" fill="none" stroke="#fff" stroke-width="2.4" opacity=".92"/>
+            <text x="56" y="95" font-size="72" font-weight="900" fill="#fff" text-anchor="middle">臺</text>
+            <text x="56" y="182" font-size="72" font-weight="900" fill="#fff" text-anchor="middle">北</text>
+            <g font-size="142" font-weight="900" stroke="#09090c" stroke-width="5" paint-order="stroke" transform="skewX(-6)">
+              <text x="146" y="141" fill="#d81f2a">狂飆</text>
+              <text x="140" y="135" fill="#fff">狂飆</text>
+            </g>
+            <rect x="126" y="160" width="232" height="46" fill="#09090c"/>
+            <text x="142" y="193" font-size="28" font-weight="800" fill="#fff" letter-spacing="7">去臺北狂飆</text>
+            <text x="370" y="179" font-size="13" font-weight="800" fill="#ff4b52" letter-spacing="3.2" font-family="'Avenir Next Condensed','Bahnschrift','DIN Condensed','Roboto Condensed','Arial Narrow',sans-serif">TAIPEI</text>
+            <text x="370" y="197" font-size="13" font-weight="800" fill="#fff" letter-spacing="3.2" font-family="'Avenir Next Condensed','Bahnschrift','DIN Condensed','Roboto Condensed','Arial Narrow',sans-serif">RUSH</text>
+          </g>
+        </svg>
+      </div>
+      <div class="ld-tip">
+        <div class="ld-tip-k" id="ld-tip-k">臺北小知識</div>
+        <div class="ld-tips" id="ld-tips"></div>
+      </div>
+      <div class="ld-prog">
+        <div class="ld-row">
+          <div class="ld-spin"></div>
+          <div class="ld-stage"><b id="ld-stage">準備中</b><small id="ld-stage-en">Preparing</small></div>
+          <div class="ld-pct" id="ld-pct">0<i>%</i></div>
+        </div>
+        <div class="ld-track"><div class="ld-fill" id="ld-fill"></div><div class="ld-sweep"></div></div>
+      </div>
+      <div class="ld-err" id="ld-err"></div>
+      <!-- sinks written by src/main.ts (read by the loader script below) -->
+      <i id="loader-bar"></i><span id="loader-label"></span>
+    </div>
+    <script>
+      /* Boot watchdog (round 6 stability, RC1). The game is one module graph (the entry + 7 modulepreloaded chunks): if
+         any request of it fails (a network blip, or the HTML of a previous deploy asking for chunks that now 404) or
+         stalls, src/main.ts never runs and the loader used to sit at 「準備中 0%」 forever, with no message. Here:
+           - a module script / modulepreload error before main.ts ran → fail at once;
+           - main.ts has not started 20 s after the page (30 s on phones / tablets) while no request finished for 15 s
+             → fail; after it started: no loading report (main.ts bumps window.__tgtaTick) and no finished request for
+             60 s (75 s on phones / tablets — the player stage alone may wait 30 s for the heroes + 10 s for the mocap
+             pack before its fallbacks) → fail. Paused while the page is hidden or waits for a tap (.failed);
+           - fail → ONE automatic cache-busting reload per 5 min (sessionStorage 'tgta-boot-retry'; main.ts clears it once
+             a load succeeds and strips ?r= from the address bar), else the error box with a Reload button (never a loop).
+             Before either reload the entry chunks are re-requested (fetch, cache: 'no-cache' — a 304 for the good ones):
+             WebKit keeps a FAILED modulepreload in its in-process memory cache and hands it to the next page (a one-off
+             503 on one chunk failed the retry too), and the re-request replaces that entry.
+         window.__tgtaLoaderError(text) shows the error box (the loader script's 「載入失敗」 path uses it too). */
+      (function () {
+        var L = document.getElementById('loader');
+        if (!L) return;
+        var EN = false;
+        try { var sv = JSON.parse(localStorage.getItem('taipei-rush-save-v1') || '{}'); EN = !!(sv && sv.settings && sv.settings.lang === 'en'); } catch (e) {}
+        var compact = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+        var RETRY = 'tgta-boot-retry';
+        var t0 = Date.now(), lastTick = t0, nRes = -1, done = false, iv = 0;
+        function retryUrl() {
+          var q = '';
+          try { var p = new URLSearchParams(location.search); p.set('r', String(Date.now())); q = '?' + p.toString(); } catch (e) { q = '?r=' + Date.now(); }
+          return location.pathname + q + location.hash;
+        }
+        function retry() {
+          var go = function () { location.replace(retryUrl()); };
+          try {
+            var urls = [].map.call(document.querySelectorAll('link[rel=modulepreload], script[type=module][src]'), function (el) { return el.href || el.src; });
+            var ps = urls.filter(function (u) { return u && u.indexOf(location.origin + '/') === 0; }).map(function (u) {
+              return fetch(u, { cache: 'no-cache', credentials: 'same-origin' }).catch(function () {});
+            });
+            Promise.race([Promise.all(ps), new Promise(function (r) { setTimeout(r, 6000); })]).then(go, go);
+          } catch (e) { go(); }
+        }
+        function showError(text) {
+          L.classList.add('failed');
+          L.setAttribute('role', 'group');
+          L.setAttribute('aria-label', EN ? 'Loading interrupted' : '載入中斷');
+          var box = document.getElementById('ld-err');
+          if (!box) return;
+          box.textContent = '';
+          var msg = document.createElement('div');
+          msg.textContent = text;
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.textContent = EN ? 'Reload' : '重新載入';
+          btn.addEventListener('click', function () {
+            try { sessionStorage.removeItem(RETRY); } catch (e) {}
+            btn.disabled = true;
+            retry();
+          });
+          box.appendChild(msg);
+          box.appendChild(btn);
+        }
+        window.__tgtaLoaderError = showError;
+        function bootFail(kind) {
+          if (done || !L.isConnected) return;
+          done = true;
+          clearInterval(iv);
+          var last = 0, canRetry = false;
+          try { last = Number(sessionStorage.getItem(RETRY)) || 0; sessionStorage.setItem(RETRY, String(Date.now())); canRetry = true; } catch (e) {}
+          console.warn('[boot] loading ' + (kind === 'module' ? 'failed (a script did not load)' : kind === 'start' ? 'never started' : 'stalled') + (canRetry && !(last && Date.now() - last < 300000) ? ' — reloading once' : ''));
+          if (canRetry && !(last && Date.now() - last < 300000)) {
+            // (a moment for the other elements' errors of this failure, then the refresh + reload)
+            setTimeout(retry, 300);
+            return;
+          }
+          showError(EN ? 'Taipei Rush could not finish loading (the network or a server file failed). Please reload.' : '臺北狂飆 無法完成載入（網路或伺服器檔案異常），請重新載入。');
+        }
+        // a failed module script / modulepreload of the entry graph (after main.ts ran, lazy chunks are core's business)
+        window.addEventListener('error', function (e) {
+          var t = e && e.target;
+          if (window.__tgtaBoot || !t || t === window || !t.tagName) return;
+          if ((t.tagName === 'SCRIPT' && t.type === 'module') || (t.tagName === 'LINK' && /modulepreload/.test(t.rel || ''))) bootFail('module');
+        }, true);
+        // finished requests count as progress (a slow network is not a stalled one)
+        try { new PerformanceObserver(function () { lastTick = Date.now(); }).observe({ type: 'resource', buffered: false }); } catch (e) {}
+        iv = setInterval(function () {
+          var now = Date.now();
+          if (!L.isConnected || L.style.opacity === '0') return clearInterval(iv);
+          if (document.hidden || L.classList.contains('failed')) { lastTick = now; return; }
+          try { var n = performance.getEntriesByType('resource').length; if (n !== nRes) { nRes = n; lastTick = now; } } catch (e) {}
+          var tick = window.__tgtaTick || 0;
+          if (tick > lastTick) lastTick = tick;
+          if (!window.__tgtaBoot) {
+            if (now - t0 > (compact ? 30000 : 20000) && now - lastTick > 15000) bootFail('start');
+          } else if (now - lastTick > (compact ? 75000 : 60000)) bootFail('stall');
+        }, 5000);
+      })();
+    </script>
+    <script>
+      /* Loader: a static key-art photo (an in-game screenshot, public/title/loader-*.webp) under a static gradient; maps
+         raw init labels to localized, monotonic, duration-weighted progress; one Taipei / controls tip in the saved
+         language. Only the progress indicator moves. */
+      (function () {
+        var L = document.getElementById('loader');
+        if (!L) return;
+        var observers = [];
+        var lang = 'zh';
+        try { var sv = JSON.parse(localStorage.getItem('taipei-rush-save-v1') || '{}'); if (sv && sv.settings && sv.settings.lang === 'en') lang = 'en'; } catch (e) {}
+        var EN = lang === 'en';
+        if (EN) document.documentElement.lang = 'en';
+
+        // ---------------------------------------------------------------- photo
+        // Requested once the entry scripts have run (DOMContentLoaded waits for the module graph): a 180–350 KB image
+        // fetched in parallel delayed main.ts by ~250 ms at 10 Mbit/s. Until it is decoded — or if it fails — the
+        // inline blurred placeholder; shown once decoded (never half-painted rows). A later source switch (rotation →
+        // the portrait crop) keeps the current picture until the new one has loaded.
+        var ph = L.querySelector('.ld-photo'), im = ph && ph.querySelector('img');
+        function reveal() { if (im && im.naturalWidth) ph.classList.add('on'); }
+        function loadPhoto() {
+          if (!im || !L.isConnected || im.getAttribute('srcset')) return;
+          var so = ph.querySelector('source');
+          if (so) so.srcset = so.getAttribute('data-srcset');
+          im.addEventListener('load', function () { if (im.decode) im.decode().then(reveal, reveal); else reveal(); });
+          im.srcset = im.getAttribute('data-srcset');
+          im.src = im.getAttribute('data-src');
+        }
+        document.addEventListener('DOMContentLoaded', loadPhoto, { once: true });
+
+        // ---------------------------------------------------------------- tip (one per load, static)
+        var TIPS = [
+          ['垃圾車播〈給愛麗絲〉的時候，全臺北都會拎著垃圾衝出門。', 'When the garbage truck plays Für Elise, all of Taipei runs outside with their trash.'],
+          ['臺北101 高 508 公尺，跨年煙火就從這裡點亮夜空。', 'Taipei 101 is 508 m tall — the New Year fireworks launch right off its sides.'],
+          ['走到機車或汽車旁按 F（手把 Y）就能騎上去；機車可以鑽車縫。', 'Press F (gamepad Y) next to a scooter or car to ride it. Scooters can filter through traffic.'],
+          ['臺北的紅綠燈有倒數秒數，黃燈別硬闖——測速照相會拍你。', "Taipei's lights count down. Don't gamble on yellow — speed cameras are watching."],
+          ['便利商店的茶葉蛋可以回血，一顆只要 13 元。', 'Tea eggs from convenience stores restore health — only NT$13.'],
+          ['按 M 打開地圖，點一下就能設定導航；按 T 打開手機接任務。', 'Press M for the map and click to set GPS. Press T to open your phone for jobs.'],
+          ['捷運站入口可以快速移動到城市另一頭。', 'MRT entrances fast-travel you across the city.'],
+          ['下雨天路面濕滑，煞車距離會變長。', 'Rain makes the roads slippery — brake earlier.'],
+          ['夜市晚上七點以後最熱鬧：雞排、臭豆腐、珍珠奶茶。', 'Night markets come alive after 7 pm: fried chicken, stinky tofu, bubble tea.'],
+          ['騎樓是臺北人的雨天走廊，走在底下不會淋濕。', 'The arcades (騎樓) are Taipei’s rain corridors — walk under them to stay dry.'],
+          ['按住 Shift（手把 B）衝刺；開車時空白鍵是手煞車。', 'Hold Shift (gamepad B) to sprint. In a vehicle, Space is the handbrake.'],
+          ['龍山寺建於 1738 年，是臺北最古老的廟宇之一。', 'Longshan Temple dates from 1738 — one of the oldest temples in Taipei.'],
+        ];
+        document.getElementById('ld-tip-k').textContent = EN ? 'Taipei tip' : '臺北小知識';
+        document.getElementById('ld-tips').textContent = TIPS[(Math.random() * TIPS.length) | 0][EN ? 1 : 0];
+
+        // ---------------------------------------------------------------- progress
+        // main.ts writes the RAW stage key into #loader-label ('streets', 'districts'… 'ready' = shader warm-up) and the
+        // progress WITHIN that stage as #loader-bar width. This loader owns the weights: each stage's share of the bar
+        // is its measured init time (M-class laptop, high, round 4: districts ≈ 1.4 s now that it reports per pack, the
+        // shader compile + warm frames ≈ 1.1 s), so the bar moves at an even speed. A localized label (older main.ts)
+        // is mapped back through LABEL_KEY; an unknown key keeps the bar where it is (monotonic).
+        var ORDER = ['audio', 'environment', 'streets', 'buildings', 'landmarks', 'districts', 'culture', 'transit', 'player',
+          'vehicles', 'traffic', 'peds', 'police', 'missions', 'camera', 'ui', 'ready'];
+        var WEIGHT = {
+          audio: 0.3, environment: 3.8, streets: 5.2, buildings: 5.2, landmarks: 2.2, districts: 13.5, culture: 1.5, transit: 0.7,
+          player: 0.5, vehicles: 1.3, traffic: 0.3, peds: 1.1, police: 1, missions: 0.4, camera: 0.1, ui: 0.5, ready: 11,
+        };
+        var BASE = {}, TOTAL = 0;
+        ORDER.forEach(function (k) { BASE[k] = TOTAL; TOTAL += WEIGHT[k]; });
+        /** global 0..1 for (stage key, progress within it); NaN for an unknown key */
+        function globalOf(key, local) {
+          if (!(key in BASE)) return NaN;
+          return (BASE[key] + WEIGHT[key] * Math.max(0, Math.min(1, local || 0))) / TOTAL;
+        }
+        var STAGES = {
+          loading: ['載入中', 'Loading'], audio: ['調校聲音', 'Tuning the soundscape'], environment: ['天空、山與河', 'Sky, hills & rivers'],
+          streets: ['鋪設街道', 'Laying the streets'], buildings: ['蓋起公寓與騎樓', 'Walk-ups & arcades'], landmarks: ['臺北101與地標', 'Taipei 101 & landmarks'],
+          districts: ['街區與巷弄', 'Neighbourhoods & alleys'], culture: ['夜市與廟宇', 'Night markets & temples'], transit: ['捷運路網', 'MRT network'],
+          player: ['主角', 'Protagonists'], vehicles: ['機車與汽車', 'Scooters & cars'], traffic: ['車流', 'Traffic'], peds: ['行人', 'Pedestrians'],
+          police: ['警察', 'Police'], missions: ['任務', 'Missions'], camera: ['攝影機', 'Camera'], ui: ['介面', 'Interface'],
+          shaders: ['點亮霓虹', 'Lighting the neon'], ready: ['去臺北狂飆！', "Let's ride!"],
+        };
+        var LABEL_KEY = {
+          '載入中…': 'loading', 'Loading…': 'loading', '調音中': 'audio', 'Tuning the radio': 'audio', '天空與天氣': 'environment', 'Sky & weather': 'environment',
+          '鋪設街道': 'streets', 'Paving the streets': 'streets', '蓋起街屋與騎樓': 'buildings', 'Raising the blocks': 'buildings',
+          '臺北101與地標': 'landmarks', '台北101與地標': 'landmarks', 'Taipei 101 & landmarks': 'landmarks', '街區細節': 'districts', 'Neighbourhood details': 'districts',
+          '夜市與廟宇': 'culture', 'Night markets & temples': 'culture', '捷運': 'transit', 'MRT': 'transit', '主角': 'player', 'Protagonist': 'player',
+          '機車與汽車': 'vehicles', 'Scooters & cars': 'vehicles', '車流': 'traffic', 'Traffic': 'traffic', '行人': 'peds', 'Pedestrians': 'peds',
+          '警察': 'police', 'Police': 'police', '任務': 'missions', 'Missions': 'missions', '攝影機': 'camera', 'Camera': 'camera', '介面': 'ui', 'Interface': 'ui',
+          '點亮霓虹': 'shaders', 'Lighting the neon': 'shaders', '去臺北狂飆！': 'ready', "Let's ride!": 'ready',
+        };
+        var shownP = 0, curStage = '';
+        var fill = document.getElementById('ld-fill'), pct = document.getElementById('ld-pct');
+        var stZh = document.getElementById('ld-stage'), stEn = document.getElementById('ld-stage-en');
+        function setStageText(key, raw) {
+          var s = STAGES[key];
+          // unknown key (a new module): show what main.ts wrote rather than freezing on the previous stage
+          stZh.textContent = s ? s[EN ? 1 : 0] : raw || (EN ? 'Loading' : '載入中');
+          stEn.textContent = s ? s[EN ? 0 : 1] : '';
+        }
+        function show(p) {
+          p = Math.max(shownP, Math.min(1, p));
+          shownP = p;
+          fill.style.transform = 'scaleX(' + p.toFixed(4) + ')';
+          var n = Math.floor(p * 100);
+          pct.firstChild.nodeValue = String(n);
+          L.setAttribute('aria-valuenow', String(n));
+          L.classList.add('has-pct');
+        }
+        function onLoading(raw, f) {
+          if (/^載入失敗|Failed/.test(raw)) {
+            var detail = raw.replace(/^(?:載入失敗：?|Failed to load:\s*)/i, '');
+            var text = EN ? 'Taipei Rush failed to load. Please reload. (' + detail + ')' : '臺北狂飆 載入失敗，請重新載入。（' + detail + '）';
+            // the boot watchdog's error box (with a Reload button); plain text if that script is missing
+            if (window.__tgtaLoaderError) window.__tgtaLoaderError(text);
+            else { L.classList.add('failed'); document.getElementById('ld-err').textContent = text; }
+            return;
+          }
+          var key = lab.getAttribute('data-key') || LABEL_KEY[raw] || String(raw).split(':')[0].trim();
+          if (key === 'shaders') key = 'ready';
+          if (key !== curStage) {
+            curStage = key;
+            setStageText(key, raw);
+          }
+          var g = globalOf(key, f);
+          if (isFinite(g)) show(g);
+        }
+        // main.ts writes the stage key (or a localized label + data-key) and the in-stage width % into these sinks
+        var bar = document.getElementById('loader-bar'), lab = document.getElementById('loader-label');
+        var lastRaw = '', lastW = '';
+        function poll() {
+          var raw = (lab.textContent || '').trim(), w = bar.style.width || '';
+          var k = raw + '|' + (lab.getAttribute('data-key') || '');
+          if (k === lastRaw && w === lastW) return;
+          lastRaw = k; lastW = w;
+          onLoading(raw, w ? parseFloat(w) / 100 : NaN);
+        }
+        // leaving: the progress UI fades first, the brand mark glides into the title logo (FLIP), then the art
+        function leave() {
+          if (L.classList.contains('leaving')) return;
+          setStageText('ready'); show(1);
+          L.classList.add('leaving');
+          var logo = L.querySelector('.ld-logo'), to = document.querySelector('.ti.show .ti-logo-svg');
+          if (!logo || !to) return;
+          var a = logo.getBoundingClientRect(), b = to.getBoundingClientRect();
+          if (!a.width || !b.width) return;
+          var s = b.width / a.width, ex = 0, ey = 0;
+          try { var cm = new DOMMatrix(getComputedStyle(logo).transform); ex = cm.e; ey = cm.f; } catch (e) {}
+          a = { left: a.left - ex, top: a.top - ey };
+          logo.style.transformOrigin = '0 0';
+          logo.style.transition = 'transform .5s cubic-bezier(.5,0,.2,1), opacity .25s linear .42s';
+          logo.style.transform = 'translate3d(' + (b.left - a.left).toFixed(1) + 'px,' + (b.top - a.top).toFixed(1) + 'px,0) scale(' + s.toFixed(4) + ')';
+          logo.style.opacity = '0';
+          L.classList.add('flip');
+        }
+        if (window.MutationObserver) {
+          var labelObserver = new MutationObserver(poll);
+          labelObserver.observe(lab, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['data-key'] });
+          var barObserver = new MutationObserver(poll);
+          barObserver.observe(bar, { attributes: true, attributeFilter: ['style'] });
+          var loaderObserver = new MutationObserver(function () {
+            if (L.style.opacity === '0') leave();
+          });
+          loaderObserver.observe(L, { attributes: true, attributeFilter: ['style'] });
+          observers.push(labelObserver, barObserver, loaderObserver);
+        }
+        setStageText('loading');
+        stZh.textContent = EN ? 'Preparing' : '準備中'; stEn.textContent = EN ? '準備中' : 'Preparing';
+        // portrait phones: the game is landscape — say so early, while it loads
+        try {
+          if (matchMedia('(orientation: portrait) and (max-width: 700px)').matches) {
+            var rot = document.createElement('div'); rot.className = 'ld-rot';
+            rot.innerHTML = '<i></i><span>' + (EN ? 'Turn your phone sideways for the best view' : '橫放手機體驗更佳') + '</span>';
+            L.appendChild(rot);
+          }
+        } catch (e) {}
+
+        // main.ts, right before it removes the loader: drop the observers and the decoded photo
+        L.addEventListener('loader:dispose', function () {
+          observers.forEach(function (o) { o.disconnect(); });
+          if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+        }, { once: true });
+      })();
+    </script>
+    <!-- (unk part of the boot) -->
+    <script>(function(){try{var L=document.getElementById('loader');if(!L)return;
+var rec=JSON.parse(localStorage.getItem("gta-travel-v1")||'null'),t=rec&&rec.ticket;
+if(!t||t.to!=="taipei"||!t.from)return;
+var C={"taipei":{"zh":"臺北","en":"Taipei","code":"TSA"},"hong-kong":{"zh":"香港","en":"Hong Kong","code":"HKG"}},a=C[t.from],b=C[t.to];if(!a||!b)return;var en=t.lang==='en';
+function hm(m){m=((Math.round(m)%1440)+1440)%1440;return(m<600?'0':'')+Math.floor(m/60)+':'+(m%60<10?'0':'')+m%60;}
+var eta=hm((t.depMin||0)+(t.hours||2)*60);
+L.classList.add('flight');
+var d=document.createElement('div');d.className='fl';d.setAttribute('aria-hidden','true');
+d.innerHTML='<div class="fl-top"><b>'+String(t.flight||'').replace(/[<>&]/g,'')+'</b>'+(en?'RUSH AIR':'狂飆航空 RUSH AIR')+'<span class="fl-st">'+(en?'In flight':'飛行中 · In flight')+'</span></div>'
++'<div class="fl-route"><div class="fl-ap"><b>'+a.code+'</b><small>'+(en?a.en:a.zh)+'</small></div><div class="fl-line"><i></i><em>✈</em></div><div class="fl-ap r"><b>'+b.code+'</b><small>'+(en?b.en:b.zh)+'</small></div></div>'
++'<div class="fl-eta"><span>'+(en?'Arriving':'預計抵達')+' <b>'+eta+'</b> '+(en?'local time':'當地時間')+'</span><span>'+(en?'Welcome to ':'歡迎來到')+(en?b.en:b.zh)+'</span></div>';
+L.appendChild(d);
+var pct=document.getElementById('ld-pct'),st=d.querySelector('.fl-st'),last=-1;
+function upd(){var n=pct?parseInt(pct.textContent,10)||0:0;n=Math.max(4,Math.min(100,n));if(n===last)return;last=n;d.style.setProperty('--fp',String(n));
+if(n>=96&&st)st.textContent=en?'Landing':'即將降落 · Landing';}
+upd();if(window.MutationObserver&&pct){var o=new MutationObserver(upd);o.observe(pct,{childList:true,characterData:true,subtree:true});
+L.addEventListener('loader:dispose',function(){o.disconnect();},{once:true});}
+}catch(e){}})();</script>
+    <script>(function(){try{var box=document.getElementById('ld-err');if(!box||!window.MutationObserver)return;
+var rec=null;try{rec=JSON.parse(localStorage.getItem("gta-travel-v1")||'null');}catch(e){}
+var t=rec&&rec.ticket,fl=!!(t&&t.to==="taipei"&&t.from==="hong-kong");
+if(!fl)return;
+function add(){if(!box.firstChild||box.querySelector('.ld-city'))return;
+var r=box.querySelector('button'),en=r?r.textContent==='Reload':!!(t&&t.lang==='en');
+var b=document.createElement('button');b.type='button';b.className='ld-city';b.style.background='transparent';
+b.textContent=fl?(en?"Cancel the flight · back to Hong Kong":"取消航班 · 返回香港"):(en?"Go to Hong Kong Rush":"前往《香港狂飆》");
+b.addEventListener('click',function(){b.disabled=true;location.replace("/hong-kong/?region=hong-kong");});
+box.appendChild(b);}
+new MutationObserver(add).observe(box,{childList:true});add();
+}catch(e){}})();</script>
+  </body>
+</html>
