@@ -50,6 +50,17 @@ export class Traffic {
     }
   }
 
+  dispose() {
+    for (const v of this.vehicles) {
+      this.scene.remove(v.group);
+      v.group.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose());
+      });
+    }
+    this.vehicles = [];
+  }
+
   _laneOffset(edge, lane) {
     return edge.median / 2 + 1.7 + lane * 3.4;
   }

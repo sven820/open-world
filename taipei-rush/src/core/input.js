@@ -5,9 +5,13 @@ export class Input {
     this.pressedSet = new Set();
     this.mouseDX = 0;
     this.mouseDY = 0;
+    this.panDX = 0;
+    this.panDY = 0;
     this.wheelDX = 0;
     this.wheelDY = 0;
     this.locked = false;
+    this.dragLook = false;   // true while a mouse button is held → drag-to-look
+    this._dragBtn = -1;
     this.onLockChange = null;
     this._onKeyDown = (e) => {
       if (e.repeat) return;
@@ -26,9 +30,31 @@ export class Input {
       if (ch >= "A" && ch <= "Z") this.downKeys.delete("Key" + ch);
     };
     this._onMouseMove = (e) => {
+      const mx = e.movementX || 0, my = e.movementY || 0;
       if (this.locked) {
-        this.mouseDX += e.movementX || 0;
-        this.mouseDY += e.movementY || 0;
+        // pointer-locked free look → rotate
+        this.mouseDX += mx; this.mouseDY += my;
+      } else if (this.dragLook) {
+        if (this._dragBtn === 2) {
+          // right button drag → rotate the view
+          this.mouseDX += mx; this.mouseDY += my;
+        } else {
+          // left button drag → pan / move the map view
+          this.panDX += mx; this.panDY += my;
+        }
+      }
+    };
+    this._onMouseDown = (e) => {
+      // left (0) or right (2) button held → drag to look around the world
+      if (e.button === 0 || e.button === 2) {
+        this.dragLook = true;
+        this._dragBtn = e.button;
+      }
+    };
+    this._onMouseUp = (e) => {
+      if (e.button === this._dragBtn) {
+        this.dragLook = false;
+        this._dragBtn = -1;
       }
     };
     this._onWheel = (e) => {
@@ -44,7 +70,10 @@ export class Input {
     window.addEventListener("keydown", this._onKeyDown);
     window.addEventListener("keyup", this._onKeyUp);
     window.addEventListener("mousemove", this._onMouseMove);
+    window.addEventListener("mousedown", this._onMouseDown);
+    window.addEventListener("mouseup", this._onMouseUp);
     window.addEventListener("wheel", this._onWheel, { passive: false });
+    window.addEventListener("contextmenu", (e) => e.preventDefault());
     document.addEventListener("pointerlockchange", this._onLock);
   }
 
@@ -58,5 +87,7 @@ export class Input {
     this.pressedSet.clear();
     this.wheelDX = 0;
     this.wheelDY = 0;
+    this.panDX = 0;
+    this.panDY = 0;
   }
 }

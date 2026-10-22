@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { LANDMARKS } from "../data/cityData.js";
+import { activeLandmarks } from "../data/cityData.js";
 
 function box(w, h, d, x, y, z, mat) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
@@ -29,7 +29,7 @@ export function buildLandmarks(scene, city) {
   scene.add(group);
   city.landmarks = [];
 
-  for (const l of LANDMARKS) {
+  for (const l of activeLandmarks()) {
     const g = new THREE.Group();
     g.position.set(l.x, 0, l.z);
     g.rotation.y = l.rot;

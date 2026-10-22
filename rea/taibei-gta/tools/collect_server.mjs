@@ -1,8 +1,10 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const OUT = process.argv[2] || path.resolve("target_data");
+// 默认输出到本脚本同级目录树中的 target_data/（不依赖运行时 CWD）
+const OUT = process.argv[2] || path.resolve(fileURLToPath(new URL("../target_data", import.meta.url)));
 fs.mkdirSync(OUT, { recursive: true });
 
 const server = http.createServer((req, res) => {

@@ -33,6 +33,7 @@ function sampleLoop(loop, s) {
 
 export class PedestrianCrowd {
   constructor(scene, city, count = 230) {
+    this.scene = scene;
     this.city = city;
     this.count = count;
     this.peds = [];
@@ -98,6 +99,17 @@ export class PedestrianCrowd {
 
     this._base = new THREE.Vector3();
     this._updateRigMatrices(0);
+  }
+
+  dispose() {
+    for (const name of Object.keys(this.meshes)) {
+      const m = this.meshes[name];
+      this.scene.remove(m);
+      m.geometry.dispose();
+      if (m.material) (Array.isArray(m.material) ? m.material : [m.material]).forEach((mm) => mm.dispose());
+    }
+    this.meshes = {};
+    this.peds = [];
   }
 
   _pose(p) {

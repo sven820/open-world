@@ -1,11 +1,12 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import {
-  ROADS_X, ROADS_Z, asphaltHalf, corridorHalf, LANE_W, LANDMARKS,
-  districtAt, SHOP_NAMES, SIGN_COLORS,
+  asphaltHalf, corridorHalf, LANE_W, districtAt,
+  setMapData, activeRoadsX, activeRoadsZ, activeLandmarks,
+  EXT_STEP_X, EXT_STEP_Z, mapBounds,
 } from "../data/cityData.js";
 import {
-  Batch, applyColor, scaleUV, boxAt, wallQuad, roofQuad, planeAt, signQuad, cylAt, icoAt,
+  Batch, ChunkedBatch, applyColor, scaleUV, boxAt, wallQuad, roofQuad, planeAt, signQuad, cylAt, icoAt,
 } from "./batch.js";
 import {
   makeFacades, makeStorefronts, makeSignAtlas, signTileRect,
@@ -71,10 +72,33 @@ class ColliderGrid {
     }
     return p;
   }
+  // point-vs-building test (used for third-person camera collision)
+  blocked(x, z, r) {
+    const c = this.cell;
+    const i0 = Math.floor((x - r) / c), i1 = Math.floor((x + r) / c);
+    const j0 = Math.floor((z - r) / c), j1 = Math.floor((z + r) / c);
+    const seen = new Set();
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const arr = this.map.get(this.key(i, j));
+      if (!arr) continue;
+      for (const b of arr) {
+        if (seen.has(b)) continue; seen.add(b);
+        const [x0, z0, x1, z1] = b;
+        if (x > x0 && x < x1 && z > z0 && z < z1) return true;
+        const nx = Math.max(x0, Math.min(x, x1));
+        const nz = Math.max(z0, Math.min(z, z1));
+        const dx = x - nx, dz = z - nz;
+        if (dx * dx + dz * dz < r * r) return true;
+      }
+    }
+    return false;
+  }
 }
 
 export class City {
-  constructor(scene) {
+  // data: 用户自定义地图数据（roadsX/roadsZ/districts/landmarks/spawn）；null = 默认台北
+  constructor(scene, data = null) {
+    setMapData(data);
     this.scene = scene;
     this.group = new THREE.Group();
     scene.add(this.group);
@@ -86,24 +110,30 @@ export class City {
     this.outgoing = new Map();
     this.trafficHeads = [];
     this.blocks = [];
-    this.bounds = { minX: -470, maxX: 860, minZ: -340, maxZ: 320 };
+    // ~3 km^2 world, centred on the authored downtown (195, -10):
+    // width 2534 (X) x depth 1184 (Z) ≈ 3.0 km^2. Road grid is filled out
+    // to these bounds in _buildRoads().
+    // 用户地图：世界边界按其路网范围推导（四周留出延伸缓冲）
+    this.bounds = data
+      ? mapBounds(data.roadsX, data.roadsZ)
+      : { minX: -1072, maxX: 1462, minZ: -602, maxZ: 582 };
 
     this.materials = {};
     this.facades = makeFacades();
     this.storefronts = makeStorefronts();
     this.signAtlas = makeSignAtlas();
 
-    this.facadeBatches = this.facades.map(() => new Batch());
-    this.storefrontBatches = this.storefronts.map(() => new Batch());
-    this.roofBatch = new Batch();
-    this.signBatch = new Batch();
-    this.awningBatch = new Batch();
-    this.propBatch = new Batch();      // vertex-coloured misc (tanks, poles, hedges, trees)
-    this.markWhite = new Batch();
-    this.markYellow = new Batch();
-    this.platformBatch = new Batch();
-    this.lampGlassBatch = new Batch();
-    this.treeBatch = new Batch();
+    this.facadeBatches = this.facades.map(() => new ChunkedBatch(220));
+    this.storefrontBatches = this.storefronts.map(() => new ChunkedBatch(220));
+    this.roofBatch = new ChunkedBatch(220);
+    this.signBatch = new ChunkedBatch(220);
+    this.awningBatch = new ChunkedBatch(220);
+    this.propBatch = new ChunkedBatch(220);      // vertex-coloured misc (tanks, poles, hedges, trees)
+    this.markWhite = new ChunkedBatch(220);
+    this.markYellow = new ChunkedBatch(220);
+    this.platformBatch = new ChunkedBatch(220);
+    this.lampGlassBatch = new ChunkedBatch(220);
+    this.treeBatch = new ChunkedBatch(220);
 
     this.ready = this._init();
   }
@@ -149,8 +179,20 @@ export class City {
 
   /* ---------------- road markings + medians ---------------- */
   _buildRoads() {
-    const xs = ROADS_X.slice().sort((a, b) => a.at - b.at);
-    const zs = ROADS_Z.slice().sort((a, b) => a.at - b.at);
+    const xs = activeRoadsX().slice().sort((a, b) => a.at - b.at);
+    const zs = activeRoadsZ().slice().sort((a, b) => a.at - b.at);
+
+    // Expand the road grid outward to fill the world bounds. The authored
+    // downtown roads stay exactly as-is; ordinary "street" roads are appended
+    // on each side so the procedural city scales to the configured map size.
+    const GX = EXT_STEP_X, GZ = EXT_STEP_Z, b = this.bounds;
+    let n = 0;
+    const ext = (at) => ({ id: "ext" + (n++), at, kind: "street", lanes: 1, median: 0, sidewalk: 3 });
+    while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + GX));
+    while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - GX));
+    while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + GZ));
+    while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - GZ));
+
     this.roadsX = xs; this.roadsZ = zs;
 
     // intersections
@@ -352,7 +394,7 @@ export class City {
   async _buildBlocksChunked() {
     const xs = this.roadsX, zs = this.roadsZ;
     const R_BY_TYPE = { taipei101: 42, tower: 28, cks: 68, station: 74, temple: 24, mrt: 11, gate: 12, redhouse: 13 };
-    const landRects = LANDMARKS.map((l) => {
+    const landRects = activeLandmarks().map((l) => {
       const r = R_BY_TYPE[l.type] ?? 18;
       return { x0: l.x - r, x1: l.x + r, z0: l.z - r, z1: l.z + r };
     });
@@ -402,8 +444,24 @@ export class City {
     }
   }
 
-  _rectLoop(x0, x1, z0, z1) {
-    const pts = [
+  // 距 (x, z) 最近的马路可行走点（出生点落在建筑内时的兜底吸附）
+  nearestRoadPoint(x, z) {
+    let best = null, bd = Infinity;
+    for (const r of this.roadsX) {
+      const d = Math.abs(x - r.at);
+      if (d < bd) { bd = d; best = { x: r.at, z }; }
+    }
+    for (const r of this.roadsZ) {
+      const d = Math.abs(z - r.at);
+      if (d < bd) { bd = d; best = { x, z: r.at }; }
+    }
+    if (!best) return null;
+    const p = { x: best.x, z: best.z };
+    this.colliders.resolve(p, 1.2);
+    return p;
+  }
+
+  _rectLoop(x0, x1, z0, z1) {    const pts = [
       { x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 },
     ];
     let total = 0;
@@ -816,8 +874,7 @@ export class City {
     }));
     this.facadeMaterials = facadeMats;
     this.facadeBatches.forEach((b, i) => {
-      const mesh = b.build(facadeMats[i], { castShadow: true, receiveShadow: true });
-      if (mesh) this.group.add(mesh);
+      for (const mesh of b.build(facadeMats[i], { castShadow: true, receiveShadow: true })) this.group.add(mesh);
     });
 
     const sfMats = this.storefronts.map((s) => new THREE.MeshStandardMaterial({
@@ -830,15 +887,13 @@ export class City {
     }));
     this.storefrontMaterials = sfMats;
     this.storefrontBatches.forEach((b, i) => {
-      const mesh = b.build(sfMats[i], { castShadow: false, receiveShadow: true });
-      if (mesh) this.group.add(mesh);
+      for (const mesh of b.build(sfMats[i], { castShadow: false, receiveShadow: true })) this.group.add(mesh);
     });
 
     const roofMat = new THREE.MeshStandardMaterial({ map: makeRoofTexture(), color: 0x9a968e, roughness: 0.92 });
     roofMat.map.repeat.set(1, 1);
     this.materials.roof = roofMat;
-    const roof = this.roofBatch.build(roofMat, { receiveShadow: true });
-    if (roof) this.group.add(roof);
+    for (const roof of this.roofBatch.build(roofMat, { receiveShadow: true })) this.group.add(roof);
 
     const signMat = new THREE.MeshStandardMaterial({
       map: this.signAtlas,
@@ -856,36 +911,28 @@ export class City {
       polygonOffsetUnits: -2,
     });
     this.signMaterial = signMat;
-    const signs = this.signBatch.build(signMat, { castShadow: false, receiveShadow: false });
-    if (signs) this.group.add(signs);
+    for (const signs of this.signBatch.build(signMat, { castShadow: false, receiveShadow: false })) this.group.add(signs);
 
     const awnMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.0 });
-    const awn = this.awningBatch.build(awnMat, { castShadow: true, receiveShadow: true });
-    if (awn) this.group.add(awn);
+    for (const awn of this.awningBatch.build(awnMat, { castShadow: true, receiveShadow: true })) this.group.add(awn);
 
     const propMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.05 });
-    const props = this.propBatch.build(propMat, { castShadow: true, receiveShadow: true });
-    if (props) this.group.add(props);
+    for (const props of this.propBatch.build(propMat, { castShadow: true, receiveShadow: true })) this.group.add(props);
 
     const treeMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0.0 });
-    const trees = this.treeBatch.build(treeMat, { castShadow: true, receiveShadow: true });
-    if (trees) this.group.add(trees);
+    for (const trees of this.treeBatch.build(treeMat, { castShadow: true, receiveShadow: true })) this.group.add(trees);
 
     const platMat = new THREE.MeshStandardMaterial({ map: makeSidewalkTexture(), color: 0xffffff, roughness: 0.92, metalness: 0.0 });
     this.materials.platform = platMat;
-    const plat = this.platformBatch.build(platMat, { castShadow: false, receiveShadow: true });
-    if (plat) this.group.add(plat);
+    for (const plat of this.platformBatch.build(platMat, { castShadow: false, receiveShadow: true })) this.group.add(plat);
 
     const whiteMat = new THREE.MeshBasicMaterial({ color: 0xe8e8e2, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
-    const white = this.markWhite.build(whiteMat, { castShadow: false, receiveShadow: false });
-    if (white) this.group.add(white);
+    for (const white of this.markWhite.build(whiteMat, { castShadow: false, receiveShadow: false })) this.group.add(white);
     const yellowMat = new THREE.MeshBasicMaterial({ color: 0xd8a524, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
-    const yellow = this.markYellow.build(yellowMat, { castShadow: false, receiveShadow: false });
-    if (yellow) this.group.add(yellow);
+    for (const yellow of this.markYellow.build(yellowMat, { castShadow: false, receiveShadow: false })) this.group.add(yellow);
 
     this.lampMat = new THREE.MeshBasicMaterial({ color: 0x6a6458, toneMapped: false });
-    const lamp = this.lampGlassBatch.build(this.lampMat, { castShadow: false, receiveShadow: false });
-    if (lamp) this.group.add(lamp);
+    for (const lamp of this.lampGlassBatch.build(this.lampMat, { castShadow: false, receiveShadow: false })) this.group.add(lamp);
   }
 
   nearestEdge(x, z) {

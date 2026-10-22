@@ -31,6 +31,21 @@ export const ROADS_Z = [
 
 export const LANE_W = 3.4;
 
+// 自动延伸街道的间距（世界边缘的程序化路网填充）
+export const EXT_STEP_X = 110;
+export const EXT_STEP_Z = 100;
+
+// 用户地图的世界边界：按路网范围四周延伸缓冲推导
+export function mapBounds(roadsX, roadsZ) {
+  const xs = roadsX.map((r) => r.at);
+  const zs = roadsZ.map((r) => r.at);
+  const MX = 650, MZ = 300;
+  return {
+    minX: Math.min(...xs) - MX, maxX: Math.max(...xs) + MX,
+    minZ: Math.min(...zs) - MZ, maxZ: Math.max(...zs) + MZ,
+  };
+}
+
 export function asphaltHalf(road) {
   return road.lanes * LANE_W + road.median / 2;
 }
@@ -52,8 +67,9 @@ export const DISTRICTS = [
 ];
 
 export function districtAt(x, z) {
+  const districts = activeDistricts();
   let best = null;
-  for (const d of DISTRICTS) {
+  for (const d of districts) {
     if (x >= d.minX && x <= d.maxX && z >= d.minZ && z <= d.maxZ) {
       const area = (d.maxX - d.minX) * (d.maxZ - d.minZ);
       if (!best || area < best._area) { best = d; best._area = area; }
@@ -76,7 +92,17 @@ export const LANDMARKS = [
   { id: "northgate", type: "gate", x: -104, z: -292, rot: 0 },
 ];
 
-export const SPAWN = { x: -160, z: -46, heading: Math.PI * 0.5 };
+// ---- Active map override ----
+// 选中用户地图时 setMapData() 换入整套数据；未设置时全部回退到默认台北。
+let OVERRIDE = null;
+export function setMapData(d) { OVERRIDE = d || null; }
+export function activeRoadsX() { return (OVERRIDE && OVERRIDE.roadsX) || ROADS_X; }
+export function activeRoadsZ() { return (OVERRIDE && OVERRIDE.roadsZ) || ROADS_Z; }
+export function activeDistricts() { return (OVERRIDE && OVERRIDE.districts) || DISTRICTS; }
+export function activeLandmarks() { return (OVERRIDE && OVERRIDE.landmarks) || LANDMARKS; }
+export function activeSpawn() { return (OVERRIDE && OVERRIDE.spawn) || SPAWN; }
+
+export const SPAWN = { x: -160, z: -24, heading: -Math.PI / 2 };
 
 export const SHOP_NAMES = [
   "球鞋王", "街头潮牌", "阿宗面线", "豪大大鸡排", "珍珠奶茶", "五十岚", "茶汤会",

@@ -59,7 +59,7 @@
 
     <div class="hud-bc">
       <div class="prompt hidden" id="hud-prompt"><kbd>F</kbd><span>上车</span></div>
-      <div class="tip" id="hud-tip">WASD 移动 · 鼠标转视角 · Shift 奔跑 · Space 跳跃 · F 上车 · M 地图</div>
+      <div class="tip" id="hud-tip">WASD 移动 · 左键拖动移动视角 · 右键拖动旋转视角 · 滚轮缩放 · Shift 奔跑 · Space 跳跃 · F 上车 · M 地图</div>
     </div>
 
     <div class="hud-br">
@@ -84,11 +84,14 @@
       <button class="btn primary" id="btn-start">开始游戏 <span>START</span></button>
       <div class="menu-row">
         <button class="btn" id="btn-character">选择角色 <span>CHARACTER</span></button>
-        <button class="btn" id="btn-settings">设置 <span>SETTINGS</span></button>
+        <button class="btn" id="btn-map"><span class="btn-main">选择地图 <em id="btn-map-name"></em></span><span>MAP</span></button>
       </div>
+      <button class="btn" id="btn-settings">设置 <span>SETTINGS</span></button>
       <div class="menu-controls">
         <div><kbd>W A S D</kbd> 移动</div>
-        <div><kbd>鼠标</kbd> 视角</div>
+        <div><kbd>左键</kbd> 拖动移动视角</div>
+        <div><kbd>右键</kbd> 拖动旋转视角</div>
+        <div><kbd>滚轮</kbd> 缩放视角</div>
         <div><kbd>Shift</kbd> 奔跑</div>
         <div><kbd>Space</kbd> 跳跃</div>
         <div><kbd>F</kbd> 上车 / 下车</div>
@@ -99,12 +102,59 @@
   </div>
 
   <div id="bigmap" class="hidden">
-    <div class="bm-head"><h3>大台北 <small>GREATER TAIPEI</small></h3><span id="bm-close">✕</span></div>
+    <div class="bm-head">
+      <h3>大台北 <small>GREATER TAIPEI</small></h3>
+      <div class="bm-actions">
+        <button class="bm-btn" id="bm-home">回到主菜单 <span>MENU</span></button>
+        <span id="bm-close">✕</span>
+      </div>
+    </div>
     <canvas id="bigmap-canvas" width="1100" height="620"></canvas>
-    <div class="bm-foot"><span>WASD 移动地图 · 滚轮缩放</span><span id="bm-pos">—</span></div>
+    <div class="bm-foot"><span>左键拖动平移 · 右键拖动旋转视角 · 滚轮缩放 · WASD 平移 · M 关闭</span><span id="bm-pos">—</span></div>
   </div>
 
-  <div id="click-to-play" class="hidden"><div><kbd>点击画面</kbd> 以控制视角</div></div>
+  <div id="map-select" class="hidden">
+    <div class="ms-panel">
+      <div class="ms-head">
+        <h3>选择地图 <small>SELECT MAP</small></h3>
+        <span id="ms-close">✕</span>
+      </div>
+      <div class="ms-list" id="ms-list"></div>
+      <div class="ms-actions">
+        <input id="ms-name" placeholder="新地图名称…" maxlength="16" />
+        <button id="ms-new">＋ 新增地图 <span>NEW</span></button>
+      </div>
+      <p class="ms-note">默认地图为程序化台北。新增或编辑副本将打开地图编辑器，保存后可随时进入，之后仍可继续编辑保存。</p>
+    </div>
+  </div>
+
+  <div id="map-editor" class="hidden">
+    <div class="me-head">
+      <div class="me-title"><h3>地图编辑器 <small>MAP EDITOR</small></h3></div>
+      <div class="me-namebox"><label>名称</label><input id="me-name" maxlength="16" /></div>
+      <div class="me-actions">
+        <button class="bm-btn" id="me-save">保存 <span>SAVE</span></button>
+        <button class="bm-btn me-play" id="me-play">保存并游玩 <span>PLAY</span></button>
+        <button class="bm-btn" id="me-exit">关闭 <span>EXIT</span></button>
+      </div>
+    </div>
+    <div class="me-body">
+      <div class="me-tools">
+        <button class="me-tool active" data-tool="select">◇<span>选择</span></button>
+        <button class="me-tool" data-tool="roadX">│<span>纵路</span></button>
+        <button class="me-tool" data-tool="roadZ">─<span>横路</span></button>
+        <button class="me-tool" data-tool="landmark">▲<span>地标</span></button>
+        <select id="me-lm-type" title="地标类型"></select>
+        <button class="me-tool" data-tool="spawn">⚑<span>出生点</span></button>
+        <button class="me-tool" data-tool="fit">⤢<span>适配</span></button>
+      </div>
+      <canvas id="me-canvas"></canvas>
+      <div class="me-props" id="me-props"></div>
+    </div>
+    <div class="me-foot"><span id="me-status">就绪</span><span>左键选择/拖动 · 右键平移 · 滚轮缩放 · Delete 删除 · Esc 取消 · Ctrl+S 保存</span></div>
+  </div>
+
+  <div id="click-to-play" class="hidden"><div><kbd>点击画面</kbd> 锁定鼠标 · 或左键拖动移动视角 / 右键拖动旋转</div></div>
 
   <div id="fps" class="hidden"></div>
 

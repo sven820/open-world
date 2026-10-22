@@ -65,6 +65,58 @@ export class Batch {
   }
 }
 
+/**
+ * Like Batch, but splits geometry into fixed-size spatial cells so each cell
+ * becomes its own mesh with a tight bounding sphere. This lets frustum culling
+ * actually drop off-screen chunks — essential once the city is large, otherwise
+ * every merged mesh spans the whole map and is always drawn.
+ */
+export class ChunkedBatch {
+  constructor(cell = 220) { this.cell = cell; this.cells = new Map(); this.geomsCount = 0; }
+  _key(x, z) {
+    return Math.floor(x / this.cell) * 100000 + Math.floor(z / this.cell);
+  }
+  add(geo) {
+    if (!geo) return this;
+    if (geo.index) {
+      const ng = geo.toNonIndexed();
+      geo.dispose();
+      geo = ng;
+    }
+    const p = geo.attributes.position;
+    // cheap centroid: midpoint of first and last vertex (good for boxes & strips)
+    const x = (p.getX(0) + p.getX(p.count - 1)) * 0.5;
+    const z = (p.getZ(0) + p.getZ(p.count - 1)) * 0.5;
+    const k = this._key(x, z);
+    let arr = this.cells.get(k);
+    if (!arr) { arr = []; this.cells.set(k, arr); }
+    arr.push(geo);
+    this.geomsCount++;
+    return this;
+  }
+  get size() { return this.geomsCount; }
+  // returns an array of meshes (one per non-empty cell)
+  build(material, { castShadow = false, receiveShadow = true } = {}) {
+    const meshes = [];
+    for (const geoms of this.cells.values()) {
+      const g = mergeGeometries(geoms, false);
+      geoms.forEach((x) => x.dispose());
+      if (!g) continue;
+      g.computeBoundingSphere();
+      // pad the sphere a little so geometry that straddles a cell edge is not
+      // wrongly culled when its own cell is just outside the frustum
+      if (g.boundingSphere) g.boundingSphere.radius += 30;
+      const mesh = new THREE.Mesh(g, material);
+      mesh.castShadow = castShadow;
+      mesh.receiveShadow = receiveShadow;
+      mesh.matrixAutoUpdate = false;
+      mesh.updateMatrix();
+      meshes.push(mesh);
+    }
+    return meshes;
+  }
+}
+
 /** vertical wall quad. dir: 'n','s','e','w'. Rect x0..x1,z0..z1, y0..y1 */
 export function wallQuad(dir, x0, x1, z0, z1, y0, y1, uScale = 1, vScale = 1) {
   const w = dir === "n" || dir === "s" ? x1 - x0 : z1 - z0;

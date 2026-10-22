@@ -25,6 +25,11 @@ export class Hud {
     this.bigPosEl = document.getElementById("bm-pos");
     this.fpsEl = document.getElementById("fps");
 
+    // big map mouse interaction state
+    this._bigRot = 0;       // map view rotation (radians), like open-world game maps
+    this._bmDrag = null;    // { x, y, btn } while dragging on the big map
+    this._bindBigMapMouse();
+
     this.MM = 220;
     this.R = 104;
     this.b = city.bounds;
@@ -138,6 +143,65 @@ export class Hud {
   zoomBig(f) {
     this._bigZoom = Math.max(0.5, Math.min(6, (this._bigZoom || 1) * f));
   }
+  rotateBig(d) { this._bigRot += d; }
+
+  _bindBigMapMouse() {
+    const cv = this.bigCanvas;
+    const overlay = this.bigmapEl;
+    overlay.style.cursor = "grab";
+    // keep handler references so dispose() can remove them (world rebuild)
+    this._bh = {
+      ctx: (e) => e.preventDefault(),
+      down: (e) => {
+        this._bmDrag = { x: e.clientX, y: e.clientY, btn: e.button };
+        overlay.style.cursor = e.button === 2 ? "crosshair" : "grabbing";
+      },
+      up: () => {
+        this._bmDrag = null;
+        overlay.style.cursor = "grab";
+      },
+      move: (e) => {
+        if (!this._bmDrag) return;
+        const dx = e.clientX - this._bmDrag.x;
+        const dy = e.clientY - this._bmDrag.y;
+        this._bmDrag.x = e.clientX; this._bmDrag.y = e.clientY;
+        if (!this._bigScale) this._drawBig();
+        const sc = this._bigScale * (this._bigZoom || 1);
+        const rect = cv.getBoundingClientRect();
+        const kx = cv.width / rect.width;   // CSS px → canvas px
+        const ky = cv.height / rect.height;
+        if (this._bmDrag.btn === 2) {
+          // right button (hold) → rotate the map view (open-world style)
+          this._bigRot += dx * 0.006;
+        } else {
+          // left-drag → pan; convert screen delta to world delta (inverse of map rotation)
+          const c = Math.cos(-this._bigRot), s = Math.sin(-this._bigRot);
+          const cdx = dx * kx, cdy = dy * ky;
+          this._bigCx -= (c * cdx - s * cdy) / sc;
+          this._bigCz -= (s * cdx + c * cdy) / sc;
+        }
+      },
+      wheel: (e) => {
+        e.preventDefault();
+        this.zoomBig(e.deltaY < 0 ? 1.12 : 0.89);
+      },
+    };
+    overlay.addEventListener("contextmenu", this._bh.ctx);
+    overlay.addEventListener("mousedown", this._bh.down);
+    window.addEventListener("mouseup", this._bh.up);
+    window.addEventListener("mousemove", this._bh.move);
+    overlay.addEventListener("wheel", this._bh.wheel, { passive: false });
+  }
+
+  dispose() {
+    if (!this._bh) return;
+    this.bigmapEl.removeEventListener("contextmenu", this._bh.ctx);
+    this.bigmapEl.removeEventListener("mousedown", this._bh.down);
+    window.removeEventListener("mouseup", this._bh.up);
+    window.removeEventListener("mousemove", this._bh.move);
+    this.bigmapEl.removeEventListener("wheel", this._bh.wheel);
+    this._bh = null;
+  }
 
   _drawBig() {
     const cv = this.bigCanvas, ctx = this.bigCtx;
@@ -146,7 +210,12 @@ export class Hud {
     const sc = this._bigScale * (this._bigZoom || 1);
     const wx = (x) => W / 2 + (x - this._bigCx) * sc;
     const wz = (z) => H / 2 + (z - this._bigCz) * sc;
+    ctx.save();
     ctx.fillStyle = "#070b10"; ctx.fillRect(0, 0, W, H);
+    // rotate the whole map around the screen center
+    ctx.translate(W / 2, H / 2);
+    ctx.rotate(this._bigRot);
+    ctx.translate(-W / 2, -H / 2);
     for (const bl of this.city.blocks) {
       ctx.fillStyle = "#171f29";
       ctx.fillRect(wx(bl.x0), wz(bl.z0), (bl.x1 - bl.x0) * sc, (bl.z1 - bl.z0) * sc);
@@ -159,6 +228,19 @@ export class Hud {
     const px = wx(this.player.pos.x), pz = wz(this.player.pos.z);
     ctx.fillStyle = "#a8ffb0";
     ctx.beginPath(); ctx.arc(px, pz, 5, 0, 7); ctx.fill();
+    ctx.restore();
+    // rotating north compass (shows current view angle)
+    const cx = 46, cy = 46, R = 22;
+    ctx.save();
+    ctx.translate(cx, cy); ctx.rotate(this._bigRot);
+    ctx.strokeStyle = "rgba(255,255,255,.5)"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, 7); ctx.stroke();
+    ctx.fillStyle = "#d94a4a"; ctx.beginPath();
+    ctx.moveTo(0, -R + 4); ctx.lineTo(6, 4); ctx.lineTo(-6, 4); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = "rgba(255,255,255,.7)"; ctx.font = "600 11px 'Noto Sans SC', sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("N", cx, cy + R + 14);
+    ctx.textAlign = "left";
     if (this.bigPosEl) this.bigPosEl.textContent = `${districtAt(this.player.pos.x, this.player.pos.z).zh} · X ${Math.round(this.player.pos.x)} Z ${Math.round(this.player.pos.z)}`;
   }
 }

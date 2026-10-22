@@ -3,6 +3,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { makePedRig, pedPartGeometry, PED_PARTS } from "./models.js";
+import { activeSpawn } from "../data/cityData.js";
 
 const skin = new THREE.MeshStandardMaterial({ color: 0xe8b98f, roughness: 0.85 });
 const hair = new THREE.MeshStandardMaterial({ color: 0x1b1714, roughness: 0.8 });
@@ -18,6 +19,17 @@ const BONE_KEYS = [
 ];
 
 const normBone = (s) => s.replace(/[\s_]/g, "").toLowerCase();
+
+// 共享加载器：每次重建世界都新建 KTX2/GLTF loader 会产生
+// "Multiple active KTX2 loaders" 警告并偶发加载失败（退化成程序化模型）
+let _sharedGLTF = null;
+function sharedGLTFLoader(renderer) {
+  if (!_sharedGLTF) {
+    const ktx2 = new KTX2Loader().setTranscoderPath("/basis/").detectSupport(renderer);
+    _sharedGLTF = new GLTFLoader().setKTX2Loader(ktx2).setMeshoptDecoder(MeshoptDecoder);
+  }
+  return _sharedGLTF;
+}
 
 function matFor(name) {
   if (name === "hair") return hair;
@@ -48,6 +60,10 @@ export class Player {
     this.animTime = 0;
     this.radius = 0.35;
     this.enabled = false;
+    this.camPanSX = 0;  // left-drag pan, stored in screen space (px) so it stays view-aligned
+    this.camPanSY = 0;
+    this.camDist = 5.2; this.minDist = 2.4; this.maxDist = 13;       // walk camera follow distance (wheel zoom)
+    this.camDistDrive = 8.5; this.minDistDrive = 4; this.maxDistDrive = 20;
 
     // root is the single transform the movement code drives
     this.root = new THREE.Group();
@@ -83,15 +99,17 @@ export class Player {
 
   async _loadAvatar() {
     try {
-      const ktx2 = new KTX2Loader()
-        .setTranscoderPath("/basis/")
-        .detectSupport(this.renderer);
-      const loader = new GLTFLoader()
-        .setKTX2Loader(ktx2)
-        .setMeshoptDecoder(MeshoptDecoder);
+      const loader = sharedGLTFLoader(this.renderer);
       if (MeshoptDecoder.ready) await MeshoptDecoder.ready;
 
-      const gltf = await loader.loadAsync("/avatars/jie.glb");
+      let gltf;
+      try {
+        gltf = await loader.loadAsync("/avatars/jie.glb");
+      } catch {
+        // 一次重试：dev server 冷启动/瞬时网络问题导致的失败
+        await new Promise((r) => setTimeout(r, 800));
+        gltf = await loader.loadAsync("/avatars/jie.glb");
+      }
       const model = gltf.scene;
 
       // normalize height and put feet on the ground plane
@@ -134,11 +152,28 @@ export class Player {
   setEnabled(v) { this.enabled = v; this.root.visible = v && !this.driving; }
 
   reset() {
-    this.pos.set(-160, 0.16, -24);
-    this.yaw = -Math.PI / 2; this.facing = -Math.PI / 2;
+    const s = activeSpawn();
+    let x = s.x, z = s.z;
+    // 兜底：出生点若落在建筑内（用户编辑地图后可能发生），吸附到最近的马路
+    if (this.city && this.city.colliders && this.city.colliders.blocked(x, z, this.radius + 0.25)) {
+      const p = this.city.nearestRoadPoint(x, z);
+      if (p) { x = p.x; z = p.z; }
+    }
+    this.pos.set(x, 0.16, z);
+    this.yaw = s.heading != null ? s.heading : -Math.PI / 2;
+    this.facing = this.yaw;
     this.root.position.copy(this.pos);
     this.root.rotation.y = this.yaw;
-    this.camera.position.set(-160, 3, -34);
+    this.camera.position.set(x, 3, z - 10);
+  }
+
+  dispose() {
+    this.setEnabled(false);
+    this.scene.remove(this.root);
+    this.root.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose());
+    });
   }
 
   _poseProc(walkAmt) {
@@ -240,16 +275,35 @@ export class Player {
     if (!this.enabled) return;
     this.animTime += dt;
 
-    // mouse look (+ trackpad wheel for Mac gesture control)
+    // mouse look: left-drag pans, right-drag rotates (yaw/pitch)
     const mx = input.mouseDX, my = input.mouseDY;
     input.mouseDX = 0; input.mouseDY = 0;
-    this.yaw -= mx * 0.0024 + input.wheelDX * 0.0016;
-    this.pitch -= my * 0.0022 + input.wheelDY * 0.0014;
-    this.pitch = Math.max(-0.55, Math.min(0.95, this.pitch));
+    this.yaw -= mx * 0.0024;
+    this.pitch += my * 0.0022;
+    this.pitch = Math.max(-1.15, Math.min(1.2, this.pitch));
+
+    // wheel → zoom the camera (change follow distance), not rotate
+    if (input.wheelDY) {
+      const step = input.wheelDY * 0.01;
+      this.camDist = Math.max(this.minDist, Math.min(this.maxDist, this.camDist + step));
+      this.camDistDrive = Math.max(this.minDistDrive, Math.min(this.maxDistDrive, this.camDistDrive + step));
+    }
+
+    // left-drag → pan (move) the map view; accumulate in screen space so the
+    // direction always matches the cursor regardless of camera rotation
+    const pdx = input.panDX, pdy = input.panDY;
+    if (pdx || pdy) {
+      this.camPanSX += pdx;
+      this.camPanSY += pdy;
+      const lim = 2400;
+      this.camPanSX = Math.max(-lim, Math.min(lim, this.camPanSX));
+      this.camPanSY = Math.max(-lim, Math.min(lim, this.camPanSY));
+    }
 
     if (this.driving) {
       this._drive(dt, input);
     } else {
+      this._roadAssist(dt, input);
       this._walk(dt, input);
     }
 
@@ -300,6 +354,46 @@ export class Player {
     this.root.updateMatrixWorld(true);
   }
 
+  // Gentle "walk along the road" assist: while moving on foot and not actively
+  // looking around, ease the view (and thus the movement direction) onto the
+  // axis of the road the player is standing on. Without this, a camera that is
+  // even slightly off the road makes W drift across lanes ("歪着走"). We only
+  // nudge when already roughly aligned, so deliberately crossing a street or
+  // walking off-road is never fought.
+  _roadAssist(dt, input) {
+    if (!this.city || this.driving) return;
+    if (!(input.down("KeyW") || input.down("KeyS"))) return;
+    if (input.mouseDX || input.mouseDY) return; // user is rotating the view
+    const corridor = (r) => r.lanes * 3.4 + r.median / 2 + r.sidewalk + 1.5;
+    const onAxis = (roads, p) => {
+      let best = null, bd = Infinity;
+      for (const r of roads || []) {
+        const d = Math.abs(p - r.at);
+        if (d < corridor(r) && d < bd) { bd = d; best = r; }
+      }
+      return best;
+    };
+    const rx = onAxis(this.city.roadsX, this.pos.x);
+    const rz = onAxis(this.city.roadsZ, this.pos.z);
+    const cands = [];
+    if (rx) cands.push(0, Math.PI);            // vertical road runs along ±Z
+    if (rz) cands.push(Math.PI / 2, -Math.PI / 2); // horizontal road runs along ±X
+    if (!cands.length) return;
+    const ang = (a) => {
+      let d = a - this.yaw;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      return d;
+    };
+    let target = null, bd = Infinity;
+    for (const c of cands) {
+      const d = Math.abs(ang(c));
+      if (d < bd) { bd = d; target = c; }
+    }
+    if (target === null || bd > 0.7) return; // too far off → likely intentional
+    this.yaw += ang(target) * Math.min(1, dt * 1.6);
+  }
+
   _drive(dt, input) {
     const v = this.inVehicle;
     const accel = 14, brake = 22, maxF = 38, maxR = -10;
@@ -325,36 +419,84 @@ export class Player {
     this.pos.copy(this.drivePos);
   }
 
+  // March a 2D ray from the player to the desired camera spot and return the
+  // fraction of the distance that is clear of buildings (>= 0.14 so the camera
+  // never collapses fully onto the player).
+  _cameraHitXZ(ax, az, tx, tz, r) {
+    const col = this.city && this.city.colliders;
+    if (!col || !col.blocked) return 1;
+    const dx = tx - ax, dz = tz - az;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.001) return 1;
+    const ux = dx / len, uz = dz / len;
+    const step = 0.4;
+    for (let d = step; d < len; d += step) {
+      if (col.blocked(ax + ux * d, az + uz * d, r)) {
+        return Math.max(0.14, (d - step) / len);
+      }
+    }
+    return 1;
+  }
+
   _updateCamera() {
     const cam = this.camera;
+    // screen-relative pan offset, converted with the CURRENT yaw so it always
+    // follows the view (grab-style: the world moves with the cursor)
+    const k = 0.06;
+    const rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);   // camera screen-right on ground
+    const fx = Math.sin(this.yaw), fz = Math.cos(this.yaw);   // camera forward on ground
+    const offX = (rx * this.camPanSX + fx * this.camPanSY) * k;
+    const offZ = (rz * this.camPanSX + fz * this.camPanSY) * k;
+    let cp, look, lerpK;
     if (this.driving) {
-      const dist = 8.5, height = 3.6;
-      const cp = new THREE.Vector3(
-        this.drivePos.x - Math.sin(this.driveYaw) * dist * Math.cos(this.pitch * 0.4),
+      const dist = this.camDistDrive, height = 3.6;
+      cp = new THREE.Vector3(
+        this.drivePos.x - Math.sin(this.driveYaw) * dist * Math.cos(this.pitch * 0.4) + offX,
         this.drivePos.y + height - this.pitch * 3,
-        this.drivePos.z - Math.cos(this.driveYaw) * dist * Math.cos(this.pitch * 0.4)
+        this.drivePos.z - Math.cos(this.driveYaw) * dist * Math.cos(this.pitch * 0.4) + offZ
       );
-      cam.position.lerp(cp, 0.18);
-      const look = new THREE.Vector3(
-        this.drivePos.x + Math.sin(this.driveYaw) * 6,
+      look = new THREE.Vector3(
+        this.drivePos.x + Math.sin(this.driveYaw) * 6 + offX,
         this.drivePos.y + 2.2,
-        this.drivePos.z + Math.cos(this.driveYaw) * 6
+        this.drivePos.z + Math.cos(this.driveYaw) * 6 + offZ
       );
-      cam.lookAt(look);
-      return;
+      lerpK = 0.18;
+    } else {
+      const dist = this.camDist, height = 2.4;
+      cp = new THREE.Vector3(
+        this.pos.x - Math.sin(this.yaw) * dist * Math.cos(this.pitch) + offX,
+        this.pos.y + height + Math.sin(this.pitch) * dist,
+        this.pos.z - Math.cos(this.yaw) * dist * Math.cos(this.pitch) + offZ
+      );
+      look = new THREE.Vector3(
+        this.pos.x + Math.sin(this.yaw) * 4 + offX,
+        this.pos.y + 1.5,
+        this.pos.z + Math.cos(this.yaw) * 4 + offZ
+      );
+      lerpK = 0.25;
     }
-    const dist = 5.2, height = 2.4;
-    const cp = new THREE.Vector3(
-      this.pos.x - Math.sin(this.yaw) * dist * Math.cos(this.pitch),
-      this.pos.y + height + Math.sin(this.pitch) * dist,
-      this.pos.z - Math.cos(this.yaw) * dist * Math.cos(this.pitch)
-    );
-    cam.position.lerp(cp, 0.25);
-    const look = new THREE.Vector3(
-      this.pos.x + Math.sin(this.yaw) * 4,
-      this.pos.y + 1.5,
-      this.pos.z + Math.cos(this.yaw) * 4
-    );
+
+    // keep the camera above the street: at strong upward pitch (and/or a
+    // zoomed-out follow distance) sin(pitch)*dist would otherwise sink the
+    // camera below the ground plane.
+    const camFloor = this.pos.y + 0.8;
+    if (cp.y < camFloor) cp.y = camFloor;
+
+    // camera collision: if a building sits between the player and the desired
+    // camera spot, pull the camera in to just in front of it. This stops the
+    // camera from embedding in a building (which would make it vanish via
+    // back-face culling). Shift the look target by the same delta so the view
+    // direction is preserved (avoids staring point-blank at a wall).
+    const f = this._cameraHitXZ(this.pos.x, this.pos.z, cp.x, cp.z, 0.6);
+    if (f < 1) {
+      const nx = this.pos.x + (cp.x - this.pos.x) * f;
+      const nz = this.pos.z + (cp.z - this.pos.z) * f;
+      const dx = nx - cp.x, dz = nz - cp.z;
+      cp.x = nx; cp.z = nz;
+      look.x += dx; look.z += dz;
+    }
+
+    cam.position.lerp(cp, lerpK);
     cam.lookAt(look);
   }
 }
