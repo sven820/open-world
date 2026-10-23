@@ -89,9 +89,11 @@ export class Player {
     this.avatar = null;
     this.bones = {};
     this.boneRest = {};
+    this.poseRest = null;   // 烘焙后的基准姿势（手臂下垂）
     this._q = new THREE.Quaternion();
-    this._axZ = new THREE.Vector3(0, 0, 1);
-    this._axX = new THREE.Vector3(1, 0, 0);
+    this._v = new THREE.Vector3();
+    this._v2 = new THREE.Vector3();
+    this._swingAxis = new THREE.Vector3();
 
     this.groundY = 0.16;
     this.ready = this._loadAvatar();
@@ -141,6 +143,30 @@ export class Player {
         }
       }
 
+      // 烘焙"动作基准姿势"：T-pose 模型把手臂一次性放到自然下垂（局部空间），
+      // 之后每帧只叠加小幅摆动 —— 避免每帧大角度拉扯肩部蒙皮造成扭曲。
+      model.updateMatrixWorld(true);
+      this.poseRest = {};
+      const drop = {
+        "Bip01 L UpperArm": this._computeArmDrop("Bip01 L UpperArm"),
+        "Bip01 R UpperArm": this._computeArmDrop("Bip01 R UpperArm"),
+      };
+      for (const key of BONE_KEYS) {
+        const b = this.bones[key];
+        if (!b) continue;
+        let pose = this.boneRest[key].clone();
+        const d = drop[key];
+        if (d) {
+          // poseLocal = parentWorldInv(rest 链) * dropWorld * restWorld
+          const qp = new THREE.Quaternion();
+          b.parent.getWorldQuaternion(qp);
+          const restW = new THREE.Quaternion();
+          b.getWorldQuaternion(restW);
+          pose = qp.invert().multiply(d).multiply(restW);
+        }
+        this.poseRest[key] = pose;
+      }
+
       this.root.remove(this.proc.root);
       this.avatar = model;
       this.root.add(model);
@@ -159,12 +185,23 @@ export class Player {
       const p = this.city.nearestRoadPoint(x, z);
       if (p) { x = p.x; z = p.z; }
     }
-    this.pos.set(x, 0.16, z);
+    this.groundY = this._groundHeightAt(x, z);
+    this.pos.set(x, this.groundY, z);
     this.yaw = s.heading != null ? s.heading : -Math.PI / 2;
     this.facing = this.yaw;
     this.root.position.copy(this.pos);
     this.root.rotation.y = this.yaw;
     this.camera.position.set(x, 3, z - 10);
+  }
+
+  // 脚下表面高度：街廓人行道平台顶 0.16m，马路 0
+  _groundHeightAt(x, z) {
+    const blocks = this.city && this.city.blocks;
+    if (!blocks) return 0.16;
+    for (const b of blocks) {
+      if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1) return 0.16;
+    }
+    return 0;
   }
 
   dispose() {
@@ -194,40 +231,78 @@ export class Player {
     r.head.rotation.y = Math.sin(ph * 0.37) * 0.1;
   }
 
+  // 计算"把 T-pose 手臂放到自然下垂"所需的世界空间校正四元数
+  _computeArmDrop(name) {
+    const b = this.bones[name];
+    if (!b) return null;
+    this.root.updateMatrixWorld(true);
+    const child = b.children.find((c) => c.isBone);
+    if (!child) return null;
+    b.updateWorldMatrix(true, false);
+    child.updateWorldMatrix(false, false);
+    const dir = new THREE.Vector3().setFromMatrixPosition(child.matrixWorld)
+      .sub(new THREE.Vector3().setFromMatrixPosition(b.matrixWorld)).normalize();
+    const target = new THREE.Vector3(0, -1, 0);
+    if (dir.angleTo(target) < 0.35) return null; // 已接近下垂
+    return new THREE.Quaternion().setFromUnitVectors(dir, target);
+  }
+
+  // 行走/待机动画：在烘焙基准姿势（手臂下垂）上叠加小幅摆动。
+  // 轴与 _walk 的移动轴一致：right=(-cos f,0,sin f) 为角色右轴，
+  // 绕 right 正角 = 肢体向前摆；绕 fwd 正角 = 向角色左侧偏（外张）。
   _poseAvatar(walkAmt) {
     const ph = this.phase;
     const s = Math.sin(ph);
     const amt = walkAmt;
-    const q = this._q;
-    const set = (name, axis, ang) => {
+    const right = this._swingAxis.set(-Math.cos(this.facing), 0, Math.sin(this.facing)).normalize();
+    const fwd = this._v2.set(Math.sin(this.facing), 0, Math.cos(this.facing)).normalize();
+
+    const setJ = (name, swingAng, outAng) => {
       const b = this.bones[name];
-      const rest = this.boneRest[name];
-      if (!b || !rest) return;
-      b.quaternion.copy(rest);
-      if (ang) b.quaternion.multiply(q.setFromAxisAngle(axis, ang));
+      const pr = this.poseRest && this.poseRest[name];
+      if (!b || !pr) return;
+      // 关节姿势的世界旋转 = 父世界 * 基准姿势；把世界摆动轴转到该局部系
+      const qp = new THREE.Quaternion();
+      b.parent.getWorldQuaternion(qp);
+      const inv = qp.multiply(pr).invert();
+      let extra = this._q.setFromAxisAngle(this._v.copy(right).applyQuaternion(inv), swingAng);
+      if (outAng) {
+        const qo = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3().copy(fwd).applyQuaternion(inv), outAng);
+        extra = qo.multiply(extra);
+      }
+      b.quaternion.copy(pr).multiply(extra);
     };
 
+    const legA = 0.58 * amt, armA = 0.42 * amt;
+    const outL = 0.22, outR = -0.22;     // 手臂向外张（正角=向角色左侧）
+    const fwdArm = 0.1;                  // 上臂略垂在身体前侧
     if (amt > 0.001) {
-      const legA = 0.62 * amt;
-      set("Bip01 L Thigh", this._axZ, s * legA);
-      set("Bip01 R Thigh", this._axZ, -s * legA);
-      set("Bip01 L Calf", this._axZ, -Math.max(0, -s) * 0.95 * amt);
-      set("Bip01 R Calf", this._axZ, -Math.max(0, s) * 0.95 * amt);
-      set("Bip01 L UpperArm", this._axZ, -s * 0.42 * amt);
-      set("Bip01 R UpperArm", this._axZ, s * 0.42 * amt);
-      set("Bip01 L Forearm", this._axZ, 0.14 * amt + Math.max(0, -s) * 0.22 * amt);
-      set("Bip01 R Forearm", this._axZ, 0.14 * amt + Math.max(0, s) * 0.22 * amt);
-      set("Bip01 Spine2", this._axX, Math.sin(ph) * 0.05 * amt);
-      set("Bip01 Head", this._axX, -Math.sin(ph) * 0.03 * amt);
+      // 腿：对侧交叉摆；膝盖只能向后弯（负角），且只弯摆动腿
+      setJ("Bip01 L Thigh", s * legA);
+      setJ("Bip01 R Thigh", -s * legA);
+      setJ("Bip01 L Calf", -Math.max(0, s) * 0.8 * amt);
+      setJ("Bip01 R Calf", -Math.max(0, -s) * 0.8 * amt);
+      // 臂：外张 + 前张 + 与同侧腿反相摆动；肘部前屈（正角），前摆臂屈得更深
+      setJ("Bip01 L UpperArm", fwdArm - s * armA, outL);
+      setJ("Bip01 R UpperArm", fwdArm + s * armA, outR);
+      setJ("Bip01 L Forearm", 0.3 + Math.max(0, -s) * 0.25 * amt);
+      setJ("Bip01 R Forearm", 0.3 + Math.max(0, s) * 0.25 * amt);
+      setJ("Bip01 Spine2", s * 0.04 * amt);
+      setJ("Bip01 Head", -Math.sin(ph * 0.37) * 0.04 * amt);
     } else {
-      // idle: restore rest pose + gentle breathing
-      const br = Math.sin(this.animTime * 1.6) * 0.016;
-      set("Bip01 Spine2", this._axX, br);
+      // idle：四肢复位到基准姿势，手臂外张 + 肘部微屈 + 轻微呼吸
       for (const k of BONE_KEYS) {
-        if (k === "Bip01 Spine2") continue;
-        const b = this.bones[k], rest = this.boneRest[k];
-        if (b && rest) b.quaternion.copy(rest);
+        if (k === "Bip01 Spine2" || k === "Bip01 Head") continue;
+        const b = this.bones[k], pr = this.poseRest && this.poseRest[k];
+        if (b && pr) b.quaternion.copy(pr);
       }
+      setJ("Bip01 L UpperArm", fwdArm, outL);
+      setJ("Bip01 R UpperArm", fwdArm, outR);
+      setJ("Bip01 L Forearm", 0.25);
+      setJ("Bip01 R Forearm", 0.25);
+      setJ("Bip01 Spine2", Math.sin(this.animTime * 1.6) * 0.02);
+      setJ("Bip01 Head", Math.sin(this.animTime * 1.2) * 0.03);
     }
   }
 
@@ -258,7 +333,9 @@ export class Player {
     // place player beside vehicle
     const side = 2.4;
     const off = new THREE.Vector3(Math.cos(this.driveYaw) * side, 0, -Math.sin(this.driveYaw) * side);
-    this.pos.set(v.group.position.x + off.x, this.groundY, v.group.position.z + off.z);
+    const gx = v.group.position.x + off.x, gz = v.group.position.z + off.z;
+    this.groundY = this._groundHeightAt(gx, gz);
+    this.pos.set(gx, this.groundY, gz);
     this.city.colliders.resolve(this.pos, this.radius);
     this.driving = false;
     this.root.visible = true;
@@ -333,11 +410,13 @@ export class Player {
     // collision
     this.city.colliders.resolve(this.pos, this.radius);
 
-    // jump
+    // jump / ground follow（马路 0，人行道 0.16）
+    const g = this._groundHeightAt(this.pos.x, this.pos.z);
+    this.groundY = g;
     if (input.pressed("Space") && this.grounded) { this.vy = 6.2; this.grounded = false; }
     this.vy -= 22 * dt;
     this.pos.y += this.vy * dt;
-    if (this.pos.y <= this.groundY) { this.pos.y = this.groundY; this.vy = 0; this.grounded = true; }
+    if (this.pos.y <= g) { this.pos.y = g; this.vy = 0; this.grounded = true; }
 
     // animation
     this.phase += dt * (walkAmt ? (sprint ? 13 : 9) : 0);
