@@ -36,6 +36,7 @@ let bigOpen = false;
 let world = null;      // { mapId, mapName, city, landmarkGroup, traffic, peds, player, hud }
 let worldStale = false; // 激活地图数据被编辑器修改过，进入游戏前需要重建
 let editor = null;
+let editor3d = null;
 let fps = 60, fpsAcc = 0, fpsFrames = 0;
 
 function setProgress(p, stage) {
@@ -189,6 +190,7 @@ function renderMapList() {
       <div class="ms-btns">
         <button class="ms-act go" data-act="play">进入</button>
         <button class="ms-act" data-act="edit">${it.isDefault ? "编辑副本" : "编辑"}</button>
+        <button class="ms-act" data-act="edit3d">${it.isDefault ? "3D副本" : "3D 编辑"}</button>
         ${it.isDefault ? "" : '<button class="ms-act danger" data-act="del">删除</button>'}
       </div>`;
 
@@ -211,6 +213,17 @@ function renderMapList() {
       }
       mapSelectEl().classList.add("hidden");
       openEditor(map);
+    });
+
+    row.querySelector('[data-act="edit3d"]').addEventListener("click", () => {
+      let map;
+      if (it.isDefault) {
+        map = createMap(document.getElementById("ms-name").value || "我的城市");
+      } else {
+        map = getMap(it.id);
+      }
+      mapSelectEl().classList.add("hidden");
+      openEditor3d(map);
     });
 
     const del = row.querySelector('[data-act="del"]');
@@ -259,6 +272,32 @@ function closeEditor() {
   updateMapButton(); // 编辑器中可能改名/保存
 }
 
+async function openEditor3d(map) {
+  closeEditor3d();
+  const { MapEditor3d } = await import("./ui/mapEditor3d.js");
+  editor3d = new MapEditor3d({
+    map,
+    onSave: (data) => {
+      const saved = saveMapData(map.id, data, data.name);
+      if (saved && getActiveMapId() === map.id) worldStale = true;
+      return !!saved;
+    },
+    onPlay: async () => {
+      setActiveMapId(map.id);
+      closeEditor3d();
+      await rebuildWorld(`正在构建「${map.name}」…`, false);
+      enterGame();
+    },
+    onClose: () => closeEditor3d(),
+  });
+  await editor3d.open();
+}
+
+function closeEditor3d() {
+  if (editor3d) { editor3d.close(); editor3d = null; }
+  updateMapButton();
+}
+
 async function startGame() {
   if (!world || world.mapId !== getActiveMapId() || worldStale) {
     await rebuildWorld("正在构建所选地图…", false);
@@ -299,7 +338,9 @@ function openBigMap() {
   bigmapEl().classList.remove("hidden");
   input.exitLock();
   clickPlay.classList.add("hidden");
-  world.hud.showNotify("大台北地图 · 左键拖动平移 · 右键拖动旋转 · 滚轮缩放 · WASD 平移 · M 关闭", 3000);
+  const title = bigmapEl().querySelector(".bm-head h3");
+  if (title && world) title.innerHTML = `${escapeHtml(world.mapName)} <small>MAP</small>`;
+  world.hud.showNotify(`${world ? world.mapName : "地图"} · 左键拖动平移 · 右键拖动旋转 · 滚轮缩放 · WASD 平移 · M 关闭`, 3000);
 }
 function closeBigMap() {
   bigOpen = false;

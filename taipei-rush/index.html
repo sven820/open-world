@@ -154,6 +154,42 @@
     <div class="me-foot"><span id="me-status">就绪</span><span>左键选择/拖动 · 右键平移 · 滚轮缩放 · Delete 删除 · Esc 取消 · Ctrl+S 保存</span></div>
   </div>
 
+  <div id="map-editor3d" class="hidden">
+    <div class="e3-head">
+      <div class="me-title"><h3>3D 地图编辑 <small>3D EDITOR</small></h3></div>
+      <div class="me-namebox"><label>名称</label><input id="e3-name" maxlength="16" /></div>
+      <div class="e3-headactions">
+        <button class="bm-btn" id="e3-undo" title="撤销 (Ctrl+Z)">↶</button>
+        <button class="bm-btn" id="e3-redo" title="重做 (Ctrl+Y)">↷</button>
+        <div class="e3-bm-group">
+          <button class="bm-btn" id="e3-basemap" title="显示/隐藏 Cesium 卫星底图">卫星底图</button>
+          <button class="bm-btn" id="e3-settings" title="编辑器设置">⚙</button>
+        </div>
+        <div id="e3-settings-pop" class="e3-settings-pop hidden"></div>
+        <select id="e3-snap" title="取点吸附到网格，便于画直/对齐。自由 = 不吸附">
+          <option value="0">自由</option>
+          <option value="1">1m</option>
+          <option value="5" selected>5m</option>
+          <option value="10">10m</option>
+        </select>
+        <span id="e3-origin" class="e3-origin">—</span>
+      </div>
+      <div class="me-actions">
+        <button class="bm-btn" id="e3-save">保存</button>
+        <button class="bm-btn me-play" id="e3-play">保存并游玩</button>
+        <button class="bm-btn" id="e3-exit">关闭</button>
+      </div>
+    </div>
+    <div class="e3-body">
+      <div class="e3-tools" id="e3-tools"></div>
+      <div class="e3-viewport" id="e3-viewport">
+        <div id="e3-cesium"></div>
+      </div>
+      <div class="me-props" id="e3-props"></div>
+    </div>
+    <div class="e3-foot"><span id="e3-status">正在初始化…</span><span>左键 选择/描边/放置 · 右键拖动 旋转视角 · 滚轮 缩放 · 双击 结束描边 · W/E/R 变换模式 · Del 删除</span></div>
+  </div>
+
   <div id="click-to-play" class="hidden"><div><kbd>点击画面</kbd> 锁定鼠标 · 或左键拖动移动视角 / 右键拖动旋转</div></div>
 
   <div id="fps" class="hidden"></div>

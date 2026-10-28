@@ -2,6 +2,7 @@
 // 数据结构与 src/data/cityData.js 同构，保存通过 opts.onSave(data) 回调。
 
 import { asphaltHalf, corridorHalf, EXT_STEP_X, EXT_STEP_Z, mapBounds } from "../data/cityData.js";
+import { areaPoly, clipAxisLine, worldBounds } from "../world/customMap.js";
 
 const KINDS = ["street", "arterial", "boulevard"];
 const KIND_ZH = { street: "街道", arterial: "干道", boulevard: "大道" };
@@ -75,6 +76,7 @@ export class MapEditor {
       districts: this.map.districts,
       landmarks: this.map.landmarks,
       spawn: this.map.spawn,
+      extRoads: !!this.map.extRoads,
     };
   }
 
@@ -283,17 +285,20 @@ export class MapEditor {
   }
 
   // 世界实际路网 = 用户路 + 边缘自动延伸路（与 city.js _buildRoads 同规则）。
-  // ext 标记的路仅用于预览，不属于地图数据。
+  // ext 标记的路仅用于预览，不属于地图数据；extRoads 未勾选时不生成。
+  // 边界 = 路网 ∪ 描边内容 ∪ 地图范围（customMap.worldBounds）——延伸街铺满整张网格地图
   _grid() {
-    const b = mapBounds(this.map.roadsX, this.map.roadsZ);
+    const b = worldBounds(this.map);
     const xs = [...this.map.roadsX].sort((a, b2) => a.at - b2.at);
     const zs = [...this.map.roadsZ].sort((a, b2) => a.at - b2.at);
-    let n = 0;
-    const ext = (at) => ({ id: "ext" + (n++), at, kind: "street", lanes: 1, median: 0, sidewalk: 3, _ext: true });
-    while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + EXT_STEP_X));
-    while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - EXT_STEP_X));
-    while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + EXT_STEP_Z));
-    while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - EXT_STEP_Z));
+    if (this.map.extRoads) {
+      let n = 0;
+      const ext = (at) => ({ id: "ext" + (n++), at, kind: "street", lanes: 1, median: 0, sidewalk: 3, _ext: true });
+      while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + EXT_STEP_X));
+      while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - EXT_STEP_X));
+      while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + EXT_STEP_Z));
+      while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - EXT_STEP_Z));
+    }
     return { xs, zs, bounds: b };
   }
 
@@ -334,7 +339,13 @@ export class MapEditor {
         <div class="me-stat">横向路 <b>${this.map.roadsZ.length}</b></div>
         <div class="me-stat">地标 <b>${this.map.landmarks.length}</b></div>
         <div class="me-stat">城区 <b>${this.map.districts.length}</b>（只读）</div>
-        <p class="me-hint">道路之间的街廓会按程序化规则自动生成建筑；移动道路即可重塑城市布局。</p>`;
+        <label class="me-check"><input id="mp-ext" type="checkbox" ${this.map.extRoads ? "checked" : ""} /> 程序化延伸街道</label>
+        <p class="me-hint">勾选后按固定间距自动补满世界边缘的默认街道（游戏内与预览同步）；不勾选则只保留手工道路。</p>`;
+      el.querySelector("#mp-ext").addEventListener("change", (e) => {
+        this.map.extRoads = !!e.target.checked;
+        this._dirty = true;
+        this._draw();
+      });
       return;
     }
     const { kind, obj } = this.sel;
@@ -392,6 +403,19 @@ export class MapEditor {
     const grid = this._grid();
     const xs = grid.xs, zs = grid.zs;
 
+    // 道路/街区只显示在地图范围（网格地图）内，超出范围不渲染；无范围时不裁剪
+    const areaPts = areaPoly(this.map);
+    const inArea = (fn) => {
+      if (!areaPts) { fn(); return; }
+      const p = new Path2D();
+      areaPts.forEach(([x, z], i) => (i ? p.lineTo(this._w2sX(x), this._w2sY(z)) : p.moveTo(this._w2sX(x), this._w2sY(z))));
+      p.closePath();
+      c.save();
+      c.clip(p);
+      fn();
+      c.restore();
+    };
+
     // districts (read-only outline)
     c.save();
     for (const d of this.map.districts) {
@@ -409,58 +433,145 @@ export class MapEditor {
     }
     c.restore();
 
-    // blocks derived between roads (含延伸区的程序化街廓)
-    for (let i = 0; i < xs.length - 1; i++) {
-      for (let j = 0; j < zs.length - 1; j++) {
-        const px0 = xs[i].at + asphaltHalf(xs[i]), px1 = xs[i + 1].at - asphaltHalf(xs[i + 1]);
-        const pz0 = zs[j].at + asphaltHalf(zs[j]), pz1 = zs[j + 1].at - asphaltHalf(zs[j + 1]);
-        if (px1 - px0 < 12 || pz1 - pz0 < 12) continue;
-        const extBlock = xs[i]._ext || xs[i + 1]._ext || zs[j]._ext || zs[j + 1]._ext;
-        c.fillStyle = extBlock ? "#10151c" : "#161d26";
-        c.fillRect(this._w2sX(px0), this._w2sY(pz0), (px1 - px0) * s, (pz1 - pz0) * s);
+    inArea(() => {
+      // blocks derived between roads (含延伸区的程序化街廓)
+      for (let i = 0; i < xs.length - 1; i++) {
+        for (let j = 0; j < zs.length - 1; j++) {
+          const px0 = xs[i].at + asphaltHalf(xs[i]), px1 = xs[i + 1].at - asphaltHalf(xs[i + 1]);
+          const pz0 = zs[j].at + asphaltHalf(zs[j]), pz1 = zs[j + 1].at - asphaltHalf(zs[j + 1]);
+          if (px1 - px0 < 12 || pz1 - pz0 < 12) continue;
+          const extBlock = xs[i]._ext || xs[i + 1]._ext || zs[j]._ext || zs[j + 1]._ext;
+          c.fillStyle = extBlock ? "#10151c" : "#161d26";
+          c.fillRect(this._w2sX(px0), this._w2sY(pz0), (px1 - px0) * s, (pz1 - pz0) * s);
+        }
       }
-    }
 
-    // roads：用户编辑的路（亮色 + 路名）与自动延伸路（暗色）
-    for (const r of xs) {
-      const selHl = this.sel && this.sel.obj === r;
-      const isExt = r._ext;
-      c.strokeStyle = selHl ? "#f2c14e" : isExt ? "#232c37" : "#3d4a58";
-      c.lineWidth = Math.max(isExt ? 1.5 : 2, asphaltHalf(r) * 2 * s);
-      c.beginPath(); c.moveTo(this._w2sX(r.at), 0); c.lineTo(this._w2sX(r.at), H); c.stroke();
-      if (!isExt && s > 0.18) {
-        c.strokeStyle = "rgba(255,255,255,0.28)";
-        c.lineWidth = 1;
-        c.setLineDash([8, 10]);
+      // roads：用户编辑的路（亮色 + 路名）与自动延伸路（暗色）
+      for (const r of xs) {
+        const selHl = this.sel && this.sel.obj === r;
+        const isExt = r._ext;
+        c.strokeStyle = selHl ? "#f2c14e" : isExt ? "#232c37" : "#3d4a58";
+        c.lineWidth = Math.max(isExt ? 1.5 : 2, asphaltHalf(r) * 2 * s);
         c.beginPath(); c.moveTo(this._w2sX(r.at), 0); c.lineTo(this._w2sX(r.at), H); c.stroke();
-        c.setLineDash([]);
-        c.fillStyle = "rgba(244,242,238,0.65)";
-        c.font = "500 10px sans-serif";
-        c.fillText(r.zh || r.id, this._w2sX(r.at) + 4, 14);
+        if (!isExt && s > 0.18) {
+          c.strokeStyle = "rgba(255,255,255,0.28)";
+          c.lineWidth = 1;
+          c.setLineDash([8, 10]);
+          c.beginPath(); c.moveTo(this._w2sX(r.at), 0); c.lineTo(this._w2sX(r.at), H); c.stroke();
+          c.setLineDash([]);
+          const segs = areaPts ? clipAxisLine(areaPts, r.at, false) : null;
+          if (!areaPts || segs.length) {
+            c.fillStyle = "rgba(244,242,238,0.65)";
+            c.font = "500 10px sans-serif";
+            c.fillText(r.zh || r.id, this._w2sX(r.at) + 4, segs ? this._w2sY(segs[0][0]) + 12 : 14);
+          }
+        }
       }
-    }
-    for (const r of zs) {
-      const selHl = this.sel && this.sel.obj === r;
-      const isExt = r._ext;
-      c.strokeStyle = selHl ? "#f2c14e" : isExt ? "#232c37" : "#3d4a58";
-      c.lineWidth = Math.max(isExt ? 1.5 : 2, asphaltHalf(r) * 2 * s);
-      c.beginPath(); c.moveTo(0, this._w2sY(r.at)); c.lineTo(W, this._w2sY(r.at)); c.stroke();
-      if (!isExt && s > 0.18) {
-        c.strokeStyle = "rgba(255,255,255,0.28)";
-        c.lineWidth = 1;
-        c.setLineDash([8, 10]);
+      for (const r of zs) {
+        const selHl = this.sel && this.sel.obj === r;
+        const isExt = r._ext;
+        c.strokeStyle = selHl ? "#f2c14e" : isExt ? "#232c37" : "#3d4a58";
+        c.lineWidth = Math.max(isExt ? 1.5 : 2, asphaltHalf(r) * 2 * s);
         c.beginPath(); c.moveTo(0, this._w2sY(r.at)); c.lineTo(W, this._w2sY(r.at)); c.stroke();
+        if (!isExt && s > 0.18) {
+          c.strokeStyle = "rgba(255,255,255,0.28)";
+          c.lineWidth = 1;
+          c.setLineDash([8, 10]);
+          c.beginPath(); c.moveTo(0, this._w2sY(r.at)); c.lineTo(W, this._w2sY(r.at)); c.stroke();
+          c.setLineDash([]);
+          const segs = areaPts ? clipAxisLine(areaPts, r.at, true) : null;
+          if (!areaPts || segs.length) {
+            c.fillStyle = "rgba(244,242,238,0.65)";
+            c.font = "500 10px sans-serif";
+            c.fillText(r.zh || r.id, segs ? this._w2sX(segs[0][0]) + 6 : 6, this._w2sY(r.at) - 4);
+          }
+        }
+      }
+    });
+
+    // 3D 描边内容叠加（3D 编辑器管理的数据）：范围、河流、描边道路、建筑、树木
+    const f = this.map.features;
+    if (f) {
+      if (this.map.area && this.map.area.pts) {
+        c.strokeStyle = "#f2c14e";
+        c.lineWidth = 1.5;
+        c.setLineDash([7, 5]);
+        c.beginPath();
+        this.map.area.pts.forEach(([x, z], i) => (i ? c.lineTo(this._w2sX(x), this._w2sY(z)) : c.moveTo(this._w2sX(x), this._w2sY(z))));
+        c.closePath();
+        c.stroke();
         c.setLineDash([]);
-        c.fillStyle = "rgba(244,242,238,0.65)";
-        c.font = "500 10px sans-serif";
-        c.fillText(r.zh || r.id, 6, this._w2sY(r.at) - 4);
+      }
+      c.lineCap = "round";
+      c.lineJoin = "round";
+      c.strokeStyle = "#2e6f9f";
+      for (const r of f.rivers || []) {
+        c.lineWidth = Math.max(2, (r.width || 26) * s);
+        c.beginPath();
+        r.points.forEach(([x, z], i) => (i ? c.lineTo(this._w2sX(x), this._w2sY(z)) : c.moveTo(this._w2sX(x), this._w2sY(z))));
+        c.stroke();
+      }
+      c.strokeStyle = "#9aa8b8";
+      for (const r of f.roads || []) {
+        if (r.closed && r.points.length >= 3) {
+          // 取面道路：2D 视图按填充多边形显示
+          c.fillStyle = "#2c3947";
+          c.beginPath();
+          r.points.forEach(([x, z], i) => (i ? c.lineTo(this._w2sX(x), this._w2sY(z)) : c.moveTo(this._w2sX(x), this._w2sY(z))));
+          c.closePath();
+          c.fill();
+          continue;
+        }
+        c.lineWidth = Math.max(2, (r.width || 12) * s);
+        c.beginPath();
+        r.points.forEach(([x, z], i) => (i ? c.lineTo(this._w2sX(x), this._w2sY(z)) : c.moveTo(this._w2sX(x), this._w2sY(z))));
+        c.stroke();
+      }
+      c.fillStyle = "#2c3947";
+      c.strokeStyle = "#4b5b6e";
+      c.lineWidth = 1;
+      for (const b of this.map.objects || []) {
+        if (b.type !== "building") continue;
+        const fp = (b.params && b.params.footprint) || [];
+        if (fp.length < 3) continue;
+        const c0 = Math.cos(b.rot || 0), s0 = Math.sin(b.rot || 0);
+        c.beginPath();
+        fp.forEach(([x, z], i) => {
+          const px = b.pos[0] + x * c0 + z * s0;
+          const pz = b.pos[1] + -x * s0 + z * c0;
+          if (i) c.lineTo(this._w2sX(px), this._w2sY(pz)); else c.moveTo(this._w2sX(px), this._w2sY(pz));
+        });
+        c.closePath();
+        c.fill();
+        c.stroke();
+      }
+      c.fillStyle = "#4d8a5c";
+      for (const o of this.map.objects || []) {
+        if (o.type !== "tree") continue;
+        c.beginPath();
+        c.arc(this._w2sX(o.pos[0]), this._w2sY(o.pos[1]), Math.max(2, 2.2 * s), 0, 7);
+        c.fill();
       }
     }
 
     // legend
     c.fillStyle = "rgba(244,242,238,0.42)";
     c.font = "500 11px sans-serif";
-    c.fillText("淡色道路与暗色街区 = 世界边缘自动延伸（程序化填充，随路网保存自动调整）", 14, H - 14);
+    c.fillText("淡色道路与暗色街区 = 延伸街道（勾选后自动铺满地图范围） · 金色虚线框 = 3D 描边范围（道路只显示在其内） · 亮色折线 = 3D 描边道路/河流", 14, H - 14);
+
+    // 指北针：2D 画布方位固定（上 = 北/-Z，右 = 东/+X，与数据约定和 3D 罗盘一致）
+    const nx = W - 34, ny = 42, nr = 15;
+    c.save();
+    c.beginPath(); c.arc(nx, ny, nr, 0, 7);
+    c.fillStyle = "rgba(13,20,28,0.78)"; c.fill();
+    c.strokeStyle = "rgba(244,242,238,0.45)"; c.lineWidth = 1; c.stroke();
+    c.fillStyle = "#ff7a70";
+    c.beginPath(); c.moveTo(nx, ny - nr + 3); c.lineTo(nx - 4, ny + 2); c.lineTo(nx + 4, ny + 2); c.closePath(); c.fill();
+    c.fillStyle = "rgba(244,242,238,0.85)";
+    c.beginPath(); c.moveTo(nx, ny + nr - 3); c.lineTo(nx - 4, ny + 2); c.lineTo(nx + 4, ny + 2); c.closePath(); c.fill();
+    c.fillStyle = "rgba(244,242,238,0.85)"; c.font = "700 8px sans-serif"; c.textAlign = "center";
+    c.fillText("N", nx, ny - nr - 3);
+    c.restore();
 
     // landmarks
     for (const l of this.map.landmarks) {

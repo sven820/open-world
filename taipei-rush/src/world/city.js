@@ -3,7 +3,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import {
   asphaltHalf, corridorHalf, LANE_W, districtAt,
   setMapData, activeRoadsX, activeRoadsZ, activeLandmarks,
-  EXT_STEP_X, EXT_STEP_Z, mapBounds,
+  EXT_STEP_X, EXT_STEP_Z,
 } from "../data/cityData.js";
 import {
   Batch, ChunkedBatch, applyColor, scaleUV, boxAt, wallQuad, roofQuad, planeAt, signQuad, cylAt, icoAt,
@@ -13,6 +13,7 @@ import {
   makeSidewalkTexture, makeAsphaltTexture, makeRoofTexture, makeTileStripTexture,
 } from "./textures.js";
 import { scooterParts, scooterParts as _sp } from "../entities/models.js";
+import { buildCustomMap, worldBounds } from "./customMap.js";
 
 const FLOOR_H = 3.15;
 const GROUND_H = 4.0;
@@ -113,10 +114,14 @@ export class City {
     // ~3 km^2 world, centred on the authored downtown (195, -10):
     // width 2534 (X) x depth 1184 (Z) ≈ 3.0 km^2. Road grid is filled out
     // to these bounds in _buildRoads().
-    // 用户地图：世界边界按其路网范围推导（四周留出延伸缓冲）
+    // 用户地图：世界边界 = 路网范围 ∪ 描边内容 ∪ 地图范围（customMap.worldBounds，
+    // 各留 120 缓冲）——延伸街道因此能铺满整张网格地图
     this.bounds = data
-      ? mapBounds(data.roadsX, data.roadsZ)
+      ? worldBounds(data)
       : { minX: -1072, maxX: 1462, minZ: -602, maxZ: 582 };
+    this.data = data || null;   // 供 HUD 读取描边/范围数据
+    this.custom = null;         // buildCustomMap 结果（描边内容渲染数据）
+    this.spawnPoint = null;     // 有描边内容时覆盖默认出生点（内容包围盒中心）
 
     this.materials = {};
     this.facades = makeFacades();
@@ -147,6 +152,13 @@ export class City {
     this._buildParkedScooters();
     await yieldFrame();
     this._buildTrafficHeads();
+    // 3D 编辑器描边内容（道路/河流/建筑/树/路灯）渲染 + 碰撞注册
+    const custom = buildCustomMap(this.data, this.colliders);
+    if (custom) {
+      this.group.add(custom.group);
+      this.custom = custom;
+      this.spawnPoint = custom.center; // 出生在描边地图中部，而非程序化台北
+    }
     this._finalize();
     this.readyState = true;
   }
@@ -185,13 +197,16 @@ export class City {
     // Expand the road grid outward to fill the world bounds. The authored
     // downtown roads stay exactly as-is; ordinary "street" roads are appended
     // on each side so the procedural city scales to the configured map size.
+    // 用户地图：延伸街默认不生成，地图数据 extRoads 勾选后才生成；默认台北不受限。
     const GX = EXT_STEP_X, GZ = EXT_STEP_Z, b = this.bounds;
     let n = 0;
     const ext = (at) => ({ id: "ext" + (n++), at, kind: "street", lanes: 1, median: 0, sidewalk: 3 });
-    while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + GX));
-    while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - GX));
-    while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + GZ));
-    while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - GZ));
+    if (!this.data || !!this.data.extRoads) {
+      while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + GX));
+      while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - GX));
+      while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + GZ));
+      while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - GZ));
+    }
 
     this.roadsX = xs; this.roadsZ = zs;
 

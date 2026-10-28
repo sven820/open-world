@@ -63,7 +63,63 @@ export class Hud {
     for (const r of this.city.roadsZ) if (r.kind !== "street") { x.beginPath(); x.moveTo(0, this._wz(r.at)); x.lineTo(this.MM, this._wz(r.at)); x.stroke(); }
     x.fillStyle = "#d94a4a";
     for (const l of this.city.landmarks) { x.beginPath(); x.arc(this._wx(l.x), this._wz(l.z), 3, 0, 7); x.fill(); }
+    this._drawCustom(x, (v) => this._wx(v), (v) => this._wz(v), this.scale, false);
     this.staticMap = c;
+  }
+
+  // 3D 描边内容叠加：道路/河流折线、建筑轮廓、树木、（大地图）范围描边
+  _drawCustom(ctx, wx, wz, sc, showArea) {
+    const cu = this.city.custom;
+    if (!cu) return;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#3d7ba6";
+    for (const r of cu.rivers) {
+      ctx.lineWidth = Math.max(1.5, (r.width || 26) * sc);
+      ctx.beginPath();
+      r.points.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "#9aa8b8";
+    for (const r of cu.roads) {
+      ctx.lineWidth = Math.max(1.2, (r.width || 12) * sc);
+      ctx.beginPath();
+      r.points.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#2c3947";
+    ctx.strokeStyle = "#4b5b6e";
+    ctx.lineWidth = 1;
+    for (const b of cu.buildings) {
+      const fp = (b.params && b.params.footprint) || [];
+      if (fp.length < 3) continue;
+      const c0 = Math.cos(b.rot || 0), s0 = Math.sin(b.rot || 0);
+      ctx.beginPath();
+      fp.forEach(([x, z], i) => {
+        const px = b.pos[0] + x * c0 + z * s0;
+        const pz = b.pos[1] + -x * s0 + z * c0;
+        if (i) ctx.lineTo(wx(px), wz(pz)); else ctx.moveTo(wx(px), wz(pz));
+      });
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#4d8a5c";
+    for (const t of cu.trees) {
+      ctx.beginPath();
+      ctx.arc(wx(t.pos[0]), wz(t.pos[1]), Math.max(1.5, 2.2 * sc), 0, 7);
+      ctx.fill();
+    }
+    if (showArea && cu.area && cu.area.pts) {
+      ctx.strokeStyle = "#f2c14e";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      cu.area.pts.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
+      ctx.closePath();
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
   showNotify(text, ms = 2400) {
@@ -225,6 +281,7 @@ export class Hud {
     for (const r of this.city.roadsZ) { ctx.beginPath(); ctx.moveTo(0, wz(r.at)); ctx.lineTo(W, wz(r.at)); ctx.stroke(); }
     ctx.fillStyle = "#d94a4a";
     for (const l of this.city.landmarks) { ctx.beginPath(); ctx.arc(wx(l.x), wz(l.z), 4, 0, 7); ctx.fill(); }
+    this._drawCustom(ctx, wx, wz, sc, true);
     const px = wx(this.player.pos.x), pz = wz(this.player.pos.z);
     ctx.fillStyle = "#a8ffb0";
     ctx.beginPath(); ctx.arc(px, pz, 5, 0, 7); ctx.fill();

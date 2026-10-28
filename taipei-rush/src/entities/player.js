@@ -178,7 +178,8 @@ export class Player {
   setEnabled(v) { this.enabled = v; this.root.visible = v && !this.driving; }
 
   reset() {
-    const s = activeSpawn();
+    // 有 3D 描边内容的地图：出生在其内容包围盒中心（落在建筑内时下方兜底吸附马路）
+    const s = (this.city && this.city.spawnPoint) || activeSpawn();
     let x = s.x, z = s.z;
     // 兜底：出生点若落在建筑内（用户编辑地图后可能发生），吸附到最近的马路
     if (this.city && this.city.colliders && this.city.colliders.blocked(x, z, this.radius + 0.25)) {

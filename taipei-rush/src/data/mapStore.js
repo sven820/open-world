@@ -11,6 +11,9 @@ const KEY_ACTIVE = "tr_activeMap"; // 当前选中地图 id；"default" = 默认
 const uid = () => "map_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
+// 网格层默认浓度（3D 编辑器显示偏好；0=完全透出影像，1=不透明。0.6 = 面板滑杆默认 40%）
+export const GRID_OPACITY_DEFAULT = 0.6;
+
 function readAll() {
   try { return JSON.parse(localStorage.getItem(KEY_LIST)) || []; } catch { return []; }
 }
@@ -26,7 +29,26 @@ export function templateData() {
     districts: clone(DISTRICTS),
     landmarks: clone(LANDMARKS),
     spawn: { ...SPAWN },
+    extRoads: false, // 程序化延伸街道：默认不生成，用户勾选后开启
   };
+}
+
+// schema v2 迁移：补齐 3D 编辑器新增字段（features/objects/origin），旧地图无损升级
+export function migrate(map) {
+  if (!map) return map;
+  if (map.version !== 2) {
+    map.version = 2;
+    map.origin = map.origin || { lat: 25.0477, lon: 121.5173 }; // 默认锚点：台北车站
+    map.features = map.features || { roads: [], rivers: [] };
+    map.objects = map.objects || [];
+  }
+  // 地图工作范围（3D 编辑器的网格/底板区域；局部米制，rot 为弧度）
+  map.area = map.area || { cx: 0, cz: 0, w: 4000, d: 4000, rot: 0 };
+  // 程序化延伸街道开关（旧地图无此字段 → 视为未勾选）
+  map.extRoads = map.extRoads === undefined ? false : !!map.extRoads;
+  // 网格层浓度（3D 编辑器显示偏好；0=完全透出影像，1=默认）
+  map.gridOpacity = typeof map.gridOpacity === "number" ? Math.min(1, Math.max(0, map.gridOpacity)) : GRID_OPACITY_DEFAULT;
+  return map;
 }
 
 // 列表条目（仅 meta，供面板展示）
@@ -37,12 +59,12 @@ export function listMaps() {
 }
 
 export function getMap(id) {
-  return readAll().find((m) => m.id === id) || null;
+  return migrate(readAll().find((m) => m.id === id) || null);
 }
 
 export function createMap(name) {
   const now = Date.now();
-  const map = { id: uid(), name: (name || "").trim() || "未命名地图", createdAt: now, updatedAt: now, ...templateData() };
+  const map = { id: uid(), name: (name || "").trim() || "未命名地图", createdAt: now, updatedAt: now, version: 2, origin: { lat: 25.0477, lon: 121.5173 }, features: { roads: [], rivers: [] }, objects: [], area: { cx: 0, cz: 0, w: 4000, d: 4000, rot: 0 }, ...templateData() };
   const list = readAll();
   list.push(map);
   writeAll(list);

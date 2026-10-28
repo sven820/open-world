@@ -9,6 +9,7 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "cesium": "1.126",
     "three": "^0.169.0"
   },
   "devDependencies": {
