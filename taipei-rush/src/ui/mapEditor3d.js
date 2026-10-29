@@ -913,8 +913,15 @@ export class MapEditor3d {
       new Cesium.Cartesian3(cam.position.x - a.cx, -(cam.position.z - a.cz), cam.position.y),
       new Cesium.Cartesian3(),
     );
-    // 方向/up 是 ENU 切平面向量，同样要经 enu 旋转到 ECEF（不含平移）
+    // 方向/up 是 ENU 切平面向量，同样要经 enu 旋转到 ECEF（不含平移）。
+    // up 必须传相机真实"屏幕上方"基向量（matrixWorld 列 1），不能传世界竖直 cam.up=(0,1,0)：
+    // Cesium setView 内部会把 direction/up 往返转成 heading/pitch/roll，而该转换在接近天顶
+    // （视线与 up 平行，俯仰 ±2.6° 内）退化——heading 退取 up 的水平残差、roll 被直接丢弃。
+    // 世界竖直 up 俯视时与视线平行，残差只剩噪声级几何量 → 底图姿态随俯视跳变，
+    // 网格相对影像旋转几十°~180°（"俯视时网格不贴地图"的根源）；
+    // 屏幕上方恒 ⊥ 视线，退化分支变成"由屏幕上方精确推方位角"，全俯仰连续贴合。
     const d = cam.getWorldDirection(this._v);
+    const su = this._v2.setFromMatrixColumn(cam.matrixWorld, 1);
     const dir = Cesium.Matrix4.multiplyByPointAsVector(
       enu,
       new Cesium.Cartesian3(d.x, -d.z, d.y),
@@ -922,7 +929,7 @@ export class MapEditor3d {
     );
     const up = Cesium.Matrix4.multiplyByPointAsVector(
       enu,
-      new Cesium.Cartesian3(cam.up.x, -cam.up.z, cam.up.y),
+      new Cesium.Cartesian3(su.x, -su.z, su.y),
       new Cesium.Cartesian3(),
     );
     viewer.camera.setView({
