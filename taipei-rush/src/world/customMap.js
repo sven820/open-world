@@ -202,16 +202,16 @@ export function buildCustomMap(data, colliders) {
     if (r.closed && r.points.length >= 3) {
       // 取面道路（closed）：围合多边形整体填充为路面
       const shape = new THREE.Shape(r.points.map(([x, z]) => new THREE.Vector2(x, -z)));
-      m = new THREE.Mesh(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2).translate(0, 0.04, 0), roadMat());
+      m = new THREE.Mesh(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2).translate(0, 0.08, 0), roadMat());
     } else {
-      m = new THREE.Mesh(stripGeometry(polyline(r.points), r.width || 12, 0.04), roadMat());
+      m = new THREE.Mesh(stripGeometry(polyline(r.points), r.width || 12, 0.08), roadMat());
     }
     m.receiveShadow = true;
     group.add(m);
   }
   for (const r of data.features.rivers || []) {
     if (!r.points || r.points.length < 2) continue;
-    const m = new THREE.Mesh(stripGeometry(polyline(r.points), r.width || 26, 0.02), riverMat());
+    const m = new THREE.Mesh(stripGeometry(polyline(r.points), r.width || 26, 0.05), riverMat());
     m.receiveShadow = true;
     group.add(m);
   }

@@ -170,7 +170,7 @@ export class City {
       new THREE.MeshStandardMaterial({ color: 0x2c322c, roughness: 1 })
     );
     outer.rotation.x = -Math.PI / 2;
-    outer.position.y = -0.08;
+    outer.position.y = -0.5; // 与路面保持大间距，避免高空俯瞰时深度冲突闪块
     outer.receiveShadow = true;
     this.group.add(outer);
 
@@ -201,7 +201,7 @@ export class City {
     const GX = EXT_STEP_X, GZ = EXT_STEP_Z, b = this.bounds;
     let n = 0;
     const ext = (at) => ({ id: "ext" + (n++), at, kind: "street", lanes: 1, median: 0, sidewalk: 3 });
-    if (!this.data || !!this.data.extRoads) {
+    if ((!this.data || !!this.data.extRoads) && xs.length && zs.length) {
       while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + GX));
       while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - GX));
       while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + GZ));
@@ -771,7 +771,7 @@ export class City {
     const target = 760;
     const loops = this.sidewalkLoops;
     let guard = 0;
-    while (spots.length < target && guard++ < 8000) {
+    while (spots.length < target && loops.length && guard++ < 8000) {
       const loop = choice(loops);
       const seg = choice(loop.segs);
       // loop centroid

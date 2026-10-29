@@ -3,13 +3,10 @@
 // { id, name, createdAt, updatedAt, roadsX, roadsZ, districts, landmarks, spawn }
 // "default" 不是存储的地图，而是回退到程序化台北。
 
-import { ROADS_X, ROADS_Z, DISTRICTS, LANDMARKS, SPAWN } from "./cityData.js";
-
 const KEY_LIST = "tr_maps";        // 所有用户地图（含完整数据）
 const KEY_ACTIVE = "tr_activeMap"; // 当前选中地图 id；"default" = 默认台北
 
 const uid = () => "map_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-const clone = (v) => JSON.parse(JSON.stringify(v));
 
 // 网格层默认浓度（3D 编辑器显示偏好；0=完全透出影像，1=不透明。0.6 = 面板滑杆默认 40%）
 export const GRID_OPACITY_DEFAULT = 0.6;
@@ -21,14 +18,15 @@ function writeAll(list) {
   try { localStorage.setItem(KEY_LIST, JSON.stringify(list)); } catch { /* 配额满等异常忽略 */ }
 }
 
-// 以默认台北为模板的全新地图数据
+// 全新地图数据：完全空白，不拷贝任何默认台北内容
+// （roadsX/roadsZ/districts/landmarks 由用户在编辑器中自行绘制）
 export function templateData() {
   return {
-    roadsX: clone(ROADS_X),
-    roadsZ: clone(ROADS_Z),
-    districts: clone(DISTRICTS),
-    landmarks: clone(LANDMARKS),
-    spawn: { ...SPAWN },
+    roadsX: [],
+    roadsZ: [],
+    districts: [],
+    landmarks: [],
+    spawn: { x: 0, z: 0, heading: -Math.PI / 2 }, // 默认出生在地图范围中心
     extRoads: false, // 程序化延伸街道：默认不生成，用户勾选后开启
   };
 }

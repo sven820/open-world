@@ -81,10 +81,7 @@ export class MapEditor {
   }
 
   _save() {
-    if (this.map.roadsX.length < 2 || this.map.roadsZ.length < 2) {
-      this.status("保存失败：至少需要 2 条纵向路和 2 条横向路");
-      return false;
-    }
+    // 允许任意规模路网（含 1+1 十字路、纯地标/纯 3D 描边的 0 路网地图）
     if (!this.map.spawn) {
       this.status("保存失败：缺少出生点");
       return false;
@@ -93,9 +90,10 @@ export class MapEditor {
     if (!ok) { this.status("保存失败"); return false; }
     this._dirty = false;
     const warn = this._spawnOffRoad();
-    this.status(warn
-      ? `已保存 · ${new Date().toLocaleTimeString()} · 提示：出生点不在马路上，进入游戏会自动吸附到最近道路`
-      : `已保存 · ${new Date().toLocaleTimeString()}`);
+    const tips = [];
+    if (!this.map.roadsX.length || !this.map.roadsZ.length) tips.push("当前无完整路网，程序化街道/街廓不会生成，可搭配 3D 编辑手绘道路");
+    if (warn) tips.push("出生点不在马路上，进入游戏会自动吸附到最近道路");
+    this.status(`已保存 · ${new Date().toLocaleTimeString()}${tips.length ? " · " + tips.join(" · ") : ""}`);
     return true;
   }
 

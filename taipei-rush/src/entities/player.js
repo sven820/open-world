@@ -62,8 +62,8 @@ export class Player {
     this.enabled = false;
     this.camPanSX = 0;  // left-drag pan, stored in screen space (px) so it stays view-aligned
     this.camPanSY = 0;
-    this.camDist = 5.2; this.minDist = 2.4; this.maxDist = 13;       // walk camera follow distance (wheel zoom)
-    this.camDistDrive = 8.5; this.minDistDrive = 4; this.maxDistDrive = 20;
+    this.camDist = 5.2; this.minDist = 2.4; this.maxDist = 460;      // walk camera follow distance (wheel zoom, up to god-view)
+    this.camDistDrive = 8.5; this.minDistDrive = 4; this.maxDistDrive = 460;
 
     // root is the single transform the movement code drives
     this.root = new THREE.Group();
@@ -358,13 +358,14 @@ export class Player {
     input.mouseDX = 0; input.mouseDY = 0;
     this.yaw -= mx * 0.0024;
     this.pitch += my * 0.0022;
-    this.pitch = Math.max(-1.15, Math.min(1.2, this.pitch));
+    this.pitch = Math.max(-1.15, Math.min(1.52, this.pitch));
 
-    // wheel → zoom the camera (change follow distance), not rotate
+    // wheel → zoom the camera (change follow distance), not rotate.
+    // 比例缩放：拉到几百米高空不会像线性步进那样要滚几百格
     if (input.wheelDY) {
-      const step = input.wheelDY * 0.01;
-      this.camDist = Math.max(this.minDist, Math.min(this.maxDist, this.camDist + step));
-      this.camDistDrive = Math.max(this.minDistDrive, Math.min(this.maxDistDrive, this.camDistDrive + step));
+      const f = Math.exp(input.wheelDY * 0.0016);
+      this.camDist = Math.max(this.minDist, Math.min(this.maxDist, this.camDist * f));
+      this.camDistDrive = Math.max(this.minDistDrive, Math.min(this.maxDistDrive, this.camDistDrive * f));
     }
 
     // left-drag → pan (move) the map view; accumulate in screen space so the
@@ -512,7 +513,8 @@ export class Player {
     const step = 0.4;
     for (let d = step; d < len; d += step) {
       if (col.blocked(ax + ux * d, az + uz * d, r)) {
-        return Math.max(0.14, (d - step) / len);
+        // 最小拉近比 0.3：保证相机距障碍 ≥ 0.72m（> near 0.5），贴脸时不裁穿
+        return Math.max(0.3, (d - step) / len);
       }
     }
     return 1;
@@ -530,10 +532,11 @@ export class Player {
     let cp, look, lerpK;
     if (this.driving) {
       const dist = this.camDistDrive, height = 3.6;
+      // 与步行同构的球坐标机位：拉远 + 大 pitch 时同样能升到高空俯瞰
       cp = new THREE.Vector3(
-        this.drivePos.x - Math.sin(this.driveYaw) * dist * Math.cos(this.pitch * 0.4) + offX,
-        this.drivePos.y + height - this.pitch * 3,
-        this.drivePos.z - Math.cos(this.driveYaw) * dist * Math.cos(this.pitch * 0.4) + offZ
+        this.drivePos.x - Math.sin(this.driveYaw) * dist * Math.cos(this.pitch) + offX,
+        this.drivePos.y + height + Math.sin(this.pitch) * dist,
+        this.drivePos.z - Math.cos(this.driveYaw) * dist * Math.cos(this.pitch) + offZ
       );
       look = new THREE.Vector3(
         this.drivePos.x + Math.sin(this.driveYaw) * 6 + offX,
@@ -567,7 +570,8 @@ export class Player {
     // camera from embedding in a building (which would make it vanish via
     // back-face culling). Shift the look target by the same delta so the view
     // direction is preserved (avoids staring point-blank at a wall).
-    const f = this._cameraHitXZ(this.pos.x, this.pos.z, cp.x, cp.z, 0.6);
+    // 高空俯瞰时相机远高于建筑，2D 遮挡检测会误判 → 相机高于地面 40m 以上跳过
+    const f = cp.y - this.pos.y > 40 ? 1 : this._cameraHitXZ(this.pos.x, this.pos.z, cp.x, cp.z, 0.6);
     if (f < 1) {
       const nx = this.pos.x + (cp.x - this.pos.x) * f;
       const nz = this.pos.z + (cp.z - this.pos.z) * f;
@@ -578,5 +582,12 @@ export class Player {
 
     cam.position.lerp(cp, lerpK);
     cam.lookAt(look);
+
+    // 高空俯瞰：按相机实际高度衰减雾密度（环境每帧先重置，这里在其后覆盖），
+    // 否则 400m 视距外全被雾吞掉，看不出城市布局
+    if (this.scene && this.scene.fog) {
+      const h = Math.max(0, cam.position.y - 30);
+      this.scene.fog.density *= Math.exp(-h / 260);
+    }
   }
 }

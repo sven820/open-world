@@ -37,8 +37,10 @@ export const EXT_STEP_Z = 100;
 
 // 用户地图的世界边界：按路网范围四周延伸缓冲推导
 export function mapBounds(roadsX, roadsZ) {
-  const xs = roadsX.map((r) => r.at);
-  const zs = roadsZ.map((r) => r.at);
+  const xs = (roadsX || []).map((r) => r.at);
+  const zs = (roadsZ || []).map((r) => r.at);
+  // 空/单侧路网：Math.min/max 展开空数组会得到 ±Infinity，回退到默认世界范围
+  if (!xs.length || !zs.length) return { minX: -1072, maxX: 1462, minZ: -602, maxZ: 582 };
   const MX = 650, MZ = 300;
   return {
     minX: Math.min(...xs) - MX, maxX: Math.max(...xs) + MX,

@@ -60,7 +60,7 @@ export class PedestrianCrowd {
 
     const loops = city.sidewalkLoops.filter((l) => l.total > 12);
     const col = new THREE.Color();
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count && loops.length; i++) {
       const loop = pick(loops);
       const p = {
         loop,

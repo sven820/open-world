@@ -21,7 +21,7 @@ export class Traffic {
     this.night = 0;
 
     const edges = city.edges.filter((e) => e.length > 25);
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count && edges.length; i++) {
       const e = pick(edges);
       const roll = Math.random();
       let group, kind, baseSpeed, len;

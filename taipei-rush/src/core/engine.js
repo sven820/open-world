@@ -33,7 +33,9 @@ export class Engine {
     scene.fog = new THREE.FogExp2(0x9aa4b0, 0.0016);
     this.scene = scene;
 
-    const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.12, 4200);
+    // near 0.5：透视深度精度 ∝ z²/near，near 过小会让高空俯瞰时地面各层
+    // （outer/asphalt/描边层间距 0.05~0.5m）深度冲突(z-fighting)高频闪烁
+    const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.5, 4200);
     camera.position.set(0, 8, 20);
     this.camera = camera;
 

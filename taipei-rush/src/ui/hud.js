@@ -197,7 +197,7 @@ export class Hud {
     this._bigCx -= dx; this._bigCz -= dz;
   }
   zoomBig(f) {
-    this._bigZoom = Math.max(0.5, Math.min(6, (this._bigZoom || 1) * f));
+    this._bigZoom = Math.max(0.12, Math.min(8, (this._bigZoom || 1) * f));
   }
   rotateBig(d) { this._bigRot += d; }
 
