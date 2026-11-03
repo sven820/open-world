@@ -219,6 +219,8 @@ kbd {
 .e3-tool-sub button span { font: 600 10px/1 var(--sans); letter-spacing: .08em; color: var(--muted); }
 .e3-tool-sub button:hover { border-color: var(--gold); background: rgba(242,193,78,.12); }
 .e3-tool-sub button:hover span { color: var(--gold); }
+.e3-tool-sub button.active { border-color: var(--gold); background: rgba(242,193,78,.14); }
+.e3-tool-sub button.active span { color: var(--gold); }
 
 /* 地图描边会话面板：点描/拖描模式切换 + 路宽预设 */
 .trace-row { display: flex; gap: 6px; margin-bottom: 10px; }
@@ -246,6 +248,24 @@ kbd {
 .e3-compass-rose b.w { left: 4px; top: 50%; transform: translateY(-50%); }
 .e3-compass-rose::after { content: ""; position: absolute; left: 50%; top: 50%; width: 3px; height: 3px; margin: -1.5px; border-radius: 50%; background: rgba(244,242,238,.7); }
 .e3-compass-txt { display: block; margin-top: 5px; padding: 2px 4px; border-radius: 3px; background: rgba(13,20,28,.66); font: 600 10px/1.2 var(--sans); color: rgba(244,242,238,.88); }
+
+/* 3D 编辑器图层控制：右下角图标按钮 + 弹出面板（底图影像层 / 场景内容层开关） */
+.e3-layer-btn { position: absolute; bottom: 14px; right: 14px; z-index: 6; width: 28px; height: 28px; padding: 0; border: 1px solid rgba(244,242,238,.45); border-radius: 4px; background: rgba(13,20,28,.78); color: rgba(244,242,238,.88); text-align: center; user-select: none; cursor: pointer; transition: .15s; }
+.e3-layer-btn i { font-style: normal; font-size: 13px; line-height: 26px; }
+.e3-layer-btn:hover, .e3-layer-btn.active { border-color: var(--gold); color: var(--gold); }
+.e3-layers-pop { position: absolute; bottom: 50px; right: 14px; z-index: 40; width: 218px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: rgba(12,14,20,.97); box-shadow: 0 16px 44px rgba(0,0,0,.55); display: flex; flex-direction: column; gap: 2px; max-height: calc(100% - 70px); overflow-y: auto; }
+.e3-layers-pop.hidden { display: none; }
+.e3-layer-cat { margin: 5px 2px; font: 600 10px/1 var(--cond); letter-spacing: .2em; color: var(--muted); }
+.e3-layer-cat:first-child { margin-top: 0; }
+.e3-layer-row { display: flex; align-items: center; gap: 9px; padding: 6px 8px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; text-align: left; transition: .15s; }
+.e3-layer-row:hover { background: rgba(255,255,255,.08); }
+.e3-layer-check { width: 12px; height: 12px; border: 1px solid var(--muted); border-radius: 2px; flex: none; position: relative; }
+.e3-layer-row.on .e3-layer-check { border-color: var(--gold); background: var(--gold); }
+.e3-layer-row.on .e3-layer-check::after { content: "✓"; position: absolute; inset: 0; display: grid; place-items: center; font: 700 9px/1 var(--sans); color: rgba(12,14,20,.9); }
+.e3-layer-name { display: flex; flex-direction: column; gap: 2px; font: 600 12px/1.2 var(--sans); }
+.e3-layer-name small { font: 500 10px/1.3 var(--sans); color: var(--muted); }
+.e3-layer-row:not(.on) .e3-layer-name { color: var(--muted); }
+.e3-layers-pop .e3-set-hint { margin-top: 8px; }
 .e3-foot { display: flex; justify-content: space-between; padding: 9px 20px; border-top: 1px solid var(--line); font: 500 11px/1 var(--sans); color: var(--muted); letter-spacing: .06em; background: rgba(12,13,18,.92); }
 
 /* ---------- map select ---------- */

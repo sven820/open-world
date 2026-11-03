@@ -1,27 +1,12 @@
 // Cesium 底图图源配置 —— 图源方案复刻自 work/uav-inspection（src/config/cesium.ts）：
-// - 天地图 WMTS 卫星影像(img) + 中文注记(cia)，需要 key（VITE_TIANDITU_KEY）
-// - Esri World Imagery，免 key（天地图对高频瓦片请求会封 IP）
+// - 天地图 DataServer 卫星影像(img_w) + 中文注记(cia_w)，tk 与图层瓦片地址统一在
+//   config/tianditu.js（优先 VITE_TIANDITU_KEY，未配置时用内置开发者 token，开箱即用）
+// - Esri World Imagery，免 key 备选（天地图对高频瓦片请求会封 IP）
 // - GeoQ 深色矢量图垫底（免 key，CORS 开放）
 // 天地图影像与注记同为 CGCS2000 ≈ WGS84，与项目局部米坐标锚点转换无需纠偏。
 // 图源选择由 3D 编辑器设置面板写入 localStorage，此处提供注册表 + 读写 + 构建三层 API。
 
-const tiandituSubdomains = ["0", "1", "2", "3", "4", "5", "6", "7"];
-
-// URL 模板里前缀 t 已写死，{s} 只能填数字（t0 会拼出不存在的域名）
-function tiandituUrl(layer) {
-  const key = (import.meta.env.VITE_TIANDITU_KEY || "").trim();
-  return `https://t{s}.tianditu.gov.cn/${layer}_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${layer}&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=${key}`;
-}
-
-export const hasTiandituKey = !!(import.meta.env.VITE_TIANDITU_KEY || "").trim();
-
-// 地名搜索（config/placeSearch.js）用的天地图浏览器端 token：优先 VITE_TIANDITU_KEY；
-// 未配置时回退与 work/uav-inspection 共用的开发者账号 token（同一账号下瓦片与搜索通用），
-// 保证搜索功能开箱即用。仅用于低频搜索请求——不用于瓦片（天地图对高频瓦片请求会封 IP，
-// 所以底图仍按 hasTiandituKey 走「未配置即回退 Esri」的原有逻辑）。
-export const tiandituSearchKey = hasTiandituKey
-  ? import.meta.env.VITE_TIANDITU_KEY.trim()
-  : "21372393c1e0828a116962c4362ff898";
+import { hasTiandituKey, tiandituBasemapLayers } from "./tianditu.js";
 
 /* ---------------- 图源注册表 ---------------- */
 // 新增图源：在数组里加一项（id/label/desc/needKey），并在下方 buildImageryLayers
@@ -36,8 +21,8 @@ export const basemapSources = [
   {
     id: "tianditu",
     label: "天地图影像 + 注记",
-    desc: hasTiandituKey ? "官方图源 · 卫星影像含中文注记" : "需要 key（.env.local: VITE_TIANDITU_KEY）",
-    needKey: true,
+    desc: hasTiandituKey ? "官方图源 · 卫星影像含中文注记" : "内置公共 token · 可配专属 key（.env.local: VITE_TIANDITU_KEY）",
+    needKey: false,
   },
 ];
 
@@ -63,11 +48,12 @@ export function setBasemapSource(id) {
   try { localStorage.setItem(KEY_SRC, id); } catch { /* 忽略 */ }
 }
 
-// 图源元信息：credit 文案与就绪状态（如天地图未配 key 则未就绪）
+// 图源元信息：credit 文案 + 就绪状态（天地图 tk 由 config/tianditu.js 常备，configured 恒 true；
+// builtinToken = 正在用内置公共 token，供 UI 提示可配专属 key）
 export function basemapInfo(sourceId = getBasemapSource()) {
   const credit = sourceId === "tianditu" ? "天地图" : "Esri World Imagery";
-  const configured = sourceId !== "tianditu" || hasTiandituKey;
-  return { id: sourceId, credit, configured };
+  const builtinToken = sourceId === "tianditu" && !hasTiandituKey;
+  return { id: sourceId, credit, configured: true, builtinToken };
 }
 
 /* ---------------- 瓦片层定义 ---------------- */
@@ -84,23 +70,16 @@ export const geoqVectorLayer = {
   maximumLevel: 16,
 };
 
-export function tiandituImageryLayers() {
-  return [
-    { url: tiandituUrl("img"), subdomains: tiandituSubdomains, maximumLevel: 18 },
-    { url: tiandituUrl("cia"), subdomains: tiandituSubdomains, maximumLevel: 18 },
-  ];
-}
-
 /* ---------------- Provider 构建 ---------------- */
 
 // 生成 Cesium ImageryProvider 列表（顺序：GeoQ 垫底 → 卫星影像 → 注记）
-// sourceId 缺省时取当前生效图源；天地图未配 key 自动回退 Esri。
+// sourceId 缺省时取当前生效图源；天地图瓦片模板/层级由 config/tianditu.js 提供。
 export function buildImageryLayers(Cesium, sourceId = getBasemapSource()) {
   const providers = [
     new Cesium.UrlTemplateImageryProvider({ url: geoqVectorLayer.url, maximumLevel: geoqVectorLayer.maximumLevel }),
   ];
-  if (sourceId === "tianditu" && hasTiandituKey) {
-    for (const l of tiandituImageryLayers()) {
+  if (sourceId === "tianditu") {
+    for (const l of tiandituBasemapLayers("satellite")) {
       providers.push(new Cesium.UrlTemplateImageryProvider({
         url: l.url, subdomains: l.subdomains, maximumLevel: l.maximumLevel,
       }));

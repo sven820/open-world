@@ -31,17 +31,15 @@ export class Input {
     };
     this._onMouseMove = (e) => {
       const mx = e.movementX || 0, my = e.movementY || 0;
-      if (this.locked) {
-        // pointer-locked free look → rotate
+      // 左键按住 = 拖动平移（锁定/未锁定一致）。俯瞰时能一直拖，不受屏幕边界限制，
+      // 也不会因为 pointer-lock 把拖动误当成转视角而"甩"镜头。
+      if (this.dragLook && this._dragBtn === 0) {
+        this.panDX += mx; this.panDY += my;
+        return;
+      }
+      if (this.locked || (this.dragLook && this._dragBtn === 2)) {
+        // pointer-locked free look / right button drag → rotate the view
         this.mouseDX += mx; this.mouseDY += my;
-      } else if (this.dragLook) {
-        if (this._dragBtn === 2) {
-          // right button drag → rotate the view
-          this.mouseDX += mx; this.mouseDY += my;
-        } else {
-          // left button drag → pan / move the map view
-          this.panDX += mx; this.panDY += my;
-        }
       }
     };
     this._onMouseDown = (e) => {

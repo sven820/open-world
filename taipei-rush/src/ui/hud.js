@@ -239,7 +239,23 @@ export class Hud {
       },
       wheel: (e) => {
         e.preventDefault();
-        this.zoomBig(e.deltaY < 0 ? 1.12 : 0.89);
+        if (!this._bigScale) this._drawBig();
+        // 以光标为锚点缩放：缩放前后光标下的那个世界点保持不动（专业地图手感）
+        const rect = cv.getBoundingClientRect();
+        const px = (e.clientX - rect.left) * (cv.width / rect.width);
+        const py = (e.clientY - rect.top) * (cv.height / rect.height);
+        const c = Math.cos(this._bigRot), s = Math.sin(this._bigRot);
+        const dx = px - cv.width / 2, dy = py - cv.height / 2;
+        const rx = c * dx + s * dy;          // 光标的反旋转偏移（世界方向 * sc）
+        const ry = -s * dx + c * dy;
+        const dy0 = Math.max(-200, Math.min(200, e.deltaY));
+        const sc0 = this._bigScale * (this._bigZoom || 1);
+        this.zoomBig(Math.exp(-dy0 * 0.0015));
+        const sc1 = this._bigScale * (this._bigZoom || 1);
+        if (sc1 !== sc0) {
+          this._bigCx += rx / sc0 - rx / sc1;
+          this._bigCz += ry / sc0 - ry / sc1;
+        }
       },
     };
     overlay.addEventListener("contextmenu", this._bh.ctx);

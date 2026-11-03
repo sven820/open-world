@@ -22,7 +22,7 @@ const whiteMat = () => new THREE.MeshStandardMaterial({ color: 0xf2efe8, roughne
 const blueRoofMat = () => new THREE.MeshStandardMaterial({ color: 0x2f4f8a, roughness: 0.7, metalness: 0.1 });
 const goldMat = () => new THREE.MeshStandardMaterial({ color: 0xc9a23a, metalness: 0.7, roughness: 0.3, emissive: 0x332200, emissiveIntensity: 0.4 });
 
-function addCollider(city, x0, z0, x1, z1) { city.colliders.add(x0, z0, x1, z1); }
+function addCollider(city, x0, z0, x1, z1, top) { city.colliders.add(x0, z0, x1, z1, top); }
 
 export function buildLandmarks(scene, city) {
   const group = new THREE.Group();
@@ -35,6 +35,8 @@ export function buildLandmarks(scene, city) {
     g.rotation.y = l.rot;
     group.add(g);
     let collW = 20, collD = 20;
+    // 碰撞体顶面高度（相机遮挡判断用；按各地标实际体量估算）
+    let collTop = 28;
     if (l.type === "taipei101") collW = collD = 40;
     if (l.type === "tower") collW = collD = 26;
     if (l.type === "station") collW = 70, collD = 40;
@@ -43,6 +45,15 @@ export function buildLandmarks(scene, city) {
     if (l.type === "redhouse") collW = collD = 24;
     if (l.type === "mrt") collW = collD = 12;
     if (l.type === "gate") collW = collD = 14;
+
+    if (l.type === "taipei101") collTop = 130;
+    else if (l.type === "tower") collTop = (l.h || 100) + 6;
+    else if (l.type === "station") collTop = 34;
+    else if (l.type === "cks") collTop = 40;
+    else if (l.type === "temple") collTop = 20;
+    else if (l.type === "redhouse") collTop = 15;
+    else if (l.type === "mrt") collTop = 18;
+    else if (l.type === "gate") collTop = 18;
 
     if (l.type === "taipei101") build101(g);
     else if (l.type === "tower") buildTower(g, l.h || 100);
@@ -53,7 +64,7 @@ export function buildLandmarks(scene, city) {
     else if (l.type === "mrt") buildMRT(g);
     else if (l.type === "gate") buildGate(g);
 
-    addCollider(city, l.x - collW / 2, l.z - collD / 2, l.x + collW / 2, l.z + collD / 2);
+    addCollider(city, l.x - collW / 2, l.z - collD / 2, l.x + collW / 2, l.z + collD / 2, collTop);
     city.landmarks.push(l);
   }
   return group;

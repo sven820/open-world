@@ -340,7 +340,7 @@ function openBigMap() {
   clickPlay.classList.add("hidden");
   const title = bigmapEl().querySelector(".bm-head h3");
   if (title && world) title.innerHTML = `${escapeHtml(world.mapName)} <small>MAP</small>`;
-  world.hud.showNotify(`${world ? world.mapName : "地图"} · 左键拖动平移 · 右键拖动旋转 · 滚轮缩放 · WASD 平移 · M 关闭`, 3000);
+  world.hud.showNotify(`${world ? world.mapName : "地图"} · 左键拖动平移 · 右键拖动旋转 · 滚轮以光标为中心缩放 · WASD 平移 · M 关闭`, 3000);
 }
 function closeBigMap() {
   bigOpen = false;
@@ -367,6 +367,7 @@ engine.onUpdate((dt, time) => {
       if (input.down("KeyD")) w.hud.panBig(pan, 0);
     } else {
       w.player.update(dt, input);
+      if (input.pressed("KeyC")) w.player.resetView();
       if (input.pressed("KeyF")) {
         if (w.player.driving) w.player.exit();
         else { const v = w.player.enterPrompt(); if (v) w.player.enter(v); }

@@ -16,11 +16,12 @@ import {
 import { searchPlaces } from "../config/placeSearch.js";
 import { dropAt, bendGeometry } from "../config/curvature.js";
 import { EXT_STEP_X, EXT_STEP_Z, asphaltHalf, corridorHalf } from "../data/cityData.js";
-import { areaPoly, clipAxisLine, worldBounds } from "../world/customMap.js";
+import { areaPoly, clipAxisLine, worldBounds, polyCenterLine } from "../world/customMap.js";
 import { GRID_OPACITY_DEFAULT } from "../data/mapStore.js";
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const uid = () => "o" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const fmtDist = (m) => (m >= 1000 ? `${(m / 1000).toFixed(2)}km` : `${Math.round(m)}m`);
 
 // 程序化道路类型（与 2D 编辑器一致）
 const ROAD_KINDS = ["street", "arterial", "boulevard"];
@@ -58,7 +59,11 @@ export class MapEditor3d {
     this._q = new THREE.Quaternion();
     this._snap = 5;
     this._dirty = false;
+    this._measureResult = null; // 上次测距结果 { points: [{x,z}], length }
     this._cesiumOn = localStorage.getItem("tr_e3_basemap") !== "0"; // 记住上次选择
+    // 图层显隐状态（图层控制面板）：持久化到 localStorage，重开编辑器后保持
+    this._layerVis = { base: true, img: true, anno: true, area: true, skeleton: true, road: true, river: true, object: true, origin: true, measure: true };
+    try { Object.assign(this._layerVis, JSON.parse(localStorage.getItem("tr_e3_layers") || "{}")); } catch { /* 忽略脏数据 */ }
   }
 
   /* ---------------- lifecycle ---------------- */
@@ -95,11 +100,21 @@ export class MapEditor3d {
       try { this._cesium.viewer.destroy(); } catch { /* 忽略 */ }
       this._cesium = null;
     }
+    if (this._labelTex) { // 测距标注贴图缓存（材质 dispose 不会释放贴图）
+      for (const t of this._labelTex.values()) t.dispose();
+      this._labelTex.clear();
+    }
     window.removeEventListener("resize", this._onResize);
     window.removeEventListener("keydown", this._onKey);
     if (this._compassEl) {
       this._compassEl.remove();
       this._compassEl = this._compassRose = this._compassTxt = null;
+    }
+    if (this._layersBtn) { this._layersBtn.remove(); this._layersBtn = null; }
+    if (this._layersPop) { this._layersPop.remove(); this._layersPop = null; }
+    if (this._onLayersOutside) {
+      document.removeEventListener("pointerdown", this._onLayersOutside, true);
+      this._onLayersOutside = null;
     }
     if (this._onSettingsOutside) {
       document.removeEventListener("pointerdown", this._onSettingsOutside, true);
@@ -118,10 +133,10 @@ export class MapEditor3d {
     vp.appendChild(canvas);
 
     // 罗盘：实时显示视线方位角（0°=正北，顺时针，地理约定与 lonLatAt 一致）；
-    // 双击把相机回正北（正南机位）
+    // 单击一键复位视角（正南方俯瞰范围中心的默认机位）
     const compass = document.createElement("div");
     compass.className = "e3-compass";
-    compass.title = "视线方位角（0°=正北）· 双击回正北";
+    compass.title = "视线方位角（0°=正北）· 点击一键复位视角";
     compass.innerHTML =
       '<div class="e3-compass-rose"><b class="n">N</b><b class="e">E</b><b class="s">S</b><b class="w">W</b></div>' +
       '<span class="e3-compass-txt"></span>';
@@ -129,13 +144,22 @@ export class MapEditor3d {
     this._compassEl = compass;
     this._compassRose = compass.querySelector(".e3-compass-rose");
     this._compassTxt = compass.querySelector(".e3-compass-txt");
-    compass.addEventListener("dblclick", () => {
-      const { camera, orbit } = this._three;
-      const off = camera.position.clone().sub(orbit.target);
-      const dist = Math.max(1, Math.hypot(off.x, off.z));
-      camera.position.set(orbit.target.x, orbit.target.y + off.y, orbit.target.z + dist);
-      this.status("视角已回正北（0°）");
-    });
+    compass.addEventListener("click", () => this._resetView());
+
+    // 图层控制：视口右侧（罗盘下方）按钮 + 弹出面板，开关底图影像层与场景内容层
+    const layersBtn = document.createElement("button");
+    layersBtn.type = "button";
+    layersBtn.className = "e3-layer-btn";
+    layersBtn.title = "图层控制：查看并开关各图层";
+    layersBtn.innerHTML = "<i>▤</i>"; // 仅图标，不显示文字
+    vp.appendChild(layersBtn);
+    this._layersBtn = layersBtn;
+    layersBtn.addEventListener("click", () => this._toggleLayers());
+
+    const layersPop = document.createElement("div");
+    layersPop.className = "e3-layers-pop hidden";
+    vp.appendChild(layersPop);
+    this._layersPop = layersPop;
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.shadowMap.enabled = true;
@@ -276,8 +300,8 @@ export class MapEditor3d {
     await import("cesium/Build/Cesium/Widgets/widgets.css");
     window.CESIUM_BASE_URL = "/cesium/";
     const info = basemapInfo();
-    if (!info.configured) {
-      this.status("天地图 key 未配置（.env.local: VITE_TIANDITU_KEY），已回退 Esri 影像");
+    if (info.builtinToken) {
+      this.status("天地图使用内置公共 token（.env.local: VITE_TIANDITU_KEY 可配专属 key）");
     }
 
     const el = document.getElementById("e3-cesium");
@@ -294,6 +318,7 @@ export class MapEditor3d {
       contextOptions: { webgl: { alpha: false } },
     });
     for (const p of buildImageryLayers(Cesium)) viewer.imageryLayers.addImageryProvider(p);
+    this._applyImageryVis(); // 恢复图层面板里被关闭的影像层
     const scene = viewer.scene;
     scene.globe.baseColor = Cesium.Color.fromCssColorString("#0d141c");
     scene.skyBox.show = false;
@@ -358,11 +383,120 @@ export class MapEditor3d {
     const { Cesium, viewer } = this._cesium;
     viewer.imageryLayers.removeAll();
     for (const p of buildImageryLayers(Cesium)) viewer.imageryLayers.addImageryProvider(p);
+    this._applyImageryVis(); // 图源切换重建后恢复影像层显隐
     const info = basemapInfo();
-    if (!info.configured) {
-      this.status("天地图 key 未配置（.env.local: VITE_TIANDITU_KEY），已回退 Esri 影像");
-    } else {
-      this.status(`底图已切换：${info.credit}`);
+    this.status(info.builtinToken
+      ? `底图已切换：${info.credit}（内置公共 token，可配 VITE_TIANDITU_KEY 替换）`
+      : `底图已切换：${info.credit}`);
+    if (this._cesiumOn) viewer.scene.requestRender();
+  }
+
+  /* ---------------- 图层控制 ---------------- */
+  // 底图影像层按 provider URL 分类（GeoQ 垫底 / 天地图注记 / 其余=卫星影像），
+  // 场景内容层按分组节点与 wrapper kind 开关；显隐状态持久化在 localStorage。
+  _layerDefs() {
+    const isTd = getBasemapSource() === "tianditu";
+    return [
+      {
+        title: "底图影像",
+        items: [
+          { key: "base", label: "深色矢量垫底", hint: "GeoQ · 免 key" },
+          { key: "img", label: "卫星影像", hint: isTd ? "天地图 img_w" : "Esri World Imagery" },
+          ...(isTd ? [{ key: "anno", label: "中文注记", hint: "天地图 cia_w" }] : []),
+        ],
+      },
+      {
+        title: "场景内容",
+        items: [
+          { key: "area", label: "范围网格", hint: "地图范围底板 + 网格" },
+          { key: "skeleton", label: "路网骨架", hint: "2D 数据：路网/地标/出生点" },
+          { key: "road", label: "道路", hint: "描边/手工道路要素" },
+          { key: "river", label: "河流", hint: "描边河流要素" },
+          { key: "object", label: "物件", hint: "树木 / 路灯 / 建筑" },
+          { key: "origin", label: "锚点标记", hint: "金色立柱 = 范围中心" },
+          { key: "measure", label: "测距结果", hint: "测距工具保留的标注" },
+        ],
+      },
+    ];
+  }
+
+  _toggleLayers() {
+    if (this._layersPop.classList.contains("hidden")) this._openLayers();
+    else this._closeLayers();
+  }
+
+  _openLayers() {
+    const pop = this._layersPop;
+    pop.innerHTML = "";
+    for (const group of this._layerDefs()) {
+      const h = document.createElement("div");
+      h.className = "e3-layer-cat";
+      h.textContent = group.title;
+      pop.appendChild(h);
+      for (const def of group.items) {
+        const on = this._layerVis[def.key] !== false;
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "e3-layer-row" + (on ? " on" : "");
+        row.innerHTML = `<span class="e3-layer-check"></span><span class="e3-layer-name">${def.label}<small>${def.hint}</small></span>`;
+        row.addEventListener("click", () => {
+          this._setLayerVis(def.key, this._layerVis[def.key] === false);
+          row.classList.toggle("on", this._layerVis[def.key] !== false);
+        });
+        pop.appendChild(row);
+      }
+    }
+    const hint = document.createElement("small");
+    hint.className = "e3-set-hint";
+    hint.textContent = "「卫星底图」整体开关在顶栏按钮";
+    pop.appendChild(hint);
+    pop.classList.remove("hidden");
+    this._layersBtn.classList.add("active");
+    // 捕获阶段监听外部点击关闭（与设置面板同套路）；先移除旧监听防堆积
+    setTimeout(() => {
+      if (this._onLayersOutside) document.removeEventListener("pointerdown", this._onLayersOutside, true);
+      this._onLayersOutside = (e) => {
+        if (!pop.contains(e.target) && e.target !== this._layersBtn) this._closeLayers();
+      };
+      document.addEventListener("pointerdown", this._onLayersOutside, true);
+    }, 0);
+  }
+
+  _closeLayers() {
+    this._layersPop.classList.add("hidden");
+    this._layersBtn.classList.remove("active");
+    if (this._onLayersOutside) {
+      document.removeEventListener("pointerdown", this._onLayersOutside, true);
+      this._onLayersOutside = null;
+    }
+  }
+
+  _setLayerVis(key, on) {
+    this._layerVis[key] = on;
+    try { localStorage.setItem("tr_e3_layers", JSON.stringify(this._layerVis)); } catch { /* 忽略 */ }
+    this._applyLayerVis();
+  }
+
+  // 统一应用显隐：影像层 + 场景分组 + 实体 wrapper（重建后由各创建点单独重设）
+  _applyLayerVis() {
+    this._applyImageryVis();
+    const vis = this._layerVis;
+    const t = this._three;
+    if (!t) return;
+    t.areaGroup.visible = vis.area !== false;
+    this._skeleton.visible = vis.skeleton !== false;
+    if (this._originMarker) this._originMarker.visible = vis.origin !== false;
+    if (this._measureGroup) this._measureGroup.visible = vis.measure !== false;
+    for (const w of this._wrappers?.values() || []) w.root.visible = vis[w.kind] !== false;
+  }
+
+  _applyImageryVis() {
+    if (!this._cesium) return;
+    const { viewer } = this._cesium;
+    for (const layer of viewer.imageryLayers) {
+      const url = String((layer.provider || layer.imageryProvider)?.url || "");
+      const key = url.includes("geoq") ? "base" : url.includes("T=cia_w") ? "anno" : "img";
+      layer.show = this._layerVis[key] !== false;
     }
     if (this._cesiumOn) viewer.scene.requestRender();
   }
@@ -421,6 +555,31 @@ export class MapEditor3d {
           el.querySelector("#e3-org-pick").addEventListener("click", () => {
             this._closeSettings();
             this._setOriginPickMode();
+          });
+        },
+      },
+      {
+        id: "measure",
+        title: "测量工具 · 距离",
+        render: (el) => {
+          const m = this._measureResult;
+          const measuring = !!(this.draft && this.draft.measure);
+          el.innerHTML = `
+            <div class="e3-set-row">
+              <button id="e3-ms-start" class="e3-set-btn primary">${measuring ? "回到测距（进行中）" : "在地图上测距"}</button>
+              <button id="e3-ms-clear" class="e3-set-btn" ${m ? "" : "disabled"}>清除结果</button>
+            </div>
+            ${m ? `<small class="e3-set-hint">上次测距：<b>${fmtDist(m.length)}</b> · ${m.points.length} 个点</small>` : ""}
+            <small class="e3-set-hint">单击地图依次加点，实时显示每段与总距离（贴地直线距离）；双击 / Enter 结束，Esc 取消，Shift 锁 45° 直线。完成后结果保留在图上，直到清除或重新测距。</small>
+          `;
+          el.querySelector("#e3-ms-start").addEventListener("click", () => {
+            this._closeSettings();
+            if (measuring) this._renderMeasurePanel(); // 测距进行中：恢复右侧会话面板
+            else this._startMeasure();
+          });
+          el.querySelector("#e3-ms-clear").addEventListener("click", () => {
+            this._clearMeasure();
+            this._openSettings(); // 重渲染以更新按钮/结果状态
           });
         },
       },
@@ -952,6 +1111,15 @@ export class MapEditor3d {
   _setTool(t) {
     this.tool = t;
     document.querySelectorAll("#e3-tools .e3-tool").forEach((b) => b.classList.toggle("active", b.dataset.tool === t));
+    this._syncRoadToolUI();
+  }
+
+  // 左侧「道路」按钮显示当前子模式（道路 / 地图描边 / 添加纵路 / 添加横路），子菜单高亮当前项
+  _syncRoadToolUI() {
+    const btn = document.querySelector('#e3-tools [data-tool="draw-road"]');
+    const span = btn && btn.querySelector("span");
+    if (span) span.textContent = { "draw-road": "地图描边", "add-roadX": "添加纵路", "add-roadZ": "添加横路" }[this.tool] || "道路";
+    if (this._roadSub) this._roadSub.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.tool === this.tool));
   }
 
   // 地图定位：进入拾取模式，下一次点击处成为范围中心（= 地图在地球上的位置）
@@ -1102,6 +1270,8 @@ export class MapEditor3d {
     } else if (this.tool === "set-origin") {
       this._setOriginAt(pt); // 点击处成为范围中心（= 地图在地球上的落点）
       this._setTool("select");
+    } else if (this.tool === "measure" && this.draft && this.draft.measure) {
+      this._measureAddPoint(pt, e);
     } else if (this.tool === "select") {
       const picked = this._pickObject(e);
       if (picked) this._select(picked.wrapper);
@@ -1115,10 +1285,10 @@ export class MapEditor3d {
 
   _onMove(e) {
     const d = this.draft;
-    if (!d || !(this.tool.startsWith("draw") || d.area)) return;
+    if (!d || !(this.tool.startsWith("draw") || d.area || d.measure)) return;
     let pt = this._groundPoint(e);
     if (!pt) return;
-    if (d.road && e.shiftKey) pt = this._snap45(pt); // Shift：45° 方向吸附
+    if ((d.road || d.measure) && e.shiftKey) pt = this._snap45(pt); // Shift：45° 方向吸附
     d.cursor = pt;
     // 拖描模式：按住左键沿道路移动，间距 + 转角双阈值采样（弯道自动加密，更贴合影像）
     if (d.road && d.free && e.buttons & 1) {
@@ -1137,12 +1307,14 @@ export class MapEditor3d {
     }
     this._updateDraftPreview();
     if (d.road) this._updateTracePanel();
+    else if (d.measure) this._updateMeasureLive();
   }
 
   _finishDraft() {
     if (!this.draft) return;
     if (this.draft.area) return this._finishAreaDraft();
     if (this.draft.road) return this._finishRoadTrace();
+    if (this.draft.measure) return this._finishMeasure();
     if (this.draft.points.length < 2) { this.draft = null; this._updateDraftPreview(); return; }
     const pts = this.draft.points.map((p) => [Math.round(p.x * 10) / 10, Math.round(p.z * 10) / 10]);
     if (this.tool === "draw-river") {
@@ -1190,10 +1362,11 @@ export class MapEditor3d {
     if (msg) this.status(msg);
   }
 
-  // 切换工具 / 开始新绘制前丢弃进行中的草稿（描边会话需同时恢复左键视角控制）
+  // 切换工具 / 开始新绘制前丢弃进行中的草稿（描边/测距会话需同时恢复左键视角控制）
   _discardDraft() {
     if (!this.draft) return;
     if (this.draft.road) this._endRoadTrace();
+    else if (this.draft.measure) this._endMeasure();
     else { this.draft = null; this._updateDraftPreview(); }
   }
 
@@ -1238,7 +1411,7 @@ export class MapEditor3d {
     if (d.mode === "poly" || (d.mode === "auto" && this._traceClosing(d.points))) return this._finishRoadPolyTrace();
     if (d.points.length < 2) { this._endRoadTrace("地图描边：至少 2 个节点才能生成道路"); return; }
     const pts = this._smoothPath(d.points.map((p) => [p.x, p.z]), false, Math.max(2, (d.width || 12) / 4));
-    const road = { id: uid(), points: pts, width: d.width || 12 };
+    const road = { id: uid(), points: pts, width: d.width || 12, zh: "描边道路", en: "New Rd", kind: "street", lanes: 2, sidewalk: 3, median: 0 };
     this.map.features.roads.push(road);
     this._rebuildFeature("roads");
     this._pushUndo("绘制道路");
@@ -1259,7 +1432,7 @@ export class MapEditor3d {
     }
     if (raw.length < 3) { this._endRoadTrace("取面描边：至少 3 个节点才能围合成面"); return; }
     const pts = this._smoothPath(raw.map((p) => [p.x, p.z]), true, Math.max(2, (d.width || 12) / 4), Math.max(10, (d.width || 12) * 2));
-    const road = { id: uid(), points: pts, width: d.width || 12, closed: true };
+    const road = { id: uid(), points: pts, width: d.width || 12, closed: true, zh: "面道路", en: "New Rd", kind: "street", lanes: 2, sidewalk: 3, median: 0 };
     this.map.features.roads.push(road);
     this._rebuildFeature("roads");
     this._pushUndo("取面生成道路");
@@ -1476,6 +1649,199 @@ export class MapEditor3d {
     if (done) done.disabled = d.points.length < 2;
   }
 
+  /* ---------------- 测距工具（设置面板入口） ---------------- */
+  // 会话式测距：单击地图依次加点，实时显示每段与总距离（局部米坐标直线距离，
+  // 与 lonLatAt 同一平面近似）。绿色胖线 + 屏幕空间恒定大小的距离标注（sprite 贴图缓存），
+  // 双击/Enter 结束后结果保留在图上，直到清除或重新开始。
+  _startMeasure() {
+    this._select(null);
+    this._discardDraft();
+    this._measureResult = null; // 开始新测距即移除上次结果
+    this._renderMeasureResult();
+    this.draft = { points: [], measure: true, redo: [] };
+    this._setTool("measure");
+    this._three.orbit.mouseButtons.LEFT = null; // 左键让位给加点，右键旋转 / 滚轮缩放不受影响
+    this._updateDraftPreview();
+    this._renderMeasurePanel();
+    this.status("测距：单击地图依次加点 —— 每段与总距离实时标注 · 双击/Enter 结束 · Esc 取消");
+  }
+
+  // 结束测距会话：清草稿、恢复左键视角控制、右侧面板回到默认
+  _endMeasure(msg) {
+    this.draft = null;
+    this._three.orbit.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+    if (this.tool === "measure") this._setTool("select");
+    this._updateDraftPreview();
+    this._renderProps();
+    if (msg) this.status(msg);
+  }
+
+  _clearMeasure() {
+    this._measureResult = null;
+    this._renderMeasureResult();
+  }
+
+  // 加点：双击结束产生的重复点击按 <0.8m 去重；Shift 锁 45° 方向
+  _measureAddPoint(pt, e) {
+    const d = this.draft;
+    if (!d || !d.measure) return;
+    if (e && e.shiftKey) pt = this._snap45(pt);
+    const last = d.points[d.points.length - 1];
+    if (last && Math.hypot(pt.x - last.x, pt.z - last.z) < 0.8) return;
+    d.points.push(pt);
+    d.redo = [];
+    this._updateDraftPreview();
+    this._renderMeasurePanel();
+  }
+
+  _finishMeasure() {
+    const d = this.draft;
+    if (!d || !d.measure) return;
+    if (d.points.length < 2) { this.status("测距：至少需要 2 个点（继续单击加点）"); return; }
+    const pts = d.points.map((p) => ({ x: Math.round(p.x * 10) / 10, z: Math.round(p.z * 10) / 10 }));
+    const length = this._polylineLen(pts.map((p) => [p.x, p.z]));
+    this._endMeasure();
+    this._measureResult = { points: pts, length };
+    this._renderMeasureResult();
+    this.status(`测距完成：总距离 ${fmtDist(length)} · ${pts.length} 个点（设置面板可清除 / 重新测距）`);
+  }
+
+  // 测距会话右侧面板：实时距离 + 完成/撤销/恢复/取消
+  _renderMeasurePanel() {
+    const d = this.draft;
+    if (!d || !d.measure) return;
+    const path = d.cursor ? [...d.points, d.cursor] : [...d.points];
+    const total = this._polylineLen(path.map((p) => [p.x, p.z]));
+    const el = document.getElementById("e3-props");
+    el.innerHTML = `
+      <h4>测距 · 进行中</h4>
+      <div class="me-stat">总距离 <b id="ep-ms-total">${fmtDist(total)}</b> · 节点 <b id="ep-ms-n">${d.points.length}</b></div>
+      <div class="me-stat">上一段 <b id="ep-ms-last">—</b></div>
+      <button class="me-btn" id="ep-ms-done">完成测距（Enter / 双击）</button>
+      <button class="me-btn" id="ep-ms-undo">撤销上一节点（Ctrl+Z）</button>
+      <button class="me-btn" id="ep-ms-redo">恢复节点（Ctrl+Y）</button>
+      <button class="me-del" id="ep-ms-cancel">取消测距（Esc）</button>
+      <p class="me-hint">单击地图依次加点（Shift 锁 45° 直线）· 每段距离标注在图上，总距离在末端 · 双击结束，结果保留到下次测距</p>`;
+    const bind = (id, fn, disabled) => {
+      const btn = el.querySelector(id);
+      btn.disabled = !!disabled;
+      btn.addEventListener("click", (e) => { e.currentTarget.blur(); fn(); });
+    };
+    bind("#ep-ms-done", () => this._finishMeasure(), d.points.length < 2);
+    bind("#ep-ms-undo", () => this._undoDraftPoint(), !d.points.length);
+    bind("#ep-ms-redo", () => this._redoDraftPoint(), !d.redo.length);
+    bind("#ep-ms-cancel", () => this._endMeasure("已取消测距"));
+  }
+
+  // 轻量刷新：鼠标移动只更新数字（拖动频繁，不能整面板重绘）
+  _updateMeasureLive() {
+    const d = this.draft;
+    if (!d || !d.measure) return;
+    const path = d.cursor ? [...d.points, d.cursor] : [...d.points];
+    const total = this._polylineLen(path.map((p) => [p.x, p.z]));
+    this.status(`测距中：总距离 ${fmtDist(total)} · ${d.points.length} 点 · 双击/Enter 结束 · Esc 取消`);
+    const el = document.getElementById("e3-props");
+    const t = el.querySelector("#ep-ms-total"), n = el.querySelector("#ep-ms-n"), last = el.querySelector("#ep-ms-last");
+    if (t) t.textContent = fmtDist(total);
+    if (n) n.textContent = d.points.length;
+    if (last && path.length >= 2) {
+      const a = path[path.length - 2], b = path[path.length - 1];
+      last.textContent = fmtDist(Math.hypot(b.x - a.x, b.z - a.z));
+    }
+  }
+
+  // 已完成测距结果的常驻显示（不参与草稿预览/重建清理，直到清除）
+  _renderMeasureResult() {
+    if (this._measureGroup) {
+      this._three.scene.remove(this._measureGroup);
+      this._measureGroup.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+      this._measureGroup = null;
+    }
+    if (!this._measureResult) return;
+    this._measureGroup = this._buildMeasureGroup(this._measureResult.points, null);
+    this._three.scene.add(this._measureGroup);
+    this._measureGroup.visible = this._layerVis.measure !== false; // 保持面板里的显隐状态
+  }
+
+  // 测距绘制组：绿色胖线（深色衬底）+ 节点圆点 + 每段中点距离标注 + 末端总距离标注，
+  // 全部跟随曲率下沉；cursor 为橡皮筋预览段
+  _buildMeasureGroup(points, cursor) {
+    const g = new THREE.Group();
+    const path = cursor ? [...points, cursor] : [...points];
+    const yAt = (p) => 0.16 - this._curveOffset(p.x, p.z);
+    if (path.length >= 2) {
+      const casing = this._fatLine(path, 8, 0x0b1220, 0.85, 0.14);
+      casing.renderOrder = 3;
+      const main = this._fatLine(path, 4, 0x4ade80, 1, 0.16);
+      main.renderOrder = 4;
+      g.add(casing, main);
+    }
+    for (const p of path) {
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(1.1, 10, 8),
+        new THREE.MeshBasicMaterial({ color: 0x4ade80, depthWrite: false }),
+      );
+      dot.position.set(p.x, yAt(p), p.z);
+      dot.renderOrder = 5;
+      g.add(dot);
+    }
+    for (let i = 1; i < path.length; i++) {
+      const a = path[i - 1], b = path[i];
+      const sp = this._measureLabel(fmtDist(Math.hypot(b.x - a.x, b.z - a.z)), false);
+      sp.position.set((a.x + b.x) / 2, yAt(a) + 5, (a.z + b.z) / 2);
+      g.add(sp);
+    }
+    if (path.length >= 2) {
+      const end = path[path.length - 1];
+      const total = this._polylineLen(path.map((p) => [p.x, p.z]));
+      const sp = this._measureLabel(`总 ${fmtDist(total)}`, true);
+      sp.position.set(end.x, yAt(end) + 14, end.z);
+      g.add(sp);
+    }
+    return g;
+  }
+
+  // 屏幕空间恒定大小的距离标注（sprite，sizeAttenuation=false）：
+  // 文字贴图按文本缓存（材质可随组丢弃，贴图保留复用，避免逐帧重建 canvas）
+  _measureLabel(text, accent) {
+    const cache = (this._labelTex ||= new Map());
+    const key = (accent ? "!" : "") + text;
+    if (cache.size > 80) { for (const t of cache.values()) t.dispose(); cache.clear(); }
+    let tex = cache.get(key);
+    if (!tex) {
+      const fs = 44, pad = 16;
+      const cnv = document.createElement("canvas");
+      let ctx = cnv.getContext("2d");
+      ctx.font = `600 ${fs}px sans-serif`;
+      cnv.width = Math.ceil(ctx.measureText(text).width) + pad * 2;
+      cnv.height = fs + pad * 2;
+      ctx = cnv.getContext("2d");
+      ctx.font = `600 ${fs}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const r = cnv.height / 2, w = cnv.width;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(1.5, 1.5, w - 3, cnv.height - 3, r); else ctx.rect(1.5, 1.5, w - 3, cnv.height - 3);
+      ctx.fillStyle = accent ? "rgba(6,26,16,.92)" : "rgba(11,18,32,.88)";
+      ctx.fill();
+      ctx.strokeStyle = accent ? "#4ade80" : "rgba(255,255,255,.4)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = accent ? "#8df0b6" : "#e8f2ff";
+      ctx.fillText(text, w / 2, cnv.height / 2 + 2);
+      tex = new THREE.CanvasTexture(cnv);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      cache.set(key, tex);
+    }
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: tex, transparent: true, depthTest: false, depthWrite: false, sizeAttenuation: false,
+    }));
+    const h = accent ? 0.052 : 0.04; // 屏幕高度占比（远近视角下标注大小恒定可读）
+    sp.scale.set(h * (tex.image.width / tex.image.height), h, 1);
+    sp.renderOrder = 10; // 恒在胖线/网格之上
+    return sp;
+  }
+
   /* ---------------- 范围描边（多边形地图范围） ---------------- */
   // 进入范围描边模式：单击加点，双击/Enter/「完成描边」按钮结束（≥3 点），Esc 取消；
   // 绘制中右侧面板停留在描边面板（点数 + 撤销/恢复/完成/取消），支持点级 Ctrl+Z / Ctrl+Y
@@ -1519,22 +1885,24 @@ export class MapEditor3d {
     });
   }
 
-  // 描边点级撤销 / 恢复（仅作用于草稿，不影响已提交内容；范围描边与地图描边通用）
+  // 描边点级撤销 / 恢复（仅作用于草稿，不影响已提交内容；范围描边/地图描边/测距通用）
   _undoDraftPoint() {
     const d = this.draft;
-    if (!d || (!d.area && !d.road) || !d.points.length) return;
+    if (!d || (!d.area && !d.road && !d.measure) || !d.points.length) return;
     d.redo.push(d.points.pop());
     this._updateDraftPreview();
     if (d.road) this._updateTracePanel();
+    else if (d.measure) this._renderMeasurePanel();
     else this._renderAreaDraftPanel();
   }
 
   _redoDraftPoint() {
     const d = this.draft;
-    if (!d || (!d.area && !d.road) || !d.redo.length) return;
+    if (!d || (!d.area && !d.road && !d.measure) || !d.redo.length) return;
     d.points.push(d.redo.pop());
     this._updateDraftPreview();
     if (d.road) this._updateTracePanel();
+    else if (d.measure) this._renderMeasurePanel();
     else this._renderAreaDraftPanel();
   }
 
@@ -1692,6 +2060,8 @@ export class MapEditor3d {
   _makeWrapper(kind, data, object3d) {
     const root = new THREE.Group();
     root.userData.entityRoot = true; // 标记必须设在场景根节点上，_rebuildAll 清理时据此移除旧网格
+    root.userData.layerKind = kind; // 图层控制面板按此分类开关
+    root.visible = this._layerVis[kind] !== false; // 重建出的实体保持面板里的显隐状态
     // 物件整体下沉贴合球面（数据仍存平面 x/z，y 仅是渲染偏移，中心零基准）
     if (kind === "object") root.position.set(data.pos[0], -this._curveOffset(data.pos[0], data.pos[1]), data.pos[1]), root.rotation.y = data.rot || 0;
     root.add(object3d);
@@ -1810,6 +2180,27 @@ export class MapEditor3d {
       pole.position.set(sp.x, 12 - y, sp.z);
       g.add(disc, pole);
     }
+    // 3D 描边道路中心引导线（与程序化道路同款胖线 + 逐帧淡出）：
+    // 线形路沿折线（折线即路中心）；取面路用最小外接矩形长轴中线（直路取面才有）
+    const f = this.map.features;
+    for (const r of (f && f.roads) || []) {
+      let pts = null;
+      if (r.closed && r.points.length >= 3) {
+        const cl = polyCenterLine(r.points, 80);
+        if (cl) pts = [{ x: cl[0][0], z: cl[0][1] }, { x: cl[1][0], z: cl[1][1] }];
+      } else if (r.points.length >= 2) {
+        pts = r.points.map(([x, z]) => ({ x, z }));
+      }
+      if (!pts) continue;
+      const sel = this.sel && this.sel.kind === "road" && this.sel.data === r;
+      const color = sel ? 0xf2c14e : 0x8ea3bd;
+      const line = this._fatLine(pts, sel ? 3 : 2, color, sel ? 0.95 : 0.8, 0.06);
+      line.userData.roadW = r.width || 12;
+      line.userData.baseOp = sel ? 0.95 : 0.8;
+      this._roadLines.push(line);
+      line.renderOrder = 2;
+      g.add(line);
+    }
   }
 
   // 中心引导线逐帧透明度：近景路带已呈现真实宽度 → 引导线淡化为路面标线；
@@ -1824,6 +2215,17 @@ export class MapEditor3d {
       const t = clamp((line.userData.roadW * pxPerWorld - 3) / 5, 0, 1); // 0=远景 1=近景
       line.material.opacity = line.userData.baseOp * (1 - 0.8 * t);
     }
+  }
+
+  // 一键复位视角：回到正南方俯瞰范围中心的默认机位（与打开编辑器时一致，屏幕上方 = 北）
+  _resetView() {
+    const { camera, orbit } = this._three;
+    const g = this._three.areaGroup;
+    const cx = g ? g.position.x : 0, cz = g ? g.position.z : 0; // 范围中心（拖走范围后仍回正俯瞰）
+    orbit.target.set(cx, 0, cz);
+    camera.position.set(cx, 140, cz + 260);
+    orbit.update();
+    this.status("视角已复位（正南方俯瞰范围中心）");
   }
 
   // 罗盘逐帧更新：视线方位角 = 视线方向相对真北（-Z）的顺时针夹角
@@ -1865,7 +2267,7 @@ export class MapEditor3d {
 
   /* ---------------- selection / properties ---------------- */
   _select(w) {
-    const wasRoad = this.sel && (this.sel.kind === "roadX" || this.sel.kind === "roadZ");
+    const wasRoad = this.sel && (this.sel.kind === "roadX" || this.sel.kind === "roadZ" || this.sel.kind === "road");
     this.sel = w;
     const tc = this._three.tc;
     if (w) {
@@ -1876,8 +2278,8 @@ export class MapEditor3d {
       tc.detach();
       this._renderProps();
     }
-    // 道路选中/取消时刷新骨架高亮（金色 = 选中）
-    if (wasRoad || (w && (w.kind === "roadX" || w.kind === "roadZ"))) this._rebuildSkeleton();
+    // 道路（程序化/描边）选中/取消时刷新骨架高亮（金色 = 选中）
+    if (wasRoad || (w && (w.kind === "roadX" || w.kind === "roadZ" || w.kind === "road"))) this._rebuildSkeleton();
   }
 
   _syncGizmoToData() {
@@ -2054,9 +2456,9 @@ export class MapEditor3d {
         <label>名称<input id="ep-r-zh" value="${r.zh || ""}" maxlength="10" /></label>
         <label>英文名<input id="ep-r-en" value="${r.en || ""}" maxlength="24" /></label>
         <label>类型<select id="ep-r-kind">${ROAD_KINDS.map((k) => `<option value="${k}" ${k === (r.kind || "street") ? "selected" : ""}>${ROAD_KIND_ZH[k]}</option>`).join("")}</select></label>
-        <label>车道<select id="ep-r-lanes">${[1, 2, 3, 4].map((n) => `<option ${n === (r.lanes || 1) ? "selected" : ""}>${n}</option>`).join("")}</select></label>
-        <label>人行道宽<input id="ep-r-sw" type="number" min="0" max="12" value="${r.sidewalk ?? 3}" /></label>
-        <label>分隔带宽<input id="ep-r-md" type="number" min="0" max="14" value="${r.median ?? 0}" /></label>
+        <label>车道（每条宽3.4m）<select id="ep-r-lanes">${[1, 2, 3, 4].map((n) => `<option ${n === (r.lanes || 1) ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+        <label>人行道宽（m）<input id="ep-r-sw" type="number" min="0" max="12" value="${r.sidewalk ?? 3}" /></label>
+        <label>分隔带宽（m）<input id="ep-r-md" type="number" min="0" max="14" value="${r.median ?? 0}" /></label>
         <div class="me-pos">${kind === "roadX" ? `X ${r.at}` : `Z ${r.at}`}</div>
         <button class="me-del" id="ep-r-del">删除道路</button>`;
       const edit = (fn) => (e) => {
@@ -2078,20 +2480,58 @@ export class MapEditor3d {
       el.querySelector("#ep-r-del").addEventListener("click", () => this._deleteSel());
       return;
     }
-    if (kind === "road" || kind === "river") {
-      const poly = kind === "road" && data.closed;
+    if (kind === "road") {
+      // 描边道路：与程序化横/纵路同套属性（名称/英文/类型/人行道/分隔带）。
+      // 无车道数——描边路宽度即路幅，路面宽窄由「宽度」决定
+      const r = data;
+      const poly = !!r.closed;
       el.innerHTML = `
-        <h4>${poly ? "面道路" : kind === "road" ? "描边道路" : "河流"} · 属性</h4>
+        <h4>${poly ? "面道路" : "描边道路"} · 属性</h4>
+        <label>名称<input id="ep-r-zh" value="${(r.zh ?? r.name) || ""}" maxlength="10" /></label>
+        <label>英文名<input id="ep-r-en" value="${r.en || ""}" maxlength="24" /></label>
+        <label>类型<select id="ep-r-kind">${ROAD_KINDS.map((k) => `<option value="${k}" ${k === (r.kind || "street") ? "selected" : ""}>${ROAD_KIND_ZH[k]}</option>`).join("")}</select></label>
+        <label>车道（每方向）<select id="ep-r-lanes">${[1, 2, 3, 4].map((n) => `<option ${n === (r.lanes || 2) ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+        ${poly ? "" : `<label>宽度(m)<input id="ep-w" type="number" min="4" max="80" value="${r.width}" /></label>`}
+        <label>人行道宽（m）<input id="ep-r-sw" type="number" min="0" max="12" value="${r.sidewalk ?? 3}" /></label>
+        <label>分隔带宽（m）<input id="ep-r-md" type="number" min="0" max="14" value="${r.median ?? 0}" /></label>
+        <div class="me-pos">${r.points.length} 个点${poly ? ` · 约 ${Math.round(Math.abs(this._polyArea(r.points)))}㎡` : ""}</div>
+        <button class="me-del" id="ep-del">删除道路</button>`;
+      const edit = (fn) => (e) => {
+        fn(e);
+        this._dirty = true;
+        this._rebuildAll();
+        const w = this._wrappers.get(r.id);
+        if (w) { this.sel = w; this._three.tc.attach(w.root); } // 重建后接回新 wrapper，保持选中
+        this._pushUndo("编辑描边道路");
+      };
+      // 名称逐键实时写入（change 需失焦，输完直接点画布会随面板重绘丢失），失焦时再重建/入栈
+      const live = (fn) => (e) => { fn(e); this._dirty = true; };
+      el.querySelector("#ep-r-zh").addEventListener("input", live((e) => { r.zh = e.target.value; }));
+      el.querySelector("#ep-r-en").addEventListener("input", live((e) => { r.en = e.target.value; }));
+      el.querySelector("#ep-r-zh").addEventListener("change", edit(() => {}));
+      el.querySelector("#ep-r-en").addEventListener("change", edit(() => {}));
+      el.querySelector("#ep-r-kind").addEventListener("change", edit((e) => { r.kind = e.target.value; }));
+      el.querySelector("#ep-r-lanes").addEventListener("change", edit((e) => { r.lanes = +e.target.value || 2; }));
+      el.querySelector("#ep-r-sw").addEventListener("change", edit((e) => { r.sidewalk = clamp(+e.target.value || 0, 0, 12); }));
+      el.querySelector("#ep-r-md").addEventListener("change", edit((e) => { r.median = clamp(+e.target.value || 0, 0, 14); }));
+      if (!poly) {
+        el.querySelector("#ep-w").addEventListener("input", (e) => {
+          r.width = clamp(+e.target.value || 12, 4, 80);
+          this._rebuildAll(); this._dirty = true;
+          const w = this._wrappers.get(r.id);
+          if (w) { this.sel = w; this._three.tc.attach(w.root); } // 同步 Gizmo，但不重绘面板（避免输入被打断丢失）
+        });
+        el.querySelector("#ep-w").addEventListener("change", () => this._pushUndo("调整道路宽度"));
+      }
+      el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
+      return;
+    }
+    if (kind === "river") {
+      el.innerHTML = `
+        <h4>河流 · 属性</h4>
         <label>名称<input id="ep-name" value="${data.name || ""}" maxlength="10" /></label>
-        ${poly ? "" : `<label>宽度(m)<input id="ep-w" type="number" min="4" max="80" value="${data.width}" /></label>`}
-        <div class="me-pos">${data.points.length} 个点${poly ? ` · 约 ${Math.round(Math.abs(this._polyArea(data.points)))}㎡` : ""}</div>
+        <div class="me-pos">${data.points.length} 个点</div>
         <button class="me-del" id="ep-del">删除</button>`;
-      if (!poly) el.querySelector("#ep-w").addEventListener("input", (e) => {
-        data.width = clamp(+e.target.value || 12, 4, 80);
-        this._rebuildAll(); this._dirty = true;
-        const w = this._wrappers.get(data.id);
-        if (w) { this.sel = w; this._three.tc.attach(w.root); } // 同步 Gizmo，但不重绘面板（避免输入被打断丢失）
-      });
       // 名称用 input 事件逐键写入：change 需失焦才触发，输完直接点画布会随面板重绘丢字
       el.querySelector("#ep-name").addEventListener("input", (e) => { data.name = e.target.value; this._dirty = true; });
       el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
@@ -2132,6 +2572,11 @@ export class MapEditor3d {
     }
     if (this.draft.road) {
       this._draftGroup = this._buildRoadTraceGroup();
+      if (this._draftGroup) this._three.scene.add(this._draftGroup);
+      return;
+    }
+    if (this.draft.measure) {
+      this._draftGroup = this._buildMeasureGroup(this.draft.points, this.draft.cursor);
       if (this._draftGroup) this._three.scene.add(this._draftGroup);
       return;
     }
@@ -2294,14 +2739,14 @@ export class MapEditor3d {
     this._dirty = true;
   }
   _undo() {
-    if (this.draft && (this.draft.area || this.draft.road)) { this._undoDraftPoint(); return; } // 描边中：撤销草稿点
+    if (this.draft && (this.draft.area || this.draft.road || this.draft.measure)) { this._undoDraftPoint(); return; } // 描边/测距中：撤销草稿点
     if (this.undoStack.length <= 1) return;
     this.redoStack.push(this.undoStack.pop());
     this._applySnapshot(this.undoStack[this.undoStack.length - 1]);
     this.status("已撤销");
   }
   _redo() {
-    if (this.draft && (this.draft.area || this.draft.road)) { this._redoDraftPoint(); return; } // 描边中：恢复草稿点
+    if (this.draft && (this.draft.area || this.draft.road || this.draft.measure)) { this._redoDraftPoint(); return; } // 描边/测距中：恢复草稿点
     const s = this.redoStack.pop();
     if (!s) return;
     this.undoStack.push(s);
@@ -2353,6 +2798,7 @@ export class MapEditor3d {
       `<button data-tool="add-roadZ">═<span>添加横路</span></button>` +
       `<button data-tool="draw-road">║<span>地图描边</span></button>`;
     bar.appendChild(roadSub);
+    this._roadSub = roadSub; // 供 _syncRoadToolUI 高亮当前子模式
     const closeRoadSub = () => roadSub.classList.add("hidden");
     roadSub.querySelectorAll("button").forEach((b) => {
       b.addEventListener("click", () => {
@@ -2362,6 +2808,7 @@ export class MapEditor3d {
         this._discardDraft();
         this.tool = t;
         bar.querySelectorAll(".e3-tool").forEach((x) => x.classList.toggle("active", x === roadBtn));
+        this._syncRoadToolUI();
         this._select(null);
         this.status(t === "add-roadX"
           ? "添加纵向路（南北向）：点击地图放置，放置后可拖动/编辑属性"
@@ -2373,12 +2820,10 @@ export class MapEditor3d {
       b.addEventListener("click", () => {
         const t = b.dataset.tool;
         if (t === "set-origin") { this._setOriginPickMode(); return; }
-        // 点击「道路」即选中该工具（进入地图描边并高亮），子菜单仍由下方切换器弹出
-        if (t === "draw-road") { this._startRoadTrace(); return; }
-        if (b !== roadBtn) closeRoadSub(); // 道路按钮由下方切换器自行收起/弹出
+        if (b === roadBtn) return; // 「道路」按钮只负责弹出子菜单（下方绑定），不改动当前子模式
+        closeRoadSub(); // 道路按钮由下方切换器自行收起/弹出
         this._discardDraft();
-        this.tool = t;
-        bar.querySelectorAll(".e3-tool").forEach((x) => x.classList.toggle("active", x === b));
+        this._setTool(t); // 高亮 + 同步「道路」按钮子模式文案
         this._select(null);
         if (t === "area") {
           this._selectArea(); // 选中地图范围，Gizmo 立即可用
@@ -2395,6 +2840,7 @@ export class MapEditor3d {
     });
     // 道路按钮：切换子菜单显隐（后绑定，确保先执行通用处理再弹出）
     roadBtn.addEventListener("click", () => {
+      this._syncRoadToolUI(); // 弹出前刷新子菜单高亮，反映当前子模式
       roadSub.style.top = roadBtn.offsetTop + "px";
       roadSub.classList.toggle("hidden");
     });
@@ -2421,11 +2867,12 @@ export class MapEditor3d {
           return;
         }
         if (this.draft && this.draft.road) { this._endRoadTrace("已取消地图描边"); return; }
+        if (this.draft && this.draft.measure) { this._endMeasure("已取消测距"); return; }
         this.draft = null; this._updateDraftPreview(); this._select(null);
       }
       else if (e.key === "Enter") this._finishDraft();
       else if (e.key === "Delete" || e.key === "Backspace") {
-        if (this.draft && (this.draft.area || this.draft.road)) { this._undoDraftPoint(); return; } // 描边中：撤销上一顶点
+        if (this.draft && (this.draft.area || this.draft.road || this.draft.measure)) { this._undoDraftPoint(); return; } // 描边/测距中：撤销上一顶点
         this._deleteSel();
       }
       else if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); this._undo(); }

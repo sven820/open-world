@@ -2,15 +2,15 @@
 // （src/components/wayline/utils/placeSearch.js）：
 //
 // 数据源固定为天地图「地名搜索 V2.0」（api.tianditu.gov.cn/v2/search）：
-// - token 复用天地图浏览器端 token（config/cesium.js 的 tiandituSearchKey，
-//   同一开发者账号下瓦片与搜索通用），国内网络稳定、中文 POI 覆盖全；
+// - token 复用天地图浏览器端 token（config/tianditu.js 的 tiandituKey，优先
+//   VITE_TIANDITU_KEY，同一开发者账号下瓦片与搜索通用），国内网络稳定、中文 POI 覆盖全；
 // - 响应 CORS 开放、浏览器可直接 GET（浏览器端 token 要求请求带浏览器 UA / Referer，
 //   浏览器 fetch 天然满足）；坐标系 CGCS2000 ≈ WGS84，喂 Cesium 无需纠偏。
 //
 // 高德 / 百度不取：前端直调要么 CORS 受限、要么要求安全密钥走服务端代理（即需要后端）；
 // Nominatim（OSM）属境外服务（国内网络实测不可达），均不作为数据源。
 
-import { tiandituSearchKey } from "./cesium.js";
+import { tiandituKey as tiandituSearchKey } from "./tianditu.js";
 
 const TIANDITU_SEARCH_URL = "https://api.tianditu.gov.cn/v2/search";
 

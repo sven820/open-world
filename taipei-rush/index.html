@@ -59,11 +59,11 @@
 
     <div class="hud-bc">
       <div class="prompt hidden" id="hud-prompt"><kbd>F</kbd><span>上车</span></div>
-      <div class="tip" id="hud-tip">WASD 移动 · 左键拖动移动视角 · 右键拖动旋转视角 · 滚轮缩放 · Shift 奔跑 · Space 跳跃 · F 上车 · M 地图</div>
+      <div class="tip" id="hud-tip">WASD 移动 · 左键拖动平移镜头 · 右键拖动旋转视角 · 滚轮缩放（拉远自动升空俯瞰） · Shift 奔跑 · Space 跳跃 · F 上车 · M 地图</div>
     </div>
 
     <div class="hud-br">
-      <div class="controls-mini"><kbd>M</kbd> 地图　<kbd>F</kbd> 上下车　<kbd>C</kbd> 视角</div>
+      <div class="controls-mini"><kbd>M</kbd> 地图　<kbd>F</kbd> 上下车　<kbd>C</kbd> 视角复位</div>
     </div>
 
     <div class="speedo hidden" id="speedo">
@@ -89,9 +89,9 @@
       <button class="btn" id="btn-settings">设置 <span>SETTINGS</span></button>
       <div class="menu-controls">
         <div><kbd>W A S D</kbd> 移动</div>
-        <div><kbd>左键</kbd> 拖动移动视角</div>
+        <div><kbd>左键</kbd> 拖动平移镜头</div>
         <div><kbd>右键</kbd> 拖动旋转视角</div>
-        <div><kbd>滚轮</kbd> 缩放视角</div>
+        <div><kbd>滚轮</kbd> 缩放（拉远升空俯瞰）</div>
         <div><kbd>Shift</kbd> 奔跑</div>
         <div><kbd>Space</kbd> 跳跃</div>
         <div><kbd>F</kbd> 上车 / 下车</div>
@@ -110,7 +110,7 @@
       </div>
     </div>
     <canvas id="bigmap-canvas" width="1100" height="620"></canvas>
-    <div class="bm-foot"><span>左键拖动平移 · 右键拖动旋转视角 · 滚轮缩放 · WASD 平移 · M 关闭</span><span id="bm-pos">—</span></div>
+    <div class="bm-foot"><span>左键拖动平移 · 右键拖动旋转 · 滚轮以光标为中心缩放 · WASD 平移 · M 关闭</span><span id="bm-pos">—</span></div>
   </div>
 
   <div id="map-select" class="hidden">

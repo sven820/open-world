@@ -13,7 +13,7 @@ import {
   makeSidewalkTexture, makeAsphaltTexture, makeRoofTexture, makeTileStripTexture,
 } from "./textures.js";
 import { scooterParts, scooterParts as _sp } from "../entities/models.js";
-import { buildCustomMap, worldBounds } from "./customMap.js";
+import { buildCustomMap, worldBounds, pointInPoly } from "./customMap.js";
 
 const FLOOR_H = 3.15;
 const GROUND_H = 4.0;
@@ -27,15 +27,18 @@ class ColliderGrid {
     this.map = new Map();
   }
   key(ix, iz) { return ix * 73856093 ^ iz * 19349663; }
-  add(x0, z0, x1, z1) {
+  // top：碰撞体顶面高度（米）。相机遮挡检测用它判断"从楼顶上方掠过"不算遮挡；
+  // 不传时视为无限高。地面碰撞（resolve）不使用该值。
+  add(x0, z0, x1, z1, top = Infinity) {
     const c = this.cell;
     const i0 = Math.floor(x0 / c), i1 = Math.floor(x1 / c);
     const j0 = Math.floor(z0 / c), j1 = Math.floor(z1 / c);
+    const rec = [x0, z0, x1, z1, top];
     for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
       const k = this.key(i, j);
       let arr = this.map.get(k);
       if (!arr) { arr = []; this.map.set(k, arr); }
-      arr.push([x0, z0, x1, z1]);
+      arr.push(rec);
     }
   }
   resolve(p, r) {
@@ -74,16 +77,21 @@ class ColliderGrid {
     return p;
   }
   // point-vs-building test (used for third-person camera collision)
-  blocked(x, z, r) {
+  // y：查询点高度。高于该碰撞体顶面时不算遮挡（相机从楼顶上方掠过）。
+  blocked(x, z, r, y = -Infinity) {
     const c = this.cell;
     const i0 = Math.floor((x - r) / c), i1 = Math.floor((x + r) / c);
     const j0 = Math.floor((z - r) / c), j1 = Math.floor((z + r) / c);
-    const seen = new Set();
+    // 复用去重数组：相机遮挡每帧会调用几十次，避免每次分配 Set
+    const seen = this._seen || (this._seen = []);
+    seen.length = 0;
     for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
       const arr = this.map.get(this.key(i, j));
       if (!arr) continue;
       for (const b of arr) {
-        if (seen.has(b)) continue; seen.add(b);
+        if (seen.indexOf(b) !== -1) continue;
+        seen.push(b);
+        if (y > b[4]) continue;
         const [x0, z0, x1, z1] = b;
         if (x > x0 && x < x1 && z > z0 && z < z1) return true;
         const nx = Math.max(x0, Math.min(x, x1));
@@ -93,6 +101,33 @@ class ColliderGrid {
       }
     }
     return false;
+  }
+
+  // 该点（含半径 r）覆盖范围内最高的碰撞体顶面；没有则返回 0。
+  // 相机平移进楼群时用它把镜头抬到楼顶上方（越过楼飞，而不是穿进去）。
+  topAt(x, z, r) {
+    const c = this.cell;
+    const i0 = Math.floor((x - r) / c), i1 = Math.floor((x + r) / c);
+    const j0 = Math.floor((z - r) / c), j1 = Math.floor((z + r) / c);
+    const seen = this._seenTop || (this._seenTop = []);
+    seen.length = 0;
+    let top = 0;
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const arr = this.map.get(this.key(i, j));
+      if (!arr) continue;
+      for (const b of arr) {
+        if (seen.indexOf(b) !== -1) continue;
+        seen.push(b);
+        const t = b[4];
+        if (!Number.isFinite(t) || t <= top) continue;
+        const [x0, z0, x1, z1] = b;
+        const nx = Math.max(x0, Math.min(x, x1));
+        const nz = Math.max(z0, Math.min(z, z1));
+        const dx = x - nx, dz = z - nz;
+        if (dx * dx + dz * dz < r * r) top = t;
+      }
+    }
+    return top;
   }
 }
 
@@ -121,7 +156,29 @@ export class City {
       : { minX: -1072, maxX: 1462, minZ: -602, maxZ: 582 };
     this.data = data || null;   // 供 HUD 读取描边/范围数据
     this.custom = null;         // buildCustomMap 结果（描边内容渲染数据）
-    this.spawnPoint = null;     // 有描边内容时覆盖默认出生点（内容包围盒中心）
+    // 3D 描边道路走廊预计算：程序化建筑避让 + 玩家脚底高度（路面 0.18 / 人行道 0.24）
+    this.traceCorridors = [];
+    for (const r of (data && data.features && data.features.roads) || []) {
+      const ptsRaw = r.points || []; // 原始 [x,z] 数组（pointInPoly 需要）
+      if (ptsRaw.length < 2) continue;
+      const pts = ptsRaw.map(([x, z]) => ({ x, z }));
+      const roadHalf = (r.width || 12) / 2;
+      const sw = Math.min(Math.max(r.sidewalk ?? 3, 0), 12);
+      const segs = [], samples = [];
+      for (let i = 0; i + 1 < pts.length; i++) {
+        const a = pts[i], b = pts[i + 1];
+        segs.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z });
+        const len = Math.hypot(b.x - a.x, b.z - a.z);
+        const n = Math.max(1, Math.ceil(len / 3)); // ~3m 采样，供建筑矩形快速相交测试
+        for (let k = 0; k < n; k++) samples.push({ x: a.x + ((b.x - a.x) * k) / n, z: a.z + ((b.z - a.z) * k) / n });
+      }
+      samples.push(pts[pts.length - 1]);
+      this.traceCorridors.push({
+        pts: ptsRaw, closed: !!r.closed, segs, samples,
+        roadHalf, edgeHalf: roadHalf + sw, keepHalf: roadHalf + sw + 1.5,
+      });
+    }
+    this.spawnPoint = null;     // 出生点：编辑器设置的 spawn 优先，未设置时用描边内容包围盒中心
 
     this.materials = {};
     this.facades = makeFacades();
@@ -157,7 +214,10 @@ export class City {
     if (custom) {
       this.group.add(custom.group);
       this.custom = custom;
-      this.spawnPoint = custom.center; // 出生在描边地图中部，而非程序化台北
+      // 出生点优先用编辑器设置的 spawn（含朝向 heading）；
+      // 仅当未设置/坐标无效时，才退回描边内容包围盒中心（旧行为）
+      const sp = this.data && this.data.spawn;
+      this.spawnPoint = sp && Number.isFinite(sp.x) && Number.isFinite(sp.z) ? sp : custom.center;
     }
     this._finalize();
     this.readyState = true;
@@ -606,6 +666,21 @@ export class City {
     }
   }
 
+  // 建筑矩形是否触碰描边道路走廊；取面路另判“整体落在填充面内”
+  _rectHitsCorridor(x0, x1, z0, z1, c) {
+    for (const p of c.samples) {
+      const dx = Math.max(x0 - p.x, 0, p.x - x1);
+      const dz = Math.max(z0 - p.z, 0, p.z - z1);
+      if (dx * dx + dz * dz <= c.keepHalf * c.keepHalf) return true;
+    }
+    if (c.closed) {
+      for (const [px, pz] of [[x0, z0], [x1, z0], [x1, z1], [x0, z1]]) {
+        if (pointInPoly(px, pz, c.pts)) return true;
+      }
+    }
+    return false;
+  }
+
   _pickFacade(district, floors, kind) {
     const idxByStyle = {
       ximending: [0, 3, 7, 8, 9, 10, 2],
@@ -630,6 +705,10 @@ export class City {
     // exclusion zones (landmarks)
     for (const r of landRects) {
       if (x0 < r.x1 && x1 > r.x0 && z0 < r.z1 && z1 > r.z0) return;
+    }
+    // 3D 描边道路走廊避让：建筑压住路面/人行道（含退让余量）则不放
+    for (const c of this.traceCorridors) {
+      if (this._rectHitsCorridor(x0, x1, z0, z1, c)) return;
     }
 
     const style = district.style || { floors: [3, 9], towers: 0.08, neon: 0.5, old: 0.5, shops: 0.85 };
@@ -680,7 +759,7 @@ export class City {
       this._addStorefront(x0, x1, z0, z1, facing, district, variant);
     }
 
-    this.colliders.add(x0, z0, x1, z1);
+    this.colliders.add(x0, z0, x1, z1, y1);
   }
 
   _addStorefront(x0, x1, z0, z1, facing, district, variant) {

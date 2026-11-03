@@ -2,7 +2,7 @@
 // 数据结构与 src/data/cityData.js 同构，保存通过 opts.onSave(data) 回调。
 
 import { asphaltHalf, corridorHalf, EXT_STEP_X, EXT_STEP_Z, mapBounds } from "../data/cityData.js";
-import { areaPoly, clipAxisLine, worldBounds } from "../world/customMap.js";
+import { areaPoly, clipAxisLine, worldBounds, polyCenterLine } from "../world/customMap.js";
 
 const KINDS = ["street", "arterial", "boulevard"];
 const KIND_ZH = { street: "街道", arterial: "干道", boulevard: "大道" };
@@ -69,7 +69,7 @@ export class MapEditor {
 
   /* ---------- data ---------- */
   _collect() {
-    return {
+    const d = {
       name: this.nameEl.value.trim() || "未命名地图",
       roadsX: this.map.roadsX,
       roadsZ: this.map.roadsZ,
@@ -78,6 +78,10 @@ export class MapEditor {
       spawn: this.map.spawn,
       extRoads: !!this.map.extRoads,
     };
+    // 3D 描边内容原样带回：2D 里对描边道路的平移/删除/改属性才能保存生效
+    if (this.map.features) d.features = this.map.features;
+    if (this.map.objects) d.objects = this.map.objects;
+    return d;
   }
 
   _save() {
@@ -151,9 +155,16 @@ export class MapEditor {
         this.sel = hit;
         if (hit) {
           this.drag = { mode: "obj", hit };
-          this.status(hit.kind === "spawn" ? "拖动出生点位置" : "拖动调整位置 · Delete 删除");
+          if (hit.kind === "troad") {
+            // 描边道路整体平移：快照按下时的点集与指针位置，拖动按差值平移
+            this.drag.wx = w.x; this.drag.wz = w.z;
+            this.drag.orig = hit.obj.points.map((p) => [...p]);
+          }
+          this.status(hit.kind === "spawn" ? "拖动出生点位置"
+            : hit.kind === "troad" ? "拖动整体平移 · 右侧编辑属性 · Delete 删除"
+            : "拖动调整位置 · Delete 删除");
         } else {
-          this.status("点击道路 / 地标 / 出生点以选中");
+          this.status("点击道路 / 描边道路 / 地标 / 出生点以选中");
         }
         this._renderProps();
         this._draw();
@@ -196,6 +207,10 @@ export class MapEditor {
         const { kind, obj } = this.drag.hit;
         if (kind === "roadX") obj.at = round(w.x);
         else if (kind === "roadZ") obj.at = round(w.z);
+        else if (kind === "troad") {
+          const dx = round(w.x - this.drag.wx), dz = round(w.z - this.drag.wz);
+          obj.points = this.drag.orig.map(([x, z]) => [x + dx, z + dz]);
+        }
         else if (kind === "land") { obj.x = round(w.x); obj.z = round(w.z); }
         else if (kind === "spawn") { obj.x = round(w.x); obj.z = round(w.z); }
         this._dirty = true;
@@ -258,6 +273,7 @@ export class MapEditor {
     const { kind, obj } = this.sel;
     if (kind === "roadX") this.map.roadsX = this.map.roadsX.filter((r) => r !== obj);
     else if (kind === "roadZ") this.map.roadsZ = this.map.roadsZ.filter((r) => r !== obj);
+    else if (kind === "troad" && this.map.features) this.map.features.roads = this.map.features.roads.filter((r) => r !== obj);
     else if (kind === "land") this.map.landmarks = this.map.landmarks.filter((l) => l !== obj);
     else if (kind === "spawn") return; // 出生点不可删除
     this.sel = null;
@@ -324,7 +340,54 @@ export class MapEditor {
     for (const r of this.map.roadsZ) {
       if (Math.abs(this._w2sY(r.at) - py) < 7) return { kind: "roadZ", obj: r };
     }
+    // 3D 描边道路：点到折线距离 ≤ 半宽 + 屏幕容差；取面道路用点在多边形内判断
+    const f = this.map.features;
+    if (f) {
+      const w = this._s2w(px, py);
+      const tol = 6 / this.cam.scale; // 屏幕 6px 容差换算成世界米
+      for (let i = (f.roads || []).length - 1; i >= 0; i--) {
+        const r = f.roads[i];
+        if (r.closed && r.points.length >= 3) {
+          if (this._pointInPoly(w.x, w.z, r.points)) return { kind: "troad", obj: r };
+          continue;
+        }
+        if (this._distToPolyline(w.x, w.z, r.points) <= (r.width || 12) / 2 + tol) return { kind: "troad", obj: r };
+      }
+    }
     return null;
+  }
+
+  // 点到折线的最近距离（世界米）
+  _distToPolyline(x, z, pts) {
+    let best = Infinity;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const [x1, z1] = pts[i], [x2, z2] = pts[i + 1];
+      const dx = x2 - x1, dz = z2 - z1;
+      const len2 = dx * dx + dz * dz;
+      const t = clamp(len2 ? ((x - x1) * dx + (z - z1) * dz) / len2 : 0, 0, 1);
+      best = Math.min(best, Math.hypot(x - (x1 + dx * t), z - (z1 + dz * t)));
+    }
+    return best;
+  }
+
+  // 点是否在多边形内（射线法）
+  _pointInPoly(x, z, pts) {
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const [xi, zi] = pts[i], [xj, zj] = pts[j];
+      if ((zi > z) !== (zj > z) && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+
+  // 多边形面积（鞋带公式，有符号）
+  _polyArea(pts) {
+    let a = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const [x1, z1] = pts[i], [x2, z2] = pts[(i + 1) % pts.length];
+      a += x1 * z2 - x2 * z1;
+    }
+    return a / 2;
   }
 
   /* ---------- properties panel ---------- */
@@ -353,9 +416,9 @@ export class MapEditor {
         <label>名称<input id="mp-zh" value="${obj.zh || ""}" maxlength="10" /></label>
         <label>英文名<input id="mp-en" value="${obj.en || ""}" maxlength="24" /></label>
         <label>类型<select id="mp-kind">${KINDS.map((k) => `<option value="${k}" ${k === (obj.kind || "street") ? "selected" : ""}>${KIND_ZH[k]}</option>`).join("")}</select></label>
-        <label>车道<select id="mp-lanes">${[1, 2, 3, 4].map((n) => `<option ${n === (obj.lanes || 1) ? "selected" : ""}>${n}</option>`).join("")}</select></label>
-        <label>人行道宽<input id="mp-sw" type="number" min="0" max="12" value="${obj.sidewalk ?? 3}" /></label>
-        <label>分隔带宽<input id="mp-md" type="number" min="0" max="14" value="${obj.median ?? 0}" /></label>
+        <label>车道（每条宽3.4m）<select id="mp-lanes">${[1, 2, 3, 4].map((n) => `<option ${n === (obj.lanes || 1) ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+        <label>人行道宽（m）<input id="mp-sw" type="number" min="0" max="12" value="${obj.sidewalk ?? 3}" /></label>
+        <label>分隔带宽（m）<input id="mp-md" type="number" min="0" max="14" value="${obj.median ?? 0}" /></label>
         <div class="me-pos">${kind === "roadX" ? `X ${obj.at}` : `Z ${obj.at}`}</div>
         <button class="me-del" id="mp-del">删除道路</button>`;
       el.querySelector("#mp-zh").addEventListener("change", (e) => { obj.zh = e.target.value; this._dirty = true; this._draw(); });
@@ -364,6 +427,30 @@ export class MapEditor {
       el.querySelector("#mp-lanes").addEventListener("change", (e) => { obj.lanes = +e.target.value || 1; this._dirty = true; this._draw(); });
       el.querySelector("#mp-sw").addEventListener("change", (e) => { obj.sidewalk = clamp(+e.target.value || 0, 0, 12); this._dirty = true; this._draw(); });
       el.querySelector("#mp-md").addEventListener("change", (e) => { obj.median = clamp(+e.target.value || 0, 0, 14); this._dirty = true; this._draw(); });
+      el.querySelector("#mp-del").addEventListener("click", () => this._deleteSel());
+    } else if (kind === "troad") {
+      // 3D 描边道路：与 3D 编辑器同套属性（无车道数，宽度即路幅）；顶点编辑在 3D 编辑器
+      const poly = !!obj.closed;
+      el.innerHTML = `
+        <h4>${poly ? "面道路" : "描边道路"} · 属性</h4>
+        <label>名称<input id="mp-zh" value="${(obj.zh ?? obj.name) || ""}" maxlength="10" /></label>
+        <label>英文名<input id="mp-en" value="${obj.en || ""}" maxlength="24" /></label>
+        <label>类型<select id="mp-kind">${KINDS.map((k) => `<option value="${k}" ${k === (obj.kind || "street") ? "selected" : ""}>${KIND_ZH[k]}</option>`).join("")}</select></label>
+        <label>车道（每方向）<select id="mp-lanes">${[1, 2, 3, 4].map((n) => `<option ${n === (obj.lanes || 2) ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+        ${poly ? "" : `<label>宽度(m)<input id="mp-w" type="number" min="4" max="80" value="${obj.width}" /></label>`}
+        <label>人行道宽（m）<input id="mp-sw" type="number" min="0" max="12" value="${obj.sidewalk ?? 3}" /></label>
+        <label>分隔带宽（m）<input id="mp-md" type="number" min="0" max="14" value="${obj.median ?? 0}" /></label>
+        <div class="me-pos">${obj.points.length} 个点${poly ? ` · 约 ${Math.round(Math.abs(this._polyArea(obj.points)))}㎡` : ""}</div>
+        <p class="me-hint">画布上拖动 = 整体平移；顶点级调整请在 3D 编辑器中进行。</p>
+        <button class="me-del" id="mp-del">删除道路</button>`;
+      el.querySelector("#mp-zh").addEventListener("change", (e) => { obj.zh = e.target.value; this._dirty = true; this._draw(); });
+      el.querySelector("#mp-en").addEventListener("change", (e) => { obj.en = e.target.value; this._dirty = true; });
+      el.querySelector("#mp-kind").addEventListener("change", (e) => { obj.kind = e.target.value; this._dirty = true; this._draw(); });
+      el.querySelector("#mp-lanes").addEventListener("change", (e) => { obj.lanes = +e.target.value || 2; this._dirty = true; });
+      el.querySelector("#mp-sw").addEventListener("change", (e) => { obj.sidewalk = clamp(+e.target.value || 0, 0, 12); this._dirty = true; });
+      el.querySelector("#mp-md").addEventListener("change", (e) => { obj.median = clamp(+e.target.value || 0, 0, 14); this._dirty = true; });
+      const wIn = el.querySelector("#mp-w");
+      if (wIn) wIn.addEventListener("change", (e) => { obj.width = clamp(+e.target.value || 12, 4, 80); this._dirty = true; this._draw(); });
       el.querySelector("#mp-del").addEventListener("click", () => this._deleteSel());
     } else if (kind === "land") {
       el.innerHTML = `
@@ -509,21 +596,51 @@ export class MapEditor {
         r.points.forEach(([x, z], i) => (i ? c.lineTo(this._w2sX(x), this._w2sY(z)) : c.moveTo(this._w2sX(x), this._w2sY(z))));
         c.stroke();
       }
-      c.strokeStyle = "#9aa8b8";
       for (const r of f.roads || []) {
+        const selHl = this.sel && this.sel.kind === "troad" && this.sel.obj === r;
         if (r.closed && r.points.length >= 3) {
-          // 取面道路：2D 视图按填充多边形显示
-          c.fillStyle = "#2c3947";
+          // 取面道路：2D 视图按填充多边形显示，选中时描金边
+          c.fillStyle = selHl ? "rgba(242,193,78,0.28)" : "#2c3947";
           c.beginPath();
           r.points.forEach(([x, z], i) => (i ? c.lineTo(this._w2sX(x), this._w2sY(z)) : c.moveTo(this._w2sX(x), this._w2sY(z))));
           c.closePath();
           c.fill();
+          if (selHl) {
+            c.strokeStyle = "#f2c14e";
+            c.lineWidth = 2;
+            c.stroke();
+          }
+          // 中心虚线：最小外接矩形长轴中线（直路取面 = 一条精确居中虚线）
+          if (s > 0.18) {
+            const cl = polyCenterLine(r.points, 80);
+            if (cl) {
+              c.strokeStyle = "rgba(255,255,255,0.28)";
+              c.lineWidth = 1;
+              c.setLineDash([8, 10]);
+              c.beginPath();
+              c.moveTo(this._w2sX(cl[0][0]), this._w2sY(cl[0][1]));
+              c.lineTo(this._w2sX(cl[1][0]), this._w2sY(cl[1][1]));
+              c.stroke();
+              c.setLineDash([]);
+            }
+          }
           continue;
         }
+        c.strokeStyle = selHl ? "#f2c14e" : "#9aa8b8";
         c.lineWidth = Math.max(2, (r.width || 12) * s);
         c.beginPath();
         r.points.forEach(([x, z], i) => (i ? c.lineTo(this._w2sX(x), this._w2sY(z)) : c.moveTo(this._w2sX(x), this._w2sY(z))));
         c.stroke();
+        // 中心虚线（与程序化道路同款，仅显示不参与编辑）
+        if (s > 0.18) {
+          c.strokeStyle = "rgba(255,255,255,0.28)";
+          c.lineWidth = 1;
+          c.setLineDash([8, 10]);
+          c.beginPath();
+          r.points.forEach(([x, z], i) => (i ? c.lineTo(this._w2sX(x), this._w2sY(z)) : c.moveTo(this._w2sX(x), this._w2sY(z))));
+          c.stroke();
+          c.setLineDash([]);
+        }
       }
       c.fillStyle = "#2c3947";
       c.strokeStyle = "#4b5b6e";
@@ -555,7 +672,7 @@ export class MapEditor {
     // legend
     c.fillStyle = "rgba(244,242,238,0.42)";
     c.font = "500 11px sans-serif";
-    c.fillText("淡色道路与暗色街区 = 延伸街道（勾选后自动铺满地图范围） · 金色虚线框 = 3D 描边范围（道路只显示在其内） · 亮色折线 = 3D 描边道路/河流", 14, H - 14);
+    c.fillText("淡色道路与暗色街区 = 延伸街道（勾选后自动铺满地图范围） · 金色虚线框 = 3D 描边范围 · 亮色折线 = 3D 描边道路/河流（可点选编辑）", 14, H - 14);
 
     // 指北针：2D 画布方位固定（上 = 北/-Z，右 = 东/+X，与数据约定和 3D 罗盘一致）
     const nx = W - 34, ny = 42, nr = 15;
