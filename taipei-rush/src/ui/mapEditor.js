@@ -37,13 +37,21 @@ export class MapEditor {
     this.statusEl = document.getElementById("me-status");
     this.lmSel = document.getElementById("me-lm-type");
 
+    // 编辑器面板用的是 index.html 里的单例 DOM（按钮/画布/名称输入框）。
+    // 所有监听都挂到本实例的 controller 上，close() 时一次性摘除：
+    // 否则上一次打开的编辑器实例仍绑在同一个「保存」按钮上，点保存会把
+    // 旧地图也按当前名称输入框的内容再存一遍（表现为另一张地图被改名）。
+    this._ac = new AbortController();
+    this._sig = { signal: this._ac.signal };
+    this._sigNP = { signal: this._ac.signal, passive: false };
+
     this.nameEl.value = this.map.name || "";
     this._buildLmTypes();
 
     this._onResize = () => { this._resize(); this._draw(); };
     this._onKey = (e) => this._key(e);
-    window.addEventListener("resize", this._onResize);
-    window.addEventListener("keydown", this._onKey);
+    window.addEventListener("resize", this._onResize, this._sig);
+    window.addEventListener("keydown", this._onKey, this._sig);
 
     this._bindCanvas();
     this._bindTools();
@@ -61,6 +69,8 @@ export class MapEditor {
     this._draw();
   }
   close() {
+    // 摘除本实例注册的全部监听（单例 DOM 上不能残留旧编辑器实例的回调）
+    if (this._ac) { this._ac.abort(); this._ac = null; }
     window.removeEventListener("resize", this._onResize);
     window.removeEventListener("keydown", this._onKey);
     this.root.classList.add("hidden");
@@ -119,7 +129,7 @@ export class MapEditor {
   _buildLmTypes() {
     this.lmSel.innerHTML = LM_TYPES.map((t) => `<option value="${t}">${LM_ZH[t]}</option>`).join("");
     this.lmSel.value = this.lmType;
-    this.lmSel.addEventListener("change", () => { this.lmType = this.lmSel.value; });
+    this.lmSel.addEventListener("change", () => { this.lmType = this.lmSel.value; }, this._sig);
   }
 
   _bindTools() {
@@ -130,18 +140,18 @@ export class MapEditor {
         this.tool = t;
         this.root.querySelectorAll(".me-tool[data-tool]").forEach((x) => x.classList.toggle("active", x === b));
         this.cv.style.cursor = t === "select" ? "default" : "crosshair";
-      });
+      }, this._sig);
     });
   }
 
   _bindButtons() {
-    document.getElementById("me-save").addEventListener("click", () => this._save());
-    document.getElementById("me-play").addEventListener("click", () => { if (this._save()) this.opts.onPlay(); });
-    document.getElementById("me-exit").addEventListener("click", () => this.opts.onClose());
+    document.getElementById("me-save").addEventListener("click", () => this._save(), this._sig);
+    document.getElementById("me-play").addEventListener("click", () => { if (this._save()) this.opts.onPlay(); }, this._sig);
+    document.getElementById("me-exit").addEventListener("click", () => this.opts.onClose(), this._sig);
   }
 
   _bindCanvas() {
-    this.cv.addEventListener("contextmenu", (e) => e.preventDefault());
+    this.cv.addEventListener("contextmenu", (e) => e.preventDefault(), this._sig);
 
     this.cv.addEventListener("pointerdown", (e) => {
       this.cv.setPointerCapture(e.pointerId);
@@ -193,7 +203,7 @@ export class MapEditor {
         this.sel = { kind: "spawn", obj: this.map.spawn };
         this._afterEdit("出生点已移动");
       }
-    });
+    }, this._sig);
 
     this.cv.addEventListener("pointermove", (e) => {
       const rect = this.cv.getBoundingClientRect();
@@ -225,10 +235,10 @@ export class MapEditor {
       const h = this._pick(px, py);
       const cursor = this.tool === "select" ? (h ? "pointer" : "default") : "crosshair";
       if (this.cv.style.cursor !== cursor) this.cv.style.cursor = cursor;
-    });
+    }, this._sig);
 
-    this.cv.addEventListener("pointerup", () => { this.drag = null; });
-    this.cv.addEventListener("pointercancel", () => { this.drag = null; });
+    this.cv.addEventListener("pointerup", () => { this.drag = null; }, this._sig);
+    this.cv.addEventListener("pointercancel", () => { this.drag = null; }, this._sig);
 
     this.cv.addEventListener("wheel", (e) => {
       e.preventDefault();
@@ -240,7 +250,7 @@ export class MapEditor {
       this.cam.x += w0.x - w1.x;
       this.cam.z += w0.z - w1.z;
       this._draw();
-    }, { passive: false });
+    }, this._sigNP);
   }
 
   _afterEdit(msg) {

@@ -11,6 +11,7 @@ import {
 import {
   makeFacades, makeStorefronts, makeSignAtlas, signTileRect,
   makeSidewalkTexture, makeAsphaltTexture, makeRoofTexture, makeTileStripTexture,
+  ASPHALT_TILE,
 } from "./textures.js";
 import { scooterParts, scooterParts as _sp } from "../entities/models.js";
 import { buildCustomMap, worldBounds, pointInPoly } from "./customMap.js";
@@ -23,8 +24,132 @@ const GROUND_H = 4.0;
 const ALLEY_W = 7;
 const ALLEY_CELL = 16;
 
+// 路口斑马线规格（描边路口与程序化路口一致）：条宽 / 间距（条+净空）/ 条长（行人带深）/ 路边外扩
+const CW_BAR = 0.52, CW_PITCH = CW_BAR + 0.5, CW_DEPTH = 3.4, CW_GAP = 0.2;
+
 function rand(a, b) { return a + Math.random() * (b - a); }
 function choice(arr) { return arr[(Math.random() * arr.length) | 0]; }
+
+// 水平线 z = at 与多边形求交，返回落在多边形内部的 x 区段。
+// even-odd 规则：顶点正好压在线上时只计一次，不会把一条边算两遍。
+function polyClipX(poly, at) {
+  const hits = [];
+  for (let i = 0; i < poly.length; i++) {
+    const [x1, z1] = poly[i], [x2, z2] = poly[(i + 1) % poly.length];
+    if ((z1 > at) === (z2 > at)) continue;
+    hits.push(x1 + ((x2 - x1) * (at - z1)) / (z2 - z1));
+  }
+  hits.sort((a, b) => a - b);
+  const out = [];
+  for (let i = 0; i + 1 < hits.length; i += 2) out.push([hits[i], hits[i + 1]]);
+  return out;
+}
+
+// 竖直线 x = at 与多边形求交，返回内部 z 区段
+function polyClipZ(poly, at) {
+  const hits = [];
+  for (let i = 0; i < poly.length; i++) {
+    const [x1, z1] = poly[i], [x2, z2] = poly[(i + 1) % poly.length];
+    if ((x1 > at) === (x2 > at)) continue;
+    hits.push(z1 + ((z2 - z1) * (at - x1)) / (x2 - x1));
+  }
+  hits.sort((a, b) => a - b);
+  const out = [];
+  for (let i = 0; i + 1 < hits.length; i += 2) out.push([hits[i], hits[i + 1]]);
+  return out;
+}
+
+// 截线与多边形交点区段里最长一段的中点；没有交点返回 null
+function polySpanMid(segs) {
+  if (!segs.length) return null;
+  let best = segs[0];
+  for (const s of segs) if (s[1] - s[0] > best[1] - best[0]) best = s;
+  return (best[0] + best[1]) / 2;
+}
+
+// 面道路在截线 at 处的车流方向。
+// 取 at±3 两条平行截线，看区段中点往哪边移 —— 这是路面的局部走向，
+// 比"用最长边"可靠：多边形带楔角或 L 形时最长边并不等于该处的车道方向。
+// 中点不动（轴对齐矩形）时退回外接矩形长边。
+function polyDirNear(poly, at, horizontal) {
+  const d = 3;
+  const clip = horizontal ? polyClipX : polyClipZ;
+  const a = polySpanMid(clip(poly, at - d));
+  const b = polySpanMid(clip(poly, at + d));
+  if (a != null && b != null && Math.abs(b - a) > 0.35) {
+    const du = b - a;
+    const len = Math.hypot(du, 2 * d);
+    return horizontal
+      ? { ux: du / len, uz: (2 * d) / len }
+      : { ux: (2 * d) / len, uz: du / len };
+  }
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const [x, z] of poly) {
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  return (maxX - minX) > (maxZ - minZ) ? { ux: 1, uz: 0 } : { ux: 0, uz: 1 };
+}
+
+// 直线 a(τ) = o + τ·d 与直线 b(σ) = q + σ·e 的交点参数 τ；近平行返回 null
+function lineHitT(ox, oz, dx, dz, qx, qz, ex, ez) {
+  const det = dx * ez - dz * ex;
+  if (Math.abs(det) < 1e-9) return null;
+  return ((qx - ox) * ez - (qz - oz) * ex) / det;
+}
+
+// 闭合面路（手绘多边形）与直线 L(τ) = o + τ·d 的相交区间。
+// d 是坐标轴方向（程序化横纵路），直接用正交裁切；返回离 o 最近的一段 [τmin, τmax]。
+// 路面在斑马线高度上的实际宽度由此实测 —— 手绘面路不是标准矩形，宽度沿线会变。
+function polySpanOnLine(poly, o, dx, dz) {
+  const horizontal = Math.abs(dx) >= Math.abs(dz);
+  const segs = horizontal ? polyClipX(poly, o.z) : polyClipZ(poly, o.x);
+  let best = null, bd = Infinity;
+  for (const [a, b] of segs) {
+    const t0 = horizontal ? a - o.x : a - o.z;
+    const t1 = horizontal ? b - o.x : b - o.z;
+    const dist = Math.abs(t0 + t1);
+    if (dist < bd) { bd = dist; best = [Math.min(t0, t1), Math.max(t0, t1)]; }
+  }
+  return best;
+}
+
+// 线形描边路（中线过 c、方向 u、半宽 half）与直线 L(τ) = o + τ·d 的相交区间：
+// 路的两条边线平行于中线，各求一次与 L 的交点。斜交时区间比垂直路宽长（跨度 = 路宽 / sin交角）。
+function lineRoadSpanOnLine(o, dx, dz, cx, cz, ux, uz, half) {
+  const nx = -uz, nz = ux;
+  const t1 = lineHitT(o.x, o.z, dx, dz, cx + nx * half, cz + nz * half, ux, uz);
+  const t2 = lineHitT(o.x, o.z, dx, dz, cx - nx * half, cz - nz * half, ux, uz);
+  if (t1 == null || t2 == null) return null;
+  return [Math.min(t1, t2), Math.max(t1, t2)];
+}
+
+// 面路路口两侧的实测边界（主路法线方向，相对路口锚点，负值在一侧）。
+// 在被穿路开口范围（±scanHalf）内按 ~3m 扫描，只统计「车轴穿过的那段」截线，
+// L 形多边形的另一支不会误入。手绘面路宽度沿线变化时，靠它把 B 组斑马线
+// 推到两侧最宽边缘之外（否则条会压在变宽的路面下被盖住），并撑大路口断口。
+// 车向几乎与扫描线平行（分量≈0）时量不准，返回 null 退回中心线宽度。
+function polyEdgeRange(poly, cx, cz, dir, scanHalf, alongX) {
+  const clip = alongX ? polyClipX : polyClipZ;
+  const along = alongX ? dir.uz : dir.ux;   // 车向在扫描线推进方向的分量
+  if (Math.abs(along) < 1e-6) return null;
+  let neg = 0, pos = 0, found = false;
+  for (let d = -scanHalf; d <= scanHalf + 1e-6; d += 3) {
+    // 车轴与扫描线的交点（扫描线另一维坐标）
+    const axisAt = alongX ? cx + (d * dir.ux) / dir.uz : cz + (d * dir.uz) / dir.ux;
+    for (const [a, b] of clip(poly, alongX ? cz + d : cx + d)) {
+      if (a - 0.5 > axisAt || axisAt > b + 0.5) continue;
+      // 截线端点在主路法线上的投影（相对路口锚点）
+      const t0 = alongX ? (a - cx) * -dir.uz + d * dir.ux : -d * dir.uz + (a - cz) * dir.ux;
+      const t1 = alongX ? (b - cx) * -dir.uz + d * dir.ux : -d * dir.uz + (b - cz) * dir.ux;
+      neg = Math.min(neg, t0, t1);
+      pos = Math.max(pos, t0, t1);
+      found = true;
+      break;
+    }
+  }
+  return found ? { edgeNeg: neg, edgePos: pos } : null;
+}
 
 class ColliderGrid {
   constructor(cell = 24) {
@@ -165,7 +290,9 @@ export class City {
     this.custom = null;         // buildCustomMap 结果（描边内容渲染数据）
     // 3D 描边道路走廊预计算：程序化建筑避让 + 玩家脚底高度（路面 0.18 / 人行道 0.24）
     this.traceCorridors = [];
-    for (const r of (data && data.features && data.features.roads) || []) {
+    const roadDefs = (data && data.features && data.features.roads) || [];
+    for (let ri = 0; ri < roadDefs.length; ri++) {
+      const r = roadDefs[ri];
       const ptsRaw = r.points || []; // 原始 [x,z] 数组（pointInPoly 需要）
       if (ptsRaw.length < 2) continue;
       const pts = ptsRaw.map(([x, z]) => ({ x, z }));
@@ -179,8 +306,16 @@ export class City {
         const n = Math.max(1, Math.ceil(len / 3)); // ~3m 采样，供建筑矩形快速相交测试
         for (let k = 0; k < n; k++) samples.push({ x: a.x + ((b.x - a.x) * k) / n, z: a.z + ((b.z - a.z) * k) / n });
       }
+      if (r.closed && pts.length > 2) {
+        // 闭合面路补采样最后一条封边，否则封边一侧的走廊避让（建筑 / 街道家具）会漏
+        const a = pts[pts.length - 1], b = pts[0];
+        const len = Math.hypot(b.x - a.x, b.z - a.z);
+        const n = Math.max(1, Math.ceil(len / 3));
+        for (let k = 0; k < n; k++) samples.push({ x: a.x + ((b.x - a.x) * k) / n, z: a.z + ((b.z - a.z) * k) / n });
+      }
       samples.push(pts[pts.length - 1]);
       this.traceCorridors.push({
+        index: ri,   // data.features.roads 中的原始下标（customMap 侧按同一顺序遍历）
         pts: ptsRaw, closed: !!r.closed, segs, samples,
         roadHalf, edgeHalf: roadHalf + sw, keepHalf: roadHalf + sw + 1.5,
       });
@@ -227,6 +362,9 @@ export class City {
     const yieldFrame = () => new Promise((r) => setTimeout(r, 0));
     this._buildGround();
     this._buildRoads();
+    // 描边路 × 程序化横纵路的路口：斑马线必须赶在 _finalize 封批之前加进 markWhite
+    this.traceJunctions = this._computeTraceJunctions();
+    this._buildTraceCrosswalks();
     await yieldFrame();
     // 程序化城市按地图开关生成（默认台北始终生成；用户地图需在编辑器勾选）。
     // 未勾选时只保留手工路网、描边道路与 3D 编辑器放置的内容。
@@ -238,7 +376,7 @@ export class City {
     await yieldFrame();
     this._buildTrafficHeads();
     // 3D 编辑器描边内容（道路/河流/建筑/树/路灯）渲染 + 碰撞注册
-    const custom = buildCustomMap(this.data, this.colliders);
+    const custom = buildCustomMap(this.data, this.colliders, this.traceJunctions);
     if (custom) {
       this.group.add(custom.group);
       this.custom = custom;
@@ -262,11 +400,12 @@ export class City {
     outer.receiveShadow = true;
     this.group.add(outer);
 
-    const asphalt = makeAsphaltTexture();
-    asphalt.repeat.set(180, 180);
     const b = this.bounds;
     const w = b.maxX - b.minX + 60;
     const d = b.maxZ - b.minZ + 60;
+    const asphalt = makeAsphaltTexture();
+    // 按世界尺寸换算平铺次数：一张图固定 16m，描边路面用同一周期算 uv（见 customMap）
+    asphalt.repeat.set(w / ASPHALT_TILE, d / ASPHALT_TILE);
     const mat = new THREE.MeshStandardMaterial({ map: asphalt, color: 0xffffff, roughness: 0.95, metalness: 0.0 });
     const road = new THREE.Mesh(new THREE.PlaneGeometry(w, d), mat);
     road.rotation.x = -Math.PI / 2;
@@ -364,6 +503,246 @@ export class City {
         this._addEdgePair(a, b, "x", zs[j]);
       }
     }
+  }
+
+  /* ---------------- trace-road junctions ---------------- */
+  // 描边路（编辑器手绘折线）× 程序化横纵路：求交点。
+  // 结果同时供三处使用：路口斑马线、红绿灯灯位、customMap 里在路口断开人行道/标线。
+  _computeTraceJunctions() {
+    const out = [];
+    const MIN_CROSS = 0.42;   // 交角过小（<25°）不当作路口，否则斑马线会被拉成一条长条
+    const xs = this.roadsX || [], zs = this.roadsZ || [];
+    const corridors = this.traceCorridors;
+
+    // 一个路口 = 主路（方向 u，半宽 roadHalf）被另一条路（方向 v，半宽 progHalf）穿过。
+    // 两张斑马线、四根灯杆、两条路的断口长度全都从这几个量推出来。
+    const stats = { corridors: corridors.length, closedHandled: 0, candidates: 0, skippedAngle: 0, skippedKnown: 0, kept: 0 };
+    const push = (o) => {
+      const s = Math.abs(o.ux * o.vz - o.uz * o.vx);   // |sin 交角|
+      if (s < MIN_CROSS) { stats.skippedAngle++; return; }
+      stats.candidates++;
+      o.mx = -o.vz; o.mz = o.vx;                       // 被穿路法线
+      // 面路两侧边界不对称时（手绘变宽）按最宽一侧推 Effective 半宽：
+      // 断口长度随之撑大，否则变宽处的主路断口盖不住斑马线带
+      o.effHalf = Math.max(o.roadHalf, -(o.edgeNeg || 0), o.edgePos || 0);
+      const tB = (o.effHalf + 2.2) / s;
+      const spanB = Math.max(0, o.progHalf * 2 - 1.0);
+      // 主路断口：盖住被穿路开口，以及横跨它的那组斑马线在主路方向上的铺开量。
+      // A 组条始终落在车行道宽度内（不与人行道重叠），不需要额外计入。
+      o.alongHalf = Math.max(
+        o.progHalf / s + 1.5,
+        tB * Math.abs(o.vx * o.ux + o.vz * o.uz) + (spanB / 2) * s + 1.5,
+      );
+      if (o.viaRoadIndex != null) {
+        // 被穿的那条也是描边路：对称算它自己的断口与弧长
+        const tA2 = (o.progHalf + 2.2) / s;
+        o.viaAlongHalf = Math.max(
+          o.progHalf / s + 1.5,
+          tA2 * Math.abs(o.ux * o.vx + o.uz * o.vz) + (spanB / 2) * s + 1.5,
+        );
+      }
+      out.push(o);
+    };
+
+    // 取面路（多边形填充）× 程序化横纵路：多边形没有中线，用最长边当车流方向，
+    // 路口宽度取"多边形在与横路中心线相交处被切出的区段长度"。
+    for (const c of corridors) {
+      if (!c.closed) continue;
+      const poly = c.pts;
+      if (!poly || poly.length < 3) continue;
+      stats.closedHandled++;
+      // 横路沿 X 延伸（z = at）：取多边形在 z = at 上的内部 x 区段
+      for (const road of zs) {
+        for (const [x0, x1] of polyClipX(poly, road.at)) {
+          const dir = polyDirNear(poly, road.at, true);
+          // 切出来的是沿 X 的投影长度；斜路要乘方向分量才是垂直中线的真实路宽，
+          // 否则斜得越厉害斑马线跨度越大（长边被拉成一条大斜带）。
+          const w = (x1 - x0) * Math.abs(dir.uz);
+          if (w < 6 || w > 160) continue;
+          const progHalf = asphaltHalf(road);
+          // 路口范围内两侧的实测边界：手绘面路宽度沿线会变（喇叭口 / 剪切形），
+          // 只量中心线一条截线，B 组斑马线会压进变宽的路面、断口也盖不住路口
+          const edges = polyEdgeRange(poly, (x0 + x1) / 2, road.at, dir, progHalf + 2.5, true);
+          push({
+            x: (x0 + x1) / 2, z: road.at, ux: dir.ux, uz: dir.uz,
+            roadHalf: w / 2, progHalf,
+            vx: 1, vz: 0, s: 0, roadIndex: c.index, poly,
+            ...(edges || {}),
+          });
+        }
+      }
+      // 横路沿 Z 延伸（x = at）
+      for (const road of xs) {
+        for (const [z0, z1] of polyClipZ(poly, road.at)) {
+          const dir = polyDirNear(poly, road.at, false);
+          const w = (z1 - z0) * Math.abs(dir.ux);
+          if (w < 6 || w > 160) continue;
+          const progHalf = asphaltHalf(road);
+          const edges = polyEdgeRange(poly, road.at, (z0 + z1) / 2, dir, progHalf + 2.5, false);
+          push({
+            x: road.at, z: (z0 + z1) / 2, ux: dir.ux, uz: dir.uz,
+            roadHalf: w / 2, progHalf,
+            vx: 0, vz: 1, s: 0, roadIndex: c.index, poly,
+            ...(edges || {}),
+          });
+        }
+      }
+    }
+
+    // 线形描边路 × 程序化横纵路
+    for (const c of corridors) {
+      if (c.closed) continue;
+      let acc = 0;
+      for (const seg of c.segs) {
+        const dx = seg.bx - seg.ax, dz = seg.bz - seg.az;
+        const len = Math.hypot(dx, dz);
+        if (len < 1e-3) continue;
+        const ux = dx / len, uz = dz / len;
+        // 横路沿 X 延伸（v = (1,0)，z = at）
+        if (Math.abs(dz) > 1e-6) {
+          for (const road of zs) {
+            const t = (road.at - seg.az) / dz;
+            if (t < 0 || t > 1) continue;
+            push({
+              x: seg.ax + dx * t, z: road.at, ux, uz,
+              roadHalf: c.roadHalf, progHalf: asphaltHalf(road),
+              vx: 1, vz: 0, s: acc + t * len, roadIndex: c.index,
+            });
+          }
+        }
+        // 横路沿 Z 延伸（v = (0,1)，x = at）
+        if (Math.abs(dx) > 1e-6) {
+          for (const road of xs) {
+            const t = (road.at - seg.ax) / dx;
+            if (t < 0 || t > 1) continue;
+            push({
+              x: road.at, z: seg.az + dz * t, ux, uz,
+              roadHalf: c.roadHalf, progHalf: asphaltHalf(road),
+              vx: 0, vz: 1, s: acc + t * len, roadIndex: c.index,
+            });
+          }
+        }
+        acc += len;
+      }
+    }
+
+    // 描边路 × 描边路：两张手绘路互相穿过时同样要成路口
+    for (let i = 0; i < corridors.length; i++) {
+      const A = corridors[i];
+      if (A.closed) continue;
+      for (let k = i + 1; k < corridors.length; k++) {
+        const B = corridors[k];
+        if (B.closed) continue;
+        let saccA = 0;
+        for (const sa of A.segs) {
+          const rax = sa.bx - sa.ax, raz = sa.bz - sa.az;
+          const alen = Math.hypot(rax, raz);
+          if (alen < 1e-3) continue;
+          let saccB = 0;
+          for (const sb of B.segs) {
+            const sbx = sb.bx - sb.ax, sbz = sb.bz - sb.az;
+            const blen = Math.hypot(sbx, sbz);
+            if (blen < 1e-3) { saccB += blen; continue; }
+            const den = rax * sbz - raz * sbx;
+            if (Math.abs(den) > 1e-6) {
+              const qx = sb.ax - sa.ax, qz = sb.az - sa.az;
+              const t = (qx * sbz - qz * sbx) / den;
+              const u = (qx * raz - qz * rax) / den;
+              if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+                push({
+                  x: sa.ax + rax * t, z: sa.az + raz * t,
+                  ux: rax / alen, uz: raz / alen,
+                  roadHalf: A.roadHalf, progHalf: B.roadHalf,
+                  vx: sbx / blen, vz: sbz / blen,
+                  s: saccA + t * alen, roadIndex: A.index,
+                  viaRoadIndex: B.index, viaS: saccB + u * blen,
+                });
+              }
+            }
+            saccB += blen;
+          }
+          saccA += alen;
+        }
+      }
+    }
+
+    // 去重：相邻线段在共享端点处会各产生一次交点
+    const dedup = [];
+    for (const j of out) {
+      if (dedup.some((k) => Math.abs(k.x - j.x) < 1.5 && Math.abs(k.z - j.z) < 1.5)) continue;
+      // 正好落在程序化路口内部的跳过 —— 那里本来就有斑马线和信号灯
+      if (this.intersections.some((it) =>
+        Math.abs(j.x - it.x) < it.hx + 2.5 && Math.abs(j.z - it.z) < it.hz + 2.5)) { stats.skippedKnown++; continue; }
+      dedup.push(j);
+    }
+    stats.kept = dedup.length;
+    this._junctionStats = stats;   // 控制台可直接查看路口为什么没生成
+    return dedup;
+  }
+
+  // 路口斑马线：四组 —— A 两组横跨主路（铺在被穿路两侧边线外 0.2m，条的长轴顺主路方向），
+  // B 两组横跨被穿路（铺在主路两侧边线外 0.2m，条的长轴顺被穿路方向）。
+  // 条宽与间距同 _crosswalks（0.52 / 0.5 / 深 3.4）。高度分两档：
+  // 落在描边路面（y=0.18）上的抬到 0.2 才不被吃掉；落在程序化沥青（y=0）上的用 0.026。
+  // 铺开范围一律按「斑马线所在直线与路边线的真实交点」实测：
+  // - 斜交路口的斑马线带顺被穿路方向拉长（跨度 = 路宽 / sin交角）。
+  //   旧版按垂直路宽铺开，斜交时条在带上挤作一团、两端各缺一角，盖不到马路两边。
+  // - 面路（手绘多边形）宽度沿线会变（喇叭口 / 剪切形），每条带各自用所在位置的实测截线，
+  //   主路两侧边线也各用实测边界（edgeNeg/edgePos），条才贴住路面外、不被变宽的路面盖住。
+  _buildTraceCrosswalks() {
+    for (const j of this.traceJunctions || []) {
+      const ux = j.ux, uz = j.uz;                            // 主路方向
+      const nx = -uz, nz = ux;                               // 主路法线
+      const mx = j.mx, mz = j.mz;                            // 被穿路法线
+      const vx = j.vx, vz = j.vz;                            // 被穿路方向
+      // 被穿路是程序化沥青（y=0）还是描边路面（y=0.18），决定 B 组的高度
+      const yB = j.viaRoadIndex != null ? 0.2 : 0.026;
+
+      // A 组：带线过 j + m·(±(progHalf+GAP))、方向 v；铺开范围 = 主路在该带线上的真实区间
+      for (const s of [-1, 1]) {
+        const o = { x: j.x + mx * s * (j.progHalf + CW_GAP), z: j.z + mz * s * (j.progHalf + CW_GAP) };
+        const span = j.poly
+          ? polySpanOnLine(j.poly, o, vx, vz)
+          : lineRoadSpanOnLine(o, vx, vz, j.x, j.z, ux, uz, j.roadHalf);
+        if (!span) continue;   // 路面到不了这条带线（急剧收窄）就不铺
+        this._layZebra(o, vx, vz, ux, uz, span[0], span[1], 0.2);
+      }
+
+      // B 组：带线过 j + n·(±(边距+GAP))、方向 u；铺开范围 = 被穿路沥青在该带线上的真实区间。
+      // 面路两侧边界不对称，各侧各用实测边界
+      for (const s of [-1, 1]) {
+        const lb = (s < 0 ? -(j.edgeNeg ?? j.roadHalf) : (j.edgePos ?? j.roadHalf)) + CW_GAP;
+        const o = { x: j.x + nx * s * lb, z: j.z + nz * s * lb };
+        const t1 = lineHitT(o.x, o.z, ux, uz, j.x + mx * j.progHalf, j.z + mz * j.progHalf, vx, vz);
+        const t2 = lineHitT(o.x, o.z, ux, uz, j.x - mx * j.progHalf, j.z - mz * j.progHalf, vx, vz);
+        if (t1 == null || t2 == null) continue;
+        this._layZebra(o, ux, uz, vx, vz, Math.min(t1, t2), Math.max(t1, t2), yB);
+      }
+    }
+  }
+
+  // 在带线 L(τ) = o + τ·d 上铺一组斑马线条：τ 从 t0−GAP 到 t1+GAP（两端越过路边 0.2m），
+  // 每条长 CW_DEPTH、宽 CW_BAR、净间隔 0.5，长轴顺 (lx,lz)。
+  // 条数取整后的余量对称分到两端，斑马线带两头离路边一样近（余量全压一端会显得缺一条）
+  _layZebra(o, dx, dz, lx, lz, t0, t1, y) {
+    const tMin = t0 - CW_GAP, tMax = t1 + CW_GAP;
+    const span = tMax - tMin;
+    const n = Math.floor(span / CW_PITCH);
+    if (n < 1) return;
+    const start = tMin + (span - ((n - 1) * CW_PITCH + CW_BAR)) / 2 + CW_BAR / 2;
+    for (let k = 0; k < n; k++) {
+      const off = start + k * CW_PITCH;
+      this.markWhite.add(this._barGeo(o.x + dx * off, o.z + dz * off, lx, lz, CW_DEPTH, CW_BAR, y));
+    }
+  }
+
+  // 任意方向的标线条：长轴沿 (dx,dz)，与 customMap 的 markQuad 同构
+  _barGeo(cx, cz, dx, dz, len, w, y) {
+    const g = new THREE.PlaneGeometry(len + w * 0.6, w);
+    g.rotateX(-Math.PI / 2);
+    g.rotateY(Math.atan2(-dz, dx));
+    g.translate(cx, y, cz);
+    return g;
   }
 
   _solid(x, z0, z1, y, w, batch, yAxis = false) {
@@ -580,6 +959,20 @@ export class City {
     return { pts, segs, total };
   }
 
+  // 点是否落在描边路走廊内（路面 + 人行道 + 1.5m 余量）。
+  // 建筑有 _rectHitsCorridor 避让，但沿街小件（路灯 / 行道树 / 花坛）此前没有 ——
+  // 会正好杵在手绘道路和路口斑马线上
+  _inTraceCorridor(x, z) {
+    for (const c of this.traceCorridors) {
+      for (const p of c.samples) {
+        const dx = x - p.x, dz = z - p.z;
+        if (dx * dx + dz * dz <= c.keepHalf * c.keepHalf) return true;
+      }
+      if (c.closed && pointInPoly(x, z, c.pts)) return true;
+    }
+    return false;
+  }
+
   _streetProps(px0, px1, pz0, pz1, rx0, rx1, rz0, rz1, bx0, bx1, bz0, bz1) {
     // 路灯 / 绿植密度倍率（地图编辑器可调）
     const ld = this.gen.lampDensity, gd = this.gen.greenDensity;
@@ -593,27 +986,35 @@ export class City {
     for (const s of sides) {
       const len = s.b - s.a;
       if (len < 8) continue;
-      // 路灯：默认每 30m 一盏，路灯密度倍率越高间距越短
+      // 路灯：默认每 30m 一盏，路灯密度倍率越高间距越短；描边路走廊内不放
       if (ld > 0) {
         const nl = Math.max(1, Math.floor((len * ld) / 30));
         for (let k = 0; k < nl; k++) {
           const t = s.a + (len * (k + 0.5)) / nl;
-          if (s.axis === "x") this._addLamp(t, s.at, s.rot);
-          else this._addLamp(s.at, t, s.rot);
+          if (s.axis === "x") {
+            if (!this._inTraceCorridor(t, s.at)) this._addLamp(t, s.at, s.rot);
+          } else {
+            if (!this._inTraceCorridor(s.at, t)) this._addLamp(s.at, t, s.rot);
+          }
         }
       }
-      // 行道树：默认每 24m 一棵，数量与出现概率都随绿植密度缩放
+      // 行道树：默认每 24m 一棵，数量与出现概率都随绿植密度缩放；描边路走廊内不放
       if (gd > 0 && Math.random() < Math.min(1, 0.75 * gd)) {
         const nt = Math.max(1, Math.floor((len * gd) / 24));
         for (let k = 0; k < nt; k++) {
           const t = s.a + (len * (k + 0.5)) / nt;
-          if (s.axis === "x") this._addTree(t, s.at + (s.rot === 0 ? 1.4 : -1.4), 1);
-          else this._addTree(s.at + (s.rot > 0 ? 1.4 : -1.4), t, 1);
+          if (s.axis === "x") {
+            const tz = s.at + (s.rot === 0 ? 1.4 : -1.4);
+            if (!this._inTraceCorridor(t, tz)) this._addTree(t, tz, 1);
+          } else {
+            const tx = s.at + (s.rot > 0 ? 1.4 : -1.4);
+            if (!this._inTraceCorridor(tx, t)) this._addTree(tx, t, 1);
+          }
         }
       }
     }
 
-    // 店门口的绿植：沿建筑立面随机摆花坛（间隔、放不放都随机）
+    // 店门口的绿植：沿建筑立面随机摆花坛（间隔、放不放都随机）；描边路走廊内不放
     if (gd <= 0) return;
     const fronts = [
       { horiz: true, at: bz0 - 0.75, a: bx0 + 2.5, b: bx1 - 2.5 },
@@ -626,8 +1027,11 @@ export class City {
       const step = rand(8, 15) / Math.max(0.25, gd);
       for (let t = f.a + 2; t < f.b - 2; t += step) {
         if (Math.random() > Math.min(1, 0.34 * gd)) continue;
-        if (f.horiz) this._addPlanter(t, f.at);
-        else this._addPlanter(f.at, t);
+        if (f.horiz) {
+          if (!this._inTraceCorridor(t, f.at)) this._addPlanter(t, f.at);
+        } else {
+          if (!this._inTraceCorridor(f.at, t)) this._addPlanter(f.at, t);
+        }
       }
     }
   }
@@ -1170,6 +1574,8 @@ export class City {
       // near the kerb: step outward from the walking line
       const px = x - nx * 1.0;
       const pz = z - nz * 1.0;
+      // 描边路走廊内不放：路口转角的人行道环线会穿过手绘道路
+      if (this._inTraceCorridor(px, pz)) continue;
       const rot = Math.atan2(nx, nz);
       spots.push({ x: px, z: pz, rot });
     }
@@ -1244,6 +1650,29 @@ export class City {
         // pole
         this.propBatch.add(applyColor(cylAt(0.06, 0.08, 3.9, p.x, 1.95 + 0.16, p.z, 6), 0x3c3e42));
         heads.push(p);
+      }
+    }
+    // 描边路 × 横纵路的路口：四角灯杆，分别沿描边路法线、横路法线外扩 1.3m
+    // （面路两侧变宽时按实测边界外扩，杆子不落进路面）
+    for (const j of this.traceJunctions || []) {
+      const nx = -j.uz, nz = j.ux;
+      const mx = j.mx, mz = j.mz;
+      const lbPos = (j.edgePos ?? j.roadHalf) + 1.3, lbNeg = -(j.edgeNeg ?? j.roadHalf) + 1.3;
+      // 相位归属：按两条路各自的大方向近似映射到南北 / 东西相位，与程序化路口共用同一循环
+      const axisRoad = Math.abs(j.uz) >= Math.abs(j.ux) ? "z" : "x";
+      const axisVia = Math.abs(j.vz) >= Math.abs(j.vx) ? "z" : "x";
+      const corners = [
+        { sn: -1, sm: 1, axis: axisRoad },
+        { sn: 1, sm: -1, axis: axisRoad },
+        { sn: -1, sm: -1, axis: axisVia },
+        { sn: 1, sm: 1, axis: axisVia },
+      ];
+      for (const c of corners) {
+        const lb = c.sn < 0 ? lbNeg : lbPos;
+        const px = j.x + nx * c.sn * lb + mx * c.sm * (j.progHalf + 1.3);
+        const pz = j.z + nz * c.sn * lb + mz * c.sm * (j.progHalf + 1.3);
+        this.propBatch.add(applyColor(cylAt(0.06, 0.08, 3.9, px, 1.95 + 0.16, pz, 6), 0x3c3e42));
+        heads.push({ x: px, z: pz, axis: c.axis });
       }
     }
     this.trafficHeads = heads;

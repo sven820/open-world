@@ -13,6 +13,11 @@ const uid = () => "map_" + Date.now().toString(36) + Math.random().toString(36).
 // 网格层默认浓度（3D 编辑器显示偏好；0=完全透出影像，1=不透明。0.6 = 面板滑杆默认 40%）
 export const GRID_OPACITY_DEFAULT = 0.6;
 
+// 地图基准锚点（新建地图的默认落点）：合肥市淮河路步行街（庐阳区）
+export const ORIGIN_DEFAULT = { lat: 31.8646, lon: 117.2907 };
+// 旧默认锚点：台北车站。仍挂着它的地图视为"用户没动过基准地址"，随新默认一起搬走
+const ORIGIN_LEGACY = { lat: 25.0477, lon: 121.5173 };
+
 function readAll() {
   try { return JSON.parse(localStorage.getItem(KEY_LIST)) || []; } catch { return []; }
 }
@@ -42,9 +47,13 @@ export function migrate(map) {
   if (!map) return map;
   if (map.version !== 2) {
     map.version = 2;
-    map.origin = map.origin || { lat: 25.0477, lon: 121.5173 }; // 默认锚点：台北车站
+    map.origin = map.origin || { ...ORIGIN_DEFAULT };
     map.features = map.features || { roads: [], rivers: [] };
     map.objects = map.objects || [];
+  }
+  // 基准地址仍是旧默认（台北车站）= 用户没在编辑器里改过锚点 → 跟随新默认搬到合肥淮河路步行街
+  if (map.origin && map.origin.lat === ORIGIN_LEGACY.lat && map.origin.lon === ORIGIN_LEGACY.lon) {
+    map.origin = { ...ORIGIN_DEFAULT };
   }
   // 地图工作范围（3D 编辑器的网格/底板区域；局部米制，rot 为弧度）
   map.area = map.area || { cx: 0, cz: 0, w: 4000, d: 4000, rot: 0 };
@@ -75,7 +84,7 @@ export function getMap(id) {
 
 export function createMap(name) {
   const now = Date.now();
-  const map = { id: uid(), name: (name || "").trim() || "未命名地图", createdAt: now, updatedAt: now, version: 2, origin: { lat: 25.0477, lon: 121.5173 }, features: { roads: [], rivers: [] }, objects: [], area: { cx: 0, cz: 0, w: 4000, d: 4000, rot: 0 }, ...templateData() };
+  const map = { id: uid(), name: (name || "").trim() || "未命名地图", createdAt: now, updatedAt: now, version: 2, origin: { ...ORIGIN_DEFAULT }, features: { roads: [], rivers: [] }, objects: [], area: { cx: 0, cz: 0, w: 4000, d: 4000, rot: 0 }, ...templateData() };
   const list = readAll();
   list.push(map);
   writeAll(list);

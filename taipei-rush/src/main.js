@@ -237,7 +237,7 @@ function renderMapList() {
     row.querySelector('[data-act="edit"]').addEventListener("click", () => {
       let map;
       if (it.isDefault) {
-        map = createMap(document.getElementById("ms-name").value || "我的城市");
+        map = createMap(takeMapName("我的城市"));
       } else {
         map = getMap(it.id);
       }
@@ -248,7 +248,7 @@ function renderMapList() {
     row.querySelector('[data-act="edit3d"]').addEventListener("click", () => {
       let map;
       if (it.isDefault) {
-        map = createMap(document.getElementById("ms-name").value || "我的城市");
+        map = createMap(takeMapName("我的城市"));
       } else {
         map = getMap(it.id);
       }
@@ -269,10 +269,17 @@ function renderMapList() {
   updateMapButton();
 }
 
+// 取走输入框里的新地图名称并清空：避免同名被「编辑副本 / 3D 副本」反复沿用，
+// 出现两行完全一样的地图名（容易被误认为改名串到了别的地图）
+function takeMapName(fallback) {
+  const el = document.getElementById("ms-name");
+  const name = el.value.trim();
+  el.value = "";
+  return name || fallback;
+}
+
 function onNewMap() {
-  const nameEl = document.getElementById("ms-name");
-  const map = createMap(nameEl.value);
-  nameEl.value = "";
+  const map = createMap(takeMapName(""));
   mapSelectEl().classList.add("hidden");
   openEditor(map);
 }

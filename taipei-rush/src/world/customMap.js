@@ -4,16 +4,40 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { mapBounds } from "../data/cityData.js";
+import { ASPHALT_TILE, makeAsphaltTexture } from "./textures.js";
 
 const wallMat = () => new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.85 });
 const roofMat = () => new THREE.MeshStandardMaterial({ color: 0x6f6a60, roughness: 0.9 });
-const roadMat = () => new THREE.MeshStandardMaterial({ color: 0x2e3742, roughness: 0.95 });
+// 描边路面：与程序化横纵路用同一张沥青贴图（色板一致），uv 由 planarUV 按世界米制生成
+let asphaltMat = null;
+function roadMat() {
+  if (!asphaltMat) {
+    asphaltMat = new THREE.MeshStandardMaterial({
+      map: makeAsphaltTexture(), color: 0xffffff, roughness: 0.95, metalness: 0.0,
+    });
+  }
+  return asphaltMat;
+}
 const sidewalkMat = () => new THREE.MeshStandardMaterial({ color: 0x9aa2ab, roughness: 0.92 });
 const medianBedMat = () => new THREE.MeshStandardMaterial({ color: 0x9aa2ab, roughness: 0.92 });
 const hedgeMat = () => new THREE.MeshStandardMaterial({ color: 0x2f5426, roughness: 1 });
 const markWhiteMat = () => new THREE.MeshBasicMaterial({ color: 0xe8e8e2, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
 const markYellowMat = () => new THREE.MeshBasicMaterial({ color: 0xd8a524, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
 const riverMat = () => new THREE.MeshStandardMaterial({ color: 0x1d5f8f, transparent: true, opacity: 0.8, roughness: 0.25 });
+
+// 世界米制平面 uv：直接取 position.xz / ASPHALT_TILE。
+// 密度与程序化路面一致（那边是整块平面 repeat = 尺寸 / ASPHALT_TILE），
+// 而且纹理按世界坐标对齐，两条路交接处不会出现错位的纹理接缝。
+function planarUV(geo) {
+  const pos = geo.attributes.position;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uv[i * 2] = pos.getX(i) / ASPHALT_TILE;
+    uv[i * 2 + 1] = pos.getZ(i) / ASPHALT_TILE;
+  }
+  geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  return geo;
+}
 
 // 折线 → 带状平面网格（两三角/段 + 接头圆片补缝），贴合 y 平面。
 // 圆片必须略微高于带面：两者共面时深度完全相等，远处会整片 z-fighting 闪烁。
@@ -41,13 +65,14 @@ function stripGeometry(points, width, y, discLift = 0.004) {
   geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
   geo.setIndex(idx);
   geo.computeVertexNormals();
+  planarUV(geo);
   const discs = [];
   for (const p of points) {
     const c = new THREE.CircleGeometry(hw, 10);
-    c.deleteAttribute("uv");
     c.rotateX(-Math.PI / 2);
     c.translate(p.x, y + discLift, p.z);
-    discs.push(c);
+    // 圆片用同一套世界 uv：补缝处纹理与带身连续，否则圆片上会出现一张被压缩的贴图
+    discs.push(planarUV(c));
   }
   const merged = mergeGeometries([geo, mergeGeometries(discs)]);
   return merged || geo;
@@ -55,6 +80,67 @@ function stripGeometry(points, width, y, discLift = 0.004) {
 
 function polyline(points) {
   return (points || []).map(([x, z]) => ({ x, z }));
+}
+
+// 折线总弧长
+function polylineLen(pts) {
+  let s = 0;
+  for (let i = 1; i < pts.length; i++) s += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+  return s;
+}
+
+// 弧长 → 折线上的点（超出范围按端点 clamp）
+function pointAtLen(pts, s) {
+  let acc = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const len = Math.hypot(b.x - a.x, b.z - a.z);
+    if (acc + len >= s || i === pts.length - 1) {
+      const t = len < 1e-6 ? 0 : Math.min(1, Math.max(0, (s - acc) / len));
+      return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t };
+    }
+    acc += len;
+  }
+  return { x: pts[pts.length - 1].x, z: pts[pts.length - 1].z };
+}
+
+// 取 [s0, s1] 区间的子折线，两端按弧长插值补点
+function slicePolyline(pts, s0, s1) {
+  const out = [pointAtLen(pts, s0)];
+  let acc = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const len = Math.hypot(b.x - a.x, b.z - a.z);
+    acc += len;
+    if (acc > s0 && acc < s1) out.push({ x: b.x, z: b.z });
+  }
+  out.push(pointAtLen(pts, s1));
+  return out;
+}
+
+// 按"挖掉"的弧长区间把折线切成若干子折线；ranges 为空时原样返回（保持旧行为）
+function cutPolyline(pts, ranges) {
+  const total = polylineLen(pts);
+  if (!ranges || !ranges.length) return [pts];
+  const rs = ranges
+    .map(([a, b]) => [Math.max(0, Math.min(a, b)), Math.min(total, Math.max(a, b))])
+    .filter(([a, b]) => b - a > 0.01)
+    .sort((p, q) => p[0] - q[0]);
+  if (!rs.length) return [pts];
+  const merged = [];
+  for (const r of rs) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push(r.slice());
+  }
+  const spans = [];
+  let cur = 0;
+  for (const [a, b] of merged) {
+    if (a - cur > 0.5) spans.push([cur, a]);
+    cur = Math.max(cur, b);
+  }
+  if (total - cur > 0.5) spans.push([cur, total]);
+  return spans.map(([a, b]) => slicePolyline(pts, a, b));
 }
 
 // 折线整体沿法线偏移 off（每点取相邻方向的平均法线，转角平滑）
@@ -76,11 +162,11 @@ function markQuad(x0, z0, x1, z1, w, y) {
   const len = Math.hypot(dx, dz);
   if (len < 0.02) return null;
   const g = new THREE.PlaneGeometry(len + w * 0.6, w);
-  g.deleteAttribute("uv");   // 纯色标线：与 stripGeometry 产物属性保持一致才能合并
   g.rotateX(-Math.PI / 2);
   g.rotateY(Math.atan2(-dz, dx));
   g.translate((x0 + x1) / 2, y, (z0 + z1) / 2);
-  return g;
+  // uv 必须保留：whites 里要和 stripGeometry 产物合并，属性集不一致 mergeGeometries 会返回 null
+  return planarUV(g);
 }
 
 // 白色虚线：沿折线按 9m 周期 emit 3.2m 短划（与程序化道路一致）
@@ -340,13 +426,16 @@ export function worldBounds(data) {
 }
 
 // 构建描边内容的运行时网格组 + 注册碰撞；返回 null 表示该地图没有描边内容
-export function buildCustomMap(data, colliders) {
+// junctions: 由 city 算好的「描边路 × 程序化横纵路」路口，用来在路口断开人行道与标线
+export function buildCustomMap(data, colliders, junctions = []) {
   const bbox = customBBox(data);
   if (!bbox) return null;
   const group = new THREE.Group();
   group.name = "customMap";
 
-  for (const r of data.features.roads || []) {
+  const roads = data.features.roads || [];
+  for (let ri = 0; ri < roads.length; ri++) {
+    const r = roads[ri];
     if (!r.points || r.points.length < 2) continue;
     const pts = polyline(r.points);
     // 程序化街区平台顶 0.16 —— 描边路面抬到其上，穿越街区时路面不被平台盖住
@@ -354,20 +443,34 @@ export function buildCustomMap(data, colliders) {
     if (r.closed && r.points.length >= 3) {
       // 取面道路（closed）：围合多边形整体填充为路面
       const shape = new THREE.Shape(r.points.map(([x, z]) => new THREE.Vector2(x, -z)));
-      m = new THREE.Mesh(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2).translate(0, 0.18, 0), roadMat());
+      m = new THREE.Mesh(planarUV(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2).translate(0, 0.18, 0)), roadMat());
     } else {
       m = new THREE.Mesh(stripGeometry(pts, r.width || 12, 0.18), roadMat());
     }
     m.receiveShadow = true;
     group.add(m);
+    // 路口断开：路面本身保留（车要开过去），但人行道 / 标线 / 分隔带在横路宽度内截断，
+    // 否则 0.24 高的人行道会像一堵墙横穿车道，路缘白线和双黄线也会直接压过路口。
+    const cutRanges = [];
+    if (!r.closed) {
+      for (const j of junctions || []) {
+        if (j.roadIndex === ri) cutRanges.push([j.s - j.alongHalf - 0.6, j.s + j.alongHalf + 0.6]);
+        // 这条路作为"被穿路"时也要断开（描边路 × 描边路）
+        if (j.viaRoadIndex === ri) cutRanges.push([j.viaS - j.viaAlongHalf - 0.6, j.viaS + j.viaAlongHalf + 0.6]);
+      }
+    }
+    const spans = cutPolyline(pts, cutRanges);
+
     // 人行道：沿两侧偏移的窄条带（路缘高出路面 6cm）；取面路为整块填充，无侧边不生成
     const sw = Math.min(Math.max(r.sidewalk ?? 3, 0), 12);
     const half = (r.width || 12) / 2;
     if (!r.closed && sw > 0) {
-      for (const s of [1, -1]) {
-        const sm = new THREE.Mesh(stripGeometry(offsetPolyline(pts, s * (half + sw / 2)), sw, 0.24), sidewalkMat());
-        sm.receiveShadow = true;
-        group.add(sm);
+      for (const span of spans) {
+        for (const s of [1, -1]) {
+          const sm = new THREE.Mesh(stripGeometry(offsetPolyline(span, s * (half + sw / 2)), sw, 0.24), sidewalkMat());
+          sm.receiveShadow = true;
+          group.add(sm);
+        }
       }
     }
     // 车道标线 / 双黄线 / 分隔带（与程序化横纵路同语义）。
@@ -375,29 +478,47 @@ export function buildCustomMap(data, colliders) {
     // 线形路沿折线（折线即路中心）；取面路沿最小外接矩形长轴中线（直路取面才有中线）
     const lanes = Math.min(Math.max(r.lanes ?? 2, 1), 4);
     const med = Math.min(Math.max(r.median ?? 0, 0), 14);
-    let markPts = null;
-    if (!r.closed) markPts = pts;
+    let markSpans = null;
+    if (!r.closed) markSpans = spans;
     else {
       const cl = polyCenterLine(r.points, 80);
-      if (cl) markPts = [{ x: cl[0][0], z: cl[0][1] }, { x: cl[1][0], z: cl[1][1] }];
-    }
-    if (markPts) {
-      const whites = [], yellows = [], beds = [], hedges = [];
-      for (const s of [-1, 1]) {
-        if (!r.closed) emitSolid(offsetPolyline(markPts, s * (half - 0.16)), 0.19, 0.14, whites); // 路缘白实线
-        for (let lane = 1; lane < lanes; lane++) {
-          const off = med / 2 + lane * 3.4; // 固定车道宽 3.4m
-          if (!r.closed && off > half - 0.35) break; // 超出车行道不画
-          emitDashes(offsetPolyline(markPts, s * off), 0.19, whites);
+      if (cl) {
+        const line = [{ x: cl[0][0], z: cl[0][1] }, { x: cl[1][0], z: cl[1][1] }];
+        // 取面路没有侧边人行道，但中线标线 / 分隔带照样会横穿路口 ——
+        // 绿篱高 0.56，会直接压住 0.2 高的斑马线，必须按路口位置截断
+        const len = polylineLen(line);
+        const dx = line[1].x - line[0].x, dz = line[1].z - line[0].z;
+        const cuts = [];
+        for (const j of junctions || []) {
+          if (j.roadIndex !== ri || len < 1e-6) continue;
+          const t = ((j.x - line[0].x) * dx + (j.z - line[0].z) * dz) / (len * len);
+          if (t < -0.05 || t > 1.05) continue;
+          const px = line[0].x + dx * t, pz = line[0].z + dz * t;
+          if (Math.hypot(j.x - px, j.z - pz) > j.roadHalf + 2) continue; // 投影不在这条中线上
+          cuts.push([t * len - j.alongHalf - 0.6, t * len + j.alongHalf + 0.6]);
         }
+        markSpans = cutPolyline(line, cuts);
       }
-      if (med > 0) {
-        // 中央分隔带：基座 + 绿篱 + 行道树（median ≥ 5 时每 ~22m，缩小 0.8）
-        emitBoxStrip(markPts, med, 0.2, 0.28, beds);
-        emitBoxStrip(markPts, Math.max(0.9, med - 1.4), 0.55, 0.56, hedges);
-      } else {
-        emitSolid(offsetPolyline(markPts, -0.17), 0.19, 0.1, yellows); // 双黄线
-        emitSolid(offsetPolyline(markPts, 0.17), 0.19, 0.1, yellows);
+    }
+    if (markSpans && markSpans.length) {
+      const whites = [], yellows = [], beds = [], hedges = [];
+      for (const mp of markSpans) {
+        for (const s of [-1, 1]) {
+          if (!r.closed) emitSolid(offsetPolyline(mp, s * (half - 0.16)), 0.19, 0.14, whites); // 路缘白实线
+          for (let lane = 1; lane < lanes; lane++) {
+            const off = med / 2 + lane * 3.4; // 固定车道宽 3.4m
+            if (!r.closed && off > half - 0.35) break; // 超出车行道不画
+            emitDashes(offsetPolyline(mp, s * off), 0.19, whites);
+          }
+        }
+        if (med > 0) {
+          // 中央分隔带：基座 + 绿篱 + 行道树（median ≥ 5 时每 ~22m，缩小 0.8）
+          emitBoxStrip(mp, med, 0.2, 0.28, beds);
+          emitBoxStrip(mp, Math.max(0.9, med - 1.4), 0.55, 0.56, hedges);
+        } else {
+          emitSolid(offsetPolyline(mp, -0.17), 0.19, 0.1, yellows); // 双黄线
+          emitSolid(offsetPolyline(mp, 0.17), 0.19, 0.1, yellows);
+        }
       }
       if (whites.length) group.add(new THREE.Mesh(mergeGeometries(whites), markWhiteMat()));
       if (yellows.length) group.add(new THREE.Mesh(mergeGeometries(yellows), markYellowMat()));
@@ -412,16 +533,18 @@ export function buildCustomMap(data, colliders) {
         group.add(hedge);
       }
       if (med >= 5) {
-        let acc = 0, next = 12;
-        for (let i = 0; i + 1 < markPts.length; i++) {
-          const a = markPts[i], b = markPts[i + 1];
-          const len = Math.hypot(b.x - a.x, b.z - a.z);
-          while (next <= acc + len) {
-            const t = (next - acc) / len;
-            group.add(treeMesh({ pos: [a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t], sc: 0.8, baseY: 0.38 }));
-            next += 22;
+        for (const mp of markSpans) {
+          let acc = 0, next = 12;
+          for (let i = 0; i + 1 < mp.length; i++) {
+            const a = mp[i], b = mp[i + 1];
+            const len = Math.hypot(b.x - a.x, b.z - a.z);
+            while (next <= acc + len) {
+              const t = (next - acc) / len;
+              group.add(treeMesh({ pos: [a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t], sc: 0.8, baseY: 0.38 }));
+              next += 22;
+            }
+            acc += len;
           }
-          acc += len;
         }
       }
     }

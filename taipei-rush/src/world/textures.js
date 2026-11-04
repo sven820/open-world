@@ -351,6 +351,10 @@ export function makeSidewalkTexture() {
   return canvasTexture(c);
 }
 
+// 沥青贴图的世界平铺周期（米 / 一张图）。程序化路面与描边路面共用同一密度，
+// 两侧路面的颗粒尺度与接缝处的纹理才会对齐。
+export const ASPHALT_TILE = 16;
+
 export function makeAsphaltTexture() {
   const S = 1024;
   const c = makeCanvas(S, S);

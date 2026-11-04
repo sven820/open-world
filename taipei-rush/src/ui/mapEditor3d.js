@@ -17,7 +17,7 @@ import { searchPlaces } from "../config/placeSearch.js";
 import { dropAt, bendGeometry } from "../config/curvature.js";
 import { EXT_STEP_X, EXT_STEP_Z, extRoadSpec, genConfig, asphaltHalf, corridorHalf } from "../data/cityData.js";
 import { areaPoly, clipAxisLine, worldBounds, polyCenterLine } from "../world/customMap.js";
-import { GRID_OPACITY_DEFAULT } from "../data/mapStore.js";
+import { GRID_OPACITY_DEFAULT, ORIGIN_DEFAULT } from "../data/mapStore.js";
 import { genParamsHtml, bindGenParams } from "./genParams.js";
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -65,6 +65,11 @@ export class MapEditor3d {
     // 图层显隐状态（图层控制面板）：持久化到 localStorage，重开编辑器后保持
     this._layerVis = { base: true, img: true, anno: true, area: true, skeleton: true, road: true, river: true, object: true, origin: true, measure: true };
     try { Object.assign(this._layerVis, JSON.parse(localStorage.getItem("tr_e3_layers") || "{}")); } catch { /* 忽略脏数据 */ }
+    // 顶栏按钮等是 index.html 里的单例 DOM：监听挂到本实例 controller 上，
+    // close() 一次性摘除。否则旧实例仍绑在同一个「保存」按钮上，保存时会把
+    // 上一张地图按当前名称输入框的内容再写一遍（表现为另一张地图被改名）。
+    this._ac = new AbortController();
+    this._sig = { signal: this._ac.signal };
   }
 
   /* ---------------- lifecycle ---------------- */
@@ -89,6 +94,7 @@ export class MapEditor3d {
   close() {
     this._disposed = true;
     cancelAnimationFrame(this._raf);
+    if (this._ac) { this._ac.abort(); this._ac = null; } // 摘除本实例在单例 DOM 上的全部监听
     if (this._three) {
       const { tc, scene } = this._three;
       try { tc.dispose(); } catch { /* three r169 dispose 内部 bug（r170 修复），忽略 */ }
@@ -215,7 +221,7 @@ export class MapEditor3d {
     this._initArea();
     this._resize();
     this._onResize = () => this._resize();
-    window.addEventListener("resize", this._onResize);
+    window.addEventListener("resize", this._onResize, this._sig);
 
     // pointer events（绘制 / 选择）
     canvas.addEventListener("pointerdown", (e) => this._onDown(e));
@@ -720,7 +726,7 @@ export class MapEditor3d {
   _updateEnu() {
     if (!this._cesium) return;
     const { Cesium, viewer } = this._cesium;
-    const o = this.map.origin || { lat: 25.0477, lon: 121.5173 };
+    const o = this.map.origin || { ...ORIGIN_DEFAULT };
     this._cesium.enu = Cesium.Transforms.eastNorthUpToFixedFrame(
       Cesium.Cartesian3.fromDegrees(o.lon, o.lat),
     );
@@ -2852,14 +2858,14 @@ export class MapEditor3d {
       roadSub.classList.toggle("hidden");
     });
 
-    document.getElementById("e3-save").addEventListener("click", () => this._save());
-    document.getElementById("e3-play").addEventListener("click", () => { if (this._save()) this.opts.onPlay(); });
-    document.getElementById("e3-exit").addEventListener("click", () => this.opts.onClose());
-    document.getElementById("e3-undo").addEventListener("click", () => this._undo());
-    document.getElementById("e3-redo").addEventListener("click", () => this._redo());
-    document.getElementById("e3-snap").addEventListener("change", (e) => { this._snap = +e.target.value; });
-    document.getElementById("e3-basemap").addEventListener("click", () => this._toggleBasemap());
-    document.getElementById("e3-settings").addEventListener("click", () => this._toggleSettings());
+    document.getElementById("e3-save").addEventListener("click", () => this._save(), this._sig);
+    document.getElementById("e3-play").addEventListener("click", () => { if (this._save()) this.opts.onPlay(); }, this._sig);
+    document.getElementById("e3-exit").addEventListener("click", () => this.opts.onClose(), this._sig);
+    document.getElementById("e3-undo").addEventListener("click", () => this._undo(), this._sig);
+    document.getElementById("e3-redo").addEventListener("click", () => this._redo(), this._sig);
+    document.getElementById("e3-snap").addEventListener("change", (e) => { this._snap = +e.target.value; }, this._sig);
+    document.getElementById("e3-basemap").addEventListener("click", () => this._toggleBasemap(), this._sig);
+    document.getElementById("e3-settings").addEventListener("click", () => this._toggleSettings(), this._sig);
 
     this._onKey = (e) => {
       if (document.activeElement && ["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
@@ -2888,7 +2894,7 @@ export class MapEditor3d {
       else if (e.key === "e" || e.key === "E") this._three.tc.setMode("rotate");
       else if (e.key === "r" || e.key === "R") this._three.tc.setMode("scale");
     };
-    window.addEventListener("keydown", this._onKey);
+    window.addEventListener("keydown", this._onKey, this._sig);
     this._snap = 5;
     this._renderProps();
     this._updateOriginLabel();
