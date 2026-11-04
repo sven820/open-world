@@ -151,3 +151,5 @@ vite.config.ts.timestamp-*
 # Browser automation snapshots / temp files
 .playwright-cli/
 menu.yaml
+
+long-wind-main/

@@ -73,6 +73,7 @@ export class Player {
     this._camLift = 0;       // 浏览时相机越过楼顶的抬升量（米）
     this._lookLock = 0;      // 刚旋转视角的余温：期间不触发"沿路对准"辅助
     this._resetT = 0;        // C 视角复位的过渡计时
+    this._pitchTouched = false; // 玩家手动调过俯仰后，拉远不再用 autoMin 强行压住视角
 
     // root is the single transform the movement code drives
     this.root = new THREE.Group();
@@ -191,6 +192,7 @@ export class Player {
     this.camDistTarget = 5.4;
     this.camDistDriveTarget = 9;
     this._resetT = 0.5;   // 平滑过渡，避免镜头瞬间跳回
+    this._pitchTouched = false; // 复位后重新交给"拉远自动抬升"接管
   }
 
   reset() {
@@ -214,6 +216,7 @@ export class Player {
     this.camDistDrive = this.camDistDriveTarget = 9;
     this._camClear = 1;
     this._lookLock = 0;
+    this._pitchTouched = false;
     this._updateCamera(0.016);
   }
 
@@ -401,6 +404,9 @@ export class Player {
     if (mx || my) this._lookLock = 0.45;
     this._lookLock = Math.max(0, this._lookLock - dt);
     this.yaw -= mx * 0.0024;
+    // 玩家一碰俯仰就交出控制权：否则远距离时 _orbitPitch 的 autoMin 会把
+    // 向下拖动全部吃掉（表现为"拉远后俯仰调不动"）。
+    if (Math.abs(my) > 1e-4) this._pitchTouched = true;
     this.pitch += my * 0.0022;
     this.pitch = Math.max(-1.05, Math.min(1.5, this.pitch));
 
@@ -604,12 +610,20 @@ export class Player {
     this.pos.copy(this.drivePos);
   }
 
-  // 轨道俯角：视距越大，最低俯角越高（12m 内完全由玩家控制，约 210m 时到 64°）。
+  // 轨道俯角：视距越大，默认俯角越高（12m 内完全由玩家控制，约 210m 时到 64°）。
   // 这条联动是"拉远不飘"的核心：相机沿视距升空俯瞰，而不是贴着地面水平飞出。
+  // 但它只作为"玩家还没动过俯仰"时的默认值 —— 一旦玩家自己拖过俯仰，
+  // autoMin 就退出，否则远距离时它是个硬下限，向下拖动会被完全吃掉。
   _orbitPitch(dist) {
     const user = this.pitch + 0.2;                        // 基础肩后俯角
     const t = Math.min(1, Math.max(0, (dist - 12) / 150));
     const autoMin = 0.1 + t * 1.05;                       // 12→162m：肩后 → 高空俯瞰
+    if (this._pitchTouched) {
+      // 接管后只兜底"相机别贴地"：视距越远，要求的最小俯角略高，
+      // 12m 内完全放开（-0.12），60m 起约 3.4°（dist=420 时相机仍有 ~25m 高）。
+      const minByHeight = -0.12 + Math.min(1, Math.max(0, (dist - 12) / 48)) * 0.18;
+      return Math.max(minByHeight, Math.min(1.45, user));
+    }
     return Math.max(-0.12, Math.min(1.45, Math.max(user, autoMin)));
   }
 

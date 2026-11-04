@@ -12,6 +12,10 @@ import {
   getActiveMapId, setActiveMapId, resolveActiveMap,
 } from "./data/mapStore.js";
 import { MapEditor } from "./ui/mapEditor.js";
+import {
+  getRenderSettings, onRenderSettingsChange, MAX_PEDESTRIANS, MAX_VEHICLES,
+} from "./config/renderSettings.js";
+import { RenderSettingsPanel } from "./ui/renderSettingsPanel.js";
 
 window.__errs = [];
 window.addEventListener("error", (e) => window.__errs.push(String(e.message) + " @" + (e.filename || "") + ":" + (e.lineno || "")));
@@ -65,11 +69,20 @@ async function buildWorld(mapData, mapId) {
   await new Promise((r) => setTimeout(r, 30));
   setProgress(0.62, "正在布置店家招牌与街灯…");
   const landmarkGroup = buildLandmarks(engine.scene, city);
+  // 地标也纳入分块按需渲染（离开视野/距离后整组跳过绘制）
+  for (const g of landmarkGroup.children) city.registerStreamed(g);
+  if (city.custom && city.custom.group) city.registerStreamed(city.custom.group);
   setProgress(0.78, "正在唤醒行人与车流…");
   await new Promise((r) => setTimeout(r, 30));
-  const traffic = new Traffic(engine.scene, city, 40);
+  // 实例容量按上限分配，实际启用数量由画面设置决定（可热切换，无需重建世界）
+  const rs = getRenderSettings();
+  const traffic = new Traffic(engine.scene, city, MAX_VEHICLES);
+  traffic.setActiveCount(rs.traffic);
+  traffic.setMaxDistance(rs.trafficDistance);
   city.traffic = traffic;
-  const peds = new PedestrianCrowd(engine.scene, city, 240);
+  const peds = new PedestrianCrowd(engine.scene, city, MAX_PEDESTRIANS);
+  peds.setActiveCount(rs.pedestrians);
+  peds.setMaxDistance(rs.pedestrianDistance);
   const player = new Player(engine.scene, engine.camera, city, engine.renderer);
   player.reset();
   await player.ready;
@@ -109,6 +122,7 @@ function disposeWorld() {
   safe(() => w.player.dispose());
   safe(() => { engine.scene.remove(w.landmarkGroup); disposeTree(w.landmarkGroup); });
   safe(() => { engine.scene.remove(w.city.group); disposeTree(w.city.group); });
+  safe(() => w.city.dispose());
   window.__game = null;
 }
 
@@ -145,7 +159,23 @@ async function boot() {
 /* ---------------- UI wiring ---------------- */
 document.getElementById("btn-start").addEventListener("click", startGame);
 document.getElementById("btn-character").addEventListener("click", () => world && world.hud.showNotify("角色：阿杰 · 西门町长大，擅长骑车", 2600));
-document.getElementById("btn-settings").addEventListener("click", () => world && world.hud.showNotify("设置：视角灵敏度 / 音量（示意）", 2600));
+
+/* ---------------- 画面设置（渲染性能可调） ---------------- */
+let settingsPanel = null;
+function openSettings() {
+  if (!settingsPanel) settingsPanel = new RenderSettingsPanel();
+  settingsPanel.open();
+}
+document.getElementById("btn-settings").addEventListener("click", openSettings);
+
+// 行人/车流规模属于"实例数量"，热切换即可，不用重建世界
+onRenderSettingsChange((s) => {
+  if (!world) return;
+  world.peds.setActiveCount(s.pedestrians);
+  world.peds.setMaxDistance(s.pedestrianDistance);
+  world.traffic.setActiveCount(s.traffic);
+  world.traffic.setMaxDistance(s.trafficDistance);
+});
 document.getElementById("btn-map").addEventListener("click", openMapSelect);
 document.getElementById("ms-close").addEventListener("click", () => mapSelectEl().classList.add("hidden"));
 document.getElementById("ms-new").addEventListener("click", onNewMap);
@@ -348,14 +378,18 @@ function closeBigMap() {
 }
 function bigmapEl() { return document.getElementById("bigmap"); }
 
+// 无玩家时的取景回退点（避免每帧临时对象）
+const FALLBACK_FOCUS = { x: -160, z: -24 };
+
 // main update loop
 engine.onUpdate((dt, time) => {
   const w = world;
-  env.update(dt, w && w.player ? w.player.pos : { x: -160, z: -24 });
+  const focus = w && w.player ? w.player.pos : FALLBACK_FOCUS;
+  env.update(dt, focus);
   if (w && w.city.readyState) {
-    w.city.update(dt, time, env.night);
-    w.traffic.update(dt);
-    w.peds.update(dt);
+    w.city.update(dt, time, env.night, focus);
+    w.traffic.update(dt, focus);
+    w.peds.update(dt, focus);
   }
   if (started && w) {
     if (input.pressed("KeyM")) { bigOpen ? closeBigMap() : openBigMap(); }
@@ -378,13 +412,20 @@ engine.onUpdate((dt, time) => {
   engine.bloom.strength = 0.32 + env.night * 0.6;
   input.update();
   window.__frames = (window.__frames || 0) + 1;
-  window.__calls = engine.renderer.info.render.calls;
-  window.__tris = engine.renderer.info.render.triangles;
-  window.__visible = w ? w.city.group.children.filter((o) => o.visible).length : 0;
+  const fs = engine.frameStats;
+  window.__calls = fs ? fs.calls : 0;
+  window.__tris = fs ? fs.triangles : 0;
+  // 分块调度里已统计可见块数，别在这里对全部 children 做 filter（每帧一个数组）
+  window.__visible = w ? w.city.visibleChunks : 0;
 
   fpsFrames++;
   fpsAcc += dt;
-  if (fpsAcc >= 0.5) { fps = fpsFrames / fpsAcc; fpsAcc = 0; fpsFrames = 0; if (document.getElementById("fps")) document.getElementById("fps").classList.remove("hidden"); }
+  if (fpsAcc >= 0.5) {
+    fps = fpsFrames / fpsAcc;
+    fpsAcc = 0; fpsFrames = 0;
+    window.__fps = fps;
+    if (document.getElementById("fps")) document.getElementById("fps").classList.remove("hidden");
+  }
 });
 
 // big map zoom is now handled by the HUD's own mouse/wheel handlers on #bigmap-canvas

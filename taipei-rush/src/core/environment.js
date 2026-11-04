@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { getRenderSettings, onRenderSettingsChange } from "../config/renderSettings.js";
 
 const SKY_VERT = /* glsl */ `
   varying vec3 vDir;
@@ -56,12 +57,19 @@ function lerpColor(a, b, t, out) {
   return out;
 }
 
+// 颜色预先转成 THREE.Color：update() 每帧跑，不能在里面 new Color（GC 抖动）
 const PRESETS = {
   night: { top: 0x070c1e, hor: 0x151d31, bot: 0x0a0d16, fog: 0x141a28, sun: 0x2a3352, hemiSky: 0x2a3552, hemiGround: 0x11131a, hemi: 0.42 },
   dawn:  { top: 0x2a3f78, hor: 0xe6a08f, bot: 0x2b2a35, fog: 0x9a8890, sun: 0xffc9a8, hemiSky: 0x7c88b4, hemiGround: 0x3a3230, hemi: 0.6 },
   day:   { top: 0x2f6fc4, hor: 0xcfe2f2, bot: 0x8c99a4, fog: 0xb9c9d6, sun: 0xfff2dc, hemiSky: 0xbdd6ef, hemiGround: 0x6b6458, hemi: 0.95 },
   dusk:  { top: 0x3b3a70, hor: 0xf2a58e, bot: 0x3a2f3a, fog: 0xc08c86, sun: 0xffb27a, hemiSky: 0x9a7d92, hemiGround: 0x3b302c, hemi: 0.62 },
 };
+for (const key of Object.keys(PRESETS)) {
+  const p = PRESETS[key];
+  for (const k of ["top", "hor", "bot", "fog", "sun", "hemiSky", "hemiGround"]) {
+    p[k] = new THREE.Color(p[k]);
+  }
+}
 
 export class Environment {
   constructor(scene, renderer) {
@@ -141,11 +149,6 @@ export class Environment {
 
     this.sun = new THREE.DirectionalLight(0xffb27a, 2.2);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
-    const sc = this.sun.shadow.camera;
-    sc.near = 1; sc.far = 520; sc.left = -95; sc.right = 95; sc.top = 95; sc.bottom = -95;
-    this.sun.shadow.bias = -0.0006;
-    this.sun.shadow.normalBias = 0.6;
     scene.add(this.sun);
     scene.add(this.sun.target);
 
@@ -156,6 +159,38 @@ export class Environment {
     scene.add(this.moonLight);
 
     this._tmpV = new THREE.Vector3();
+    this._shadowKey = "";
+
+    this.applyShadowSettings(getRenderSettings());
+    onRenderSettingsChange((s) => this.applyShadowSettings(s));
+  }
+
+  /** 阴影质量热切换：贴图分辨率与投影相机范围（范围越小，同样分辨率越清晰也越省） */
+  applyShadowSettings(s) {
+    const size = Math.max(512, Math.round(s.shadowMapSize || 2048));
+    const half = Math.max(30, s.shadowDistance || 95);
+    const key = `${size}|${half}`;
+    if (key === this._shadowKey) return;
+    this._shadowKey = key;
+
+    this.sun.castShadow = !!s.shadows;
+    const shadow = this.sun.shadow;
+    if (shadow.mapSize.x !== size) {
+      shadow.mapSize.set(size, size);
+      // 分辨率变化必须丢弃旧的 RT，否则 three 会继续用旧尺寸
+      if (shadow.map) {
+        shadow.map.dispose();
+        shadow.map = null;
+      }
+    }
+    const sc = shadow.camera;
+    sc.left = -half;
+    sc.right = half;
+    sc.top = half;
+    sc.bottom = -half;
+    sc.near = 1;
+    sc.far = half * 5.5;
+    sc.updateProjectionMatrix();
   }
 
   setHour(h) { this.hour = ((h % 24) + 24) % 24; }
@@ -184,12 +219,11 @@ export class Environment {
     else { a = PRESETS.night; b = PRESETS.night; t = 0; }
 
     const ca = this._c;
-    const topA = new THREE.Color(a.top), topB = new THREE.Color(b.top);
-    lerpColor(topA, topB, t, ca.top);
-    lerpColor(new THREE.Color(a.hor), new THREE.Color(b.hor), t, ca.hor);
-    lerpColor(new THREE.Color(a.bot), new THREE.Color(b.bot), t, ca.bot);
-    lerpColor(new THREE.Color(a.fog), new THREE.Color(b.fog), t, ca.fog);
-    lerpColor(new THREE.Color(a.sun), new THREE.Color(b.sun), t, ca.sun);
+    lerpColor(a.top, b.top, t, ca.top);
+    lerpColor(a.hor, b.hor, t, ca.hor);
+    lerpColor(a.bot, b.bot, t, ca.bot);
+    lerpColor(a.fog, b.fog, t, ca.fog);
+    lerpColor(a.sun, b.sun, t, ca.sun);
 
     this.skyUniforms.uTop.value.copy(ca.top);
     this.skyUniforms.uHorizon.value.copy(ca.hor);
@@ -217,8 +251,8 @@ export class Environment {
     this.sun.intensity = 0.35 + lightUp * 2.4;
     this.sun.color.copy(ca.sun);
     this.hemi.intensity = THREE.MathUtils.lerp(a.hemi, b.hemi, t);
-    this.hemi.color.setHex(a.hemiSky).lerp(new THREE.Color(b.hemiSky), t);
-    this.hemi.groundColor.setHex(a.hemiGround).lerp(new THREE.Color(b.hemiGround), t);
+    this.hemi.color.copy(a.hemiSky).lerp(b.hemiSky, t);
+    this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
     this.moonLight.intensity = night * 0.42;
     this.moonLight.position.set(-sunDir.x * 200, 180, -sunDir.z * 200);
 
@@ -234,7 +268,5 @@ export class Environment {
       this.sky.position.set(fx, 0, fz);
       this.stars.position.set(fx, 0, fz);
     }
-
-    this.bloomStrength = this.bloomStrength; // cosmetic
   }
 }

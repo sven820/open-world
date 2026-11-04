@@ -15,9 +15,10 @@ import {
 } from "../config/cesium.js";
 import { searchPlaces } from "../config/placeSearch.js";
 import { dropAt, bendGeometry } from "../config/curvature.js";
-import { EXT_STEP_X, EXT_STEP_Z, asphaltHalf, corridorHalf } from "../data/cityData.js";
+import { EXT_STEP_X, EXT_STEP_Z, extRoadSpec, genConfig, asphaltHalf, corridorHalf } from "../data/cityData.js";
 import { areaPoly, clipAxisLine, worldBounds, polyCenterLine } from "../world/customMap.js";
 import { GRID_OPACITY_DEFAULT } from "../data/mapStore.js";
+import { genParamsHtml, bindGenParams } from "./genParams.js";
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const uid = () => "o" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -2117,13 +2118,15 @@ export class MapEditor3d {
     const xs = this.map.roadsX.map((r) => ({ obj: r, at: r.at, ext: false })).sort((p, q) => p.at - q.at);
     const zs = this.map.roadsZ.map((r) => ({ obj: r, at: r.at, ext: false })).sort((p, q) => p.at - q.at);
     if (this.map.extRoads) {
+      // 延伸路规格与运行时同源：大道 / 街巷的宽度在预览里也要一致
+      const extAt = (at, step) => ({ at, ext: true, spec: extRoadSpec(at, step) });
       if (xs.length) {
-        while (xs[xs.length - 1].at < b.maxX) xs.push({ at: xs[xs.length - 1].at + EXT_STEP_X, ext: true });
-        while (xs[0].at > b.minX) xs.unshift({ at: xs[0].at - EXT_STEP_X, ext: true });
+        while (xs[xs.length - 1].at < b.maxX) xs.push(extAt(xs[xs.length - 1].at + EXT_STEP_X, EXT_STEP_X));
+        while (xs[0].at > b.minX) xs.unshift(extAt(xs[0].at - EXT_STEP_X, EXT_STEP_X));
       }
       if (zs.length) {
-        while (zs[zs.length - 1].at < b.maxZ) zs.push({ at: zs[zs.length - 1].at + EXT_STEP_Z, ext: true });
-        while (zs[0].at > b.minZ) zs.unshift({ at: zs[0].at - EXT_STEP_Z, ext: true });
+        while (zs[zs.length - 1].at < b.maxZ) zs.push(extAt(zs[zs.length - 1].at + EXT_STEP_Z, EXT_STEP_Z));
+        while (zs[0].at > b.minZ) zs.unshift(extAt(zs[0].at - EXT_STEP_Z, EXT_STEP_Z));
       }
     }
     // 每 ~1000m 细分一次：路带条带与中心线跟随曲率下沉
@@ -2136,7 +2139,7 @@ export class MapEditor3d {
     };
     const roadLine = (r, pts) => {
       const sel = this.sel && this.sel.data === r.obj;
-      const worldW = r.ext ? 6.8 : asphaltHalf(r.obj) * 2; // 延伸路=默认 street（lanes 1）
+      const worldW = r.ext ? asphaltHalf(r.spec) * 2 : asphaltHalf(r.obj) * 2;
       const color = sel ? 0xf2c14e : r.ext ? 0x55637a : 0x8ea3bd;
       // 世界宽度路带：真实透视（近宽远窄），平视地球不失真
       g.add(this._roadRibbon(pts, worldW / 2, color, sel ? 0.9 : 0.5));
@@ -2344,7 +2347,9 @@ export class MapEditor3d {
         <div class="me-slider">
           <div class="me-slider-head"><span>网格透明度</span><b id="ep-grid-op-val">${opT}%</b></div>
           <input id="ep-grid-op-range" type="range" min="0" max="100" step="5" value="${opT}" style="--fill: ${opT}%" />
-        </div>`;
+        </div>
+        <h4 class="me-tiprow">程序化城市<span class="me-tip" data-tip="勾选后才会在手工路网之间自动生成街区（建筑、绿植、路灯）；不勾选则只保留手工路网与描边内容。保存后进入游戏生效，两个编辑器编辑的是同一张地图。">?</span></h4>
+        ${genParamsHtml(this.map, "ep")}`;
       el.querySelector("#ep-ext").addEventListener("change", (e) => {
         this.map.extRoads = !!e.target.checked;
         this._dirty = true;
@@ -2359,6 +2364,7 @@ export class MapEditor3d {
         this._applyGridOpacity();
         this._dirty = true;
       });
+      bindGenParams(el, this.map, "ep", () => { this._dirty = true; });
       return;
     }
     const { kind, data } = this.sel;
@@ -2730,7 +2736,7 @@ export class MapEditor3d {
 
   /* ---------------- undo / redo ---------------- */
   _snapshot() {
-    return JSON.stringify({ f: this.map.features, o: this.map.objects, origin: this.map.origin, area: this.map.area, rx: this.map.roadsX, rz: this.map.roadsZ, ex: !!this.map.extRoads });
+    return JSON.stringify({ f: this.map.features, o: this.map.objects, origin: this.map.origin, area: this.map.area, rx: this.map.roadsX, rz: this.map.roadsZ, ex: !!this.map.extRoads, pg: !!this.map.procedural });
   }
   _pushUndo(label) {
     this.undoStack.push(this._snapshot());
@@ -2762,6 +2768,7 @@ export class MapEditor3d {
     if (d.rx) this.map.roadsX = d.rx;
     if (d.rz) this.map.roadsZ = d.rz;
     this.map.extRoads = !!d.ex;
+    if ("pg" in d) this.map.procedural = !!d.pg; // 旧快照无该字段 → 保持当前值
     const extCb = document.getElementById("ep-ext");
     if (extCb) extCb.checked = this.map.extRoads;
     this._select(null);
@@ -2897,6 +2904,7 @@ export class MapEditor3d {
       spawn: this.map.spawn,
       extRoads: !!this.map.extRoads,
       gridOpacity: this.map.gridOpacity ?? GRID_OPACITY_DEFAULT,
+      ...genConfig(this.map), // 程序化城市开关 / 楼间距 / 绿植密度 / 路灯密度
       features: this.map.features,
       objects: this.map.objects,
       origin: this.map.origin,

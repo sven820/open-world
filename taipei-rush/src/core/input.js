@@ -56,6 +56,8 @@ export class Input {
       }
     };
     this._onWheel = (e) => {
+      // 光标在可滚动面板（编辑器属性栏 / 列表等）内时交给浏览器滚动，不拦截
+      if (this._scrollHost(e.target)) return;
       // trackpad two/three-finger swipe → wheel; use for look rotation
       this.wheelDX += e.deltaX;
       this.wheelDY += e.deltaY;
@@ -73,6 +75,19 @@ export class Input {
     window.addEventListener("wheel", this._onWheel, { passive: false });
     window.addEventListener("contextmenu", (e) => e.preventDefault());
     document.addEventListener("pointerlockchange", this._onLock);
+  }
+
+  // 向上找第一个可纵向滚动的祖先（overflow-y: auto/scroll 且内容溢出）
+  _scrollHost(el) {
+    let n = el && el.nodeType === 1 ? el : null;
+    while (n && n !== document.body) {
+      if (n.scrollHeight > n.clientHeight + 1) {
+        const oy = getComputedStyle(n).overflowY;
+        if (oy === "auto" || oy === "scroll") return n;
+      }
+      n = n.parentElement;
+    }
+    return null;
   }
 
   down(code) { return this.downKeys.has(code); }

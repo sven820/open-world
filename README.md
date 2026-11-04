@@ -83,10 +83,10 @@ taipei-rush/
 > 注：城市数据集中在 `src/data/cityData.js`，由 `world/city.js`、`world/textures.js`、`world/landmarks.js`、`ui/hud.js` 通过 `../data/cityData.js` 导入使用。
 
 ### 各模块职责速览
-- **`core/engine.js`** — `WebGLRenderer`（抗锯齿、`powerPreference:high-performance`、`pixelRatio≤1.75`）、`ACESFilmic` 色调映射、`PCFSoftShadowMap` 软阴影、`FogExp2` 雾；`PerspectiveCamera(58°)`；`EffectComposer` + `UnrealBloomPass` + `OutputPass` 实现霓虹/车灯泛光；`onUpdate(fn)` 注册每帧回调，`dt` 限幅 0.05s。
+- **`core/engine.js`** — `WebGLRenderer`（抗锯齿、`powerPreference:high-performance`、`pixelRatio≤1.75`）、`ACESFilmic` 色调映射、`PCFSoftShadowMap` 软阴影、`FogExp2` 雾；`PerspectiveCamera(58°)`；`EffectComposer` + `UnrealBloomPass` + `OutputPass` 实现霓虹/车灯泛光；`onUpdate(fn)` 注册每帧回调，`dt` 限幅 0.05s。渲染分辨率缩放 / 阴影开关与精度 / 泛光 / 帧率上限均可由画面设置热切换（关泛光时改走直接前向渲染）。
 - **`core/environment.js`** — 自定义 GLSL 天空穹顶（`SkyVert/SkyFrag`：日月光晕、太阳圆盘、地平线渐变）；day/dawn/dusk/night 预设与色温插值；sun/moon/hemi/ambient 灯光随时间 `setHour()/update()` 循环，驱动昼夜。
 - **`core/input.js`** — `window` 级 `keydown/keyup` 收集按键；**同时按 `e.code` 与 `e.key` 识别**（兼容非 QWERTY 布局 / 输入法）；指针锁定与鼠标位移转视角。
-- **`world/city.js`** — 城市生成核心：大沥青地面（`PlaneGeometry` + Canvas 沥青纹理）、车道线/斑马线/双黄线（薄平面片 batch）、按区块切分并 `_addBuilding`（四面墙 + 屋顶 + 女儿墙 + 屋顶水箱/空调杂物，按楼层随机高度）、临街店面 + 雨棚 + 招牌（含 z-fighting 修复）、`_finalize()` 把每种材质 `mergeGeometries` 成单 Mesh 以压低 draw call；同时生成碰撞体。
+- **`world/city.js`** — 城市生成核心：大沥青地面（`PlaneGeometry` + Canvas 沥青纹理）、车道线/斑马线/双黄线（薄平面片 batch）、按区块切分并 `_addBuilding`（四面墙 + 屋顶 + 女儿墙 + 屋顶水箱/空调杂物，按楼层随机高度）、临街店面 + 雨棚 + 招牌（含 z-fighting 修复）、`_finalize()` 按 220m 空间格 × 材质 `mergeGeometries`（压 draw call 且保留视锥剔除）；运行期 `updateStream()` 再按玩家"渲染距离"开关分块（超距分块既不绘制也不进阴影 pass），地标/编辑器内容一并登记；同时生成碰撞体。
 - **`data/cityData.js`** — 数据驱动：路网 `ROADS_X/ROADS_Z`（忠孝东路、中华路、环河南路…）、`DISTRICTS`（西门町/台北车站/万华/信义…及副标题）、店名词库与招牌词、地标清单。
 - **`world/landmarks.js`** — 程序化地标：台北 101（竹节分段 + 尖顶）、台北车站、龙山寺、红楼、牌楼/城门、信义高楼群，全用 `Box/Cylinder/Torus` + 玻璃/混凝土/红/金材质。
 - **`world/textures.js`** — 运行时用 2D `<canvas>` 画出所有贴图（沥青、人行道瓷砖、楼面窗格变体、店面、招牌图集中文店名、屋顶），输出 `CanvasTexture`（含 mipmap / 各向异性），**零外部图片**。

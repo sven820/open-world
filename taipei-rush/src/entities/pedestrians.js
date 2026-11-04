@@ -32,35 +32,43 @@ function sampleLoop(loop, s) {
 }
 
 export class PedestrianCrowd {
-  constructor(scene, city, count = 230) {
+  /**
+   * @param {THREE.Scene} scene
+   * @param {import('../world/city.js').City} city
+   * @param {number} capacity 实例化容量（按上限一次性分配，运行期只切换启用数量）
+   */
+  constructor(scene, city, capacity = 240) {
     this.scene = scene;
     this.city = city;
-    this.count = count;
+    this.capacity = capacity;
+    this.count = capacity;          // 当前启用数量（画面设置可调）
+    this.maxDistance = 140;         // 超出该距离的行人不进绘制列表
+    this.drawn = 0;
     this.peds = [];
     this.rig = makePedRig();
     this.meshes = {};
-    this._m = new THREE.Matrix4();
-    this._v = new THREE.Vector3();
-    this._q = new THREE.Quaternion();
-    this._s = new THREE.Vector3();
+    this._col = new THREE.Color();
+    // slot -> ped：矩阵按距离压缩重排，只有"这个槽换了人"时才重写实例颜色
+    this._slotPed = new Array(capacity).fill(null);
 
     const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.88, metalness: 0.0 });
     const flat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, metalness: 0.0 });
 
     for (const name of PED_PARTS) {
       const geo = pedPartGeometry(name);
-      const m = new THREE.InstancedMesh(geo, (name === "hair" || name === "shoeL" || name === "shoeR") ? flat : mat, count);
+      const m = new THREE.InstancedMesh(geo, (name === "hair" || name === "shoeL" || name === "shoeR") ? flat : mat, capacity);
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       m.castShadow = true;
       m.receiveShadow = true;
+      // 实例矩阵每帧重排（按距离压缩），包围球不能反映真实范围，关掉视锥剔除自己管
       m.frustumCulled = false;
+      m.count = 0;
       scene.add(m);
       this.meshes[name] = m;
     }
 
     const loops = city.sidewalkLoops.filter((l) => l.total > 12);
-    const col = new THREE.Color();
-    for (let i = 0; i < count && loops.length; i++) {
+    for (let i = 0; i < capacity && loops.length; i++) {
       const loop = pick(loops);
       const p = {
         loop,
@@ -71,34 +79,35 @@ export class PedestrianCrowd {
         phase: Math.random() * Math.PI * 2,
         pause: 0,
         idle: Math.random() < 0.06,
-        skin: pick(SKIN_TONES),
-        hair: pick(HAIR_COLORS),
-        shirt: pick(CLOTH_COLORS),
-        pants: pick(PANTS_COLORS),
-        shoes: pick([0x1c1c1e, 0x2a2a2c, 0x6b5a45, 0xe8e8e8, 0x3a3a40]),
         bob: Math.random() * 6,
       };
       if (p.idle) p.pause = rand(1, 6);
+      // 各部件配色在构建期算一次，运行期（槽位换人时）直接取用
+      const skin = pick(SKIN_TONES), hair = pick(HAIR_COLORS);
+      const shirt = pick(CLOTH_COLORS), pants = pick(PANTS_COLORS);
+      const shoes = pick([0x1c1c1e, 0x2a2a2c, 0x6b5a45, 0xe8e8e8, 0x3a3a40]);
+      p.colors = {
+        head: skin, hair, torso: shirt, hips: pants,
+        armUL: skin, armUR: skin, armFL: skin, armFR: skin,
+        legUL: pants, legUR: pants, legFL: pants, legFR: pants,
+        shoeL: shoes, shoeR: shoes,
+      };
       this.peds.push(p);
-
-      // instance colours
-      const set = (name, c) => this.meshes[name].setColorAt(i, col.setHex(c));
-      set("head", p.skin);
-      set("hair", p.hair);
-      set("torso", p.shirt);
-      set("hips", p.pants);
-      set("armUL", p.skin); set("armUR", p.skin);
-      set("armFL", p.skin); set("armFR", p.skin);
-      set("legUL", p.pants); set("legUR", p.pants);
-      set("legFL", p.pants); set("legFR", p.pants);
-      set("shoeL", p.shoes); set("shoeR", p.shoes);
-    }
-    for (const name of PED_PARTS) {
-      if (this.meshes[name].instanceColor) this.meshes[name].instanceColor.needsUpdate = true;
     }
 
-    this._base = new THREE.Vector3();
-    this._updateRigMatrices(0);
+    this._updateRigMatrices(0, null);
+  }
+
+  /** 画面设置：启用人数（不重建实例，只改更新/绘制范围） */
+  setActiveCount(n) {
+    // 空地图（没有可用人行道）时 peds 可能为空，上限取三层最小值
+    this.count = Math.max(0, Math.min(this.capacity, this.peds.length, n | 0));
+    for (let i = this.count; i < this.capacity; i++) this._slotPed[i] = null;
+  }
+
+  /** 画面设置：行人显示距离 */
+  setMaxDistance(d) {
+    this.maxDistance = Math.max(20, d || 140);
   }
 
   dispose() {
@@ -110,6 +119,7 @@ export class PedestrianCrowd {
     }
     this.meshes = {};
     this.peds = [];
+    this._slotPed = [];
   }
 
   _pose(p) {
@@ -135,12 +145,32 @@ export class PedestrianCrowd {
     r.head.rotation.x = 0;
   }
 
-  _updateRigMatrices(dt) {
+  _writeSlotColors(slot, p) {
+    for (const name of PED_PARTS) this.meshes[name].setColorAt(slot, this._col.setHex(p.colors[name]));
+  }
+
+  // focus 为空 = 首次全量写（初始化）；否则按距离裁剪并把可见行人压缩到 0..n-1 槽位
+  _updateRigMatrices(dt, focus) {
     const rig = this.rig;
-    const m = this._m;
-    for (let i = 0; i < this.peds.length; i++) {
+    const slotPed = this._slotPed;
+    const far2 = focus ? this.maxDistance * this.maxDistance : Infinity;
+    let slot = 0;
+    let colorDirty = false;
+
+    for (let i = 0; i < this.count; i++) {
       const p = this.peds[i];
+      if (!p) continue;
       const pos = sampleLoop(p.loop, p.s);
+      if (focus) {
+        const dx = pos.x - focus.x, dz = pos.z - focus.z;
+        if (dx * dx + dz * dz > far2) continue;
+      }
+      if (slotPed[slot] !== p) {
+        slotPed[slot] = p;
+        this._writeSlotColors(slot, p);
+        colorDirty = true;
+      }
+
       // when walking backwards, tangent flips
       const hx = pos.dx * p.dir;
       const hz = pos.dz * p.dir;
@@ -153,15 +183,25 @@ export class PedestrianCrowd {
       rig.root.updateMatrixWorld(true);
 
       for (const name of PED_PARTS) {
-        const obj = rig[_partMap[name]];
-        this.meshes[name].setMatrixAt(i, obj.matrixWorld);
+        this.meshes[name].setMatrixAt(slot, rig[_partMap[name]].matrixWorld);
       }
+      slot++;
     }
-    for (const name of PED_PARTS) this.meshes[name].instanceMatrix.needsUpdate = true;
+
+    this.drawn = slot;
+    for (const name of PED_PARTS) {
+      const mesh = this.meshes[name];
+      mesh.count = slot;
+      if (slot > 0) mesh.instanceMatrix.needsUpdate = true;
+      if (colorDirty && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
   }
 
-  update(dt) {
-    for (const p of this.peds) {
+  update(dt, focus) {
+    const n = Math.min(this.count, this.peds.length);
+    for (let i = 0; i < n; i++) {
+      const p = this.peds[i];
+      if (!p) continue;
       if (p.pause > 0) {
         p.pause -= dt;
         continue;
@@ -173,6 +213,6 @@ export class PedestrianCrowd {
       // occasional stop to look at a shop
       if (Math.random() < dt * 0.012) p.pause = rand(1.2, 4.5);
     }
-    this._updateRigMatrices(dt);
+    this._updateRigMatrices(dt, focus);
   }
 }

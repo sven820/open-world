@@ -1,8 +1,9 @@
 // 2D 俯视地图编辑器：编辑路网（增/删/拖动/改属性）、放置地标、拖动出生点。
 // 数据结构与 src/data/cityData.js 同构，保存通过 opts.onSave(data) 回调。
 
-import { asphaltHalf, corridorHalf, EXT_STEP_X, EXT_STEP_Z, mapBounds } from "../data/cityData.js";
+import { asphaltHalf, corridorHalf, EXT_STEP_X, EXT_STEP_Z, extRoadSpec, genConfig, mapBounds } from "../data/cityData.js";
 import { areaPoly, clipAxisLine, worldBounds, polyCenterLine } from "../world/customMap.js";
+import { genParamsHtml, bindGenParams } from "./genParams.js";
 
 const KINDS = ["street", "arterial", "boulevard"];
 const KIND_ZH = { street: "街道", arterial: "干道", boulevard: "大道" };
@@ -77,6 +78,8 @@ export class MapEditor {
       landmarks: this.map.landmarks,
       spawn: this.map.spawn,
       extRoads: !!this.map.extRoads,
+      // 程序化生成参数（楼间距 / 绿植 / 路灯），随地图一起保存
+      ...genConfig(this.map),
     };
     // 3D 描边内容原样带回：2D 里对描边道路的平移/删除/改属性才能保存生效
     if (this.map.features) d.features = this.map.features;
@@ -307,11 +310,11 @@ export class MapEditor {
     const zs = [...this.map.roadsZ].sort((a, b2) => a.at - b2.at);
     if (this.map.extRoads) {
       let n = 0;
-      const ext = (at) => ({ id: "ext" + (n++), at, kind: "street", lanes: 1, median: 0, sidewalk: 3, _ext: true });
-      while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + EXT_STEP_X));
-      while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - EXT_STEP_X));
-      while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + EXT_STEP_Z));
-      while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - EXT_STEP_Z));
+      const ext = (at, step) => ({ id: "ext" + (n++), at, ...extRoadSpec(at, step), _ext: true });
+      while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + EXT_STEP_X, EXT_STEP_X));
+      while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - EXT_STEP_X, EXT_STEP_X));
+      while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + EXT_STEP_Z, EXT_STEP_Z));
+      while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - EXT_STEP_Z, EXT_STEP_Z));
     }
     return { xs, zs, bounds: b };
   }
@@ -401,12 +404,16 @@ export class MapEditor {
         <div class="me-stat">地标 <b>${this.map.landmarks.length}</b></div>
         <div class="me-stat">城区 <b>${this.map.districts.length}</b>（只读）</div>
         <label class="me-check"><input id="mp-ext" type="checkbox" ${this.map.extRoads ? "checked" : ""} /> 程序化延伸街道</label>
-        <p class="me-hint">勾选后按固定间距自动补满世界边缘的默认街道（游戏内与预览同步）；不勾选则只保留手工道路。</p>`;
+        <p class="me-hint">勾选后按固定间距自动补满世界边缘的默认街道（游戏内与预览同步）；不勾选则只保留手工道路。</p>
+        <h4>程序化城市</h4>
+        ${genParamsHtml(this.map, "mp")}
+        <p class="me-hint">勾选后才会自动生成程序化街区；不勾选则只保留手工路网与 3D 描边内容。楼间距越大楼越散；绿植 / 路灯密度 0 表示不生成。保存后进入游戏生效。</p>`;
       el.querySelector("#mp-ext").addEventListener("change", (e) => {
         this.map.extRoads = !!e.target.checked;
         this._dirty = true;
         this._draw();
       });
+      bindGenParams(el, this.map, "mp", () => { this._dirty = true; });
       return;
     }
     const { kind, obj } = this.sel;

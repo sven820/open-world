@@ -3,7 +3,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import {
   asphaltHalf, corridorHalf, LANE_W, districtAt,
   setMapData, activeRoadsX, activeRoadsZ, activeLandmarks,
-  EXT_STEP_X, EXT_STEP_Z,
+  EXT_STEP_X, EXT_STEP_Z, extRoadSpec, genConfig,
 } from "../data/cityData.js";
 import {
   Batch, ChunkedBatch, applyColor, scaleUV, boxAt, wallQuad, roofQuad, planeAt, signQuad, cylAt, icoAt,
@@ -14,9 +14,14 @@ import {
 } from "./textures.js";
 import { scooterParts, scooterParts as _sp } from "../entities/models.js";
 import { buildCustomMap, worldBounds, pointInPoly } from "./customMap.js";
+import { getRenderSettings, onRenderSettingsChange } from "../config/renderSettings.js";
 
 const FLOOR_H = 3.15;
 const GROUND_H = 4.0;
+// 街廓内部巷道（巷弄）净宽与切巷后允许的最小地块宽度。
+// 巷道直通两侧人行道，是密集街廓里真正可以走进去的次级道路。
+const ALLEY_W = 7;
+const ALLEY_CELL = 16;
 
 function rand(a, b) { return a + Math.random() * (b - a); }
 function choice(arr) { return arr[(Math.random() * arr.length) | 0]; }
@@ -155,6 +160,8 @@ export class City {
       ? worldBounds(data)
       : { minX: -1072, maxX: 1462, minZ: -602, maxZ: 582 };
     this.data = data || null;   // 供 HUD 读取描边/范围数据
+    // 程序化生成参数（地图编辑器可调）：楼间距 / 绿植 / 路灯 倍率
+    this.gen = genConfig(data);
     this.custom = null;         // buildCustomMap 结果（描边内容渲染数据）
     // 3D 描边道路走廊预计算：程序化建筑避让 + 玩家脚底高度（路面 0.18 / 人行道 0.24）
     this.traceCorridors = [];
@@ -179,6 +186,22 @@ export class City {
       });
     }
     this.spawnPoint = null;     // 出生点：编辑器设置的 spawn 优先，未设置时用描边内容包围盒中心
+
+    // ---- 分块渲染调度（按需渲染）----
+    // 几何在建城时一次性烘焙到世界坐标并合并成"每 220m 一格 × 每材质一个 Mesh"，
+    // 这里给每个 Mesh 记下世界包围球，运行期按玩家距离开关 visible：
+    // 看不见的格子直接不进渲染列表，也不进阴影 pass（draw call / 顶点全跳过）。
+    this.chunks = [];
+    this.visibleChunks = 0;
+    this._streamCenter = null;
+    this._streamDistance = -1;
+    this._nightApplied = -1;
+    this._lampOn = null;
+    this._lightKey = "";
+    this._unsubSettings = onRenderSettingsChange(() => {
+      // 视距变化要立即重算，不能等玩家走动
+      this._streamCenter = null;
+    });
 
     this.materials = {};
     this.facades = makeFacades();
@@ -205,8 +228,13 @@ export class City {
     this._buildGround();
     this._buildRoads();
     await yieldFrame();
-    await this._buildBlocksChunked();
-    this._buildParkedScooters();
+    // 程序化城市按地图开关生成（默认台北始终生成；用户地图需在编辑器勾选）。
+    // 未勾选时只保留手工路网、描边道路与 3D 编辑器放置的内容。
+    if (this.gen.procedural) {
+      await this._buildBlocksChunked();
+      this._buildParkedScooters();
+      this.buildProgress = 1;
+    }
     await yieldFrame();
     this._buildTrafficHeads();
     // 3D 编辑器描边内容（道路/河流/建筑/树/路灯）渲染 + 碰撞注册
@@ -260,12 +288,14 @@ export class City {
     // 用户地图：延伸街默认不生成，地图数据 extRoads 勾选后才生成；默认台北不受限。
     const GX = EXT_STEP_X, GZ = EXT_STEP_Z, b = this.bounds;
     let n = 0;
-    const ext = (at) => ({ id: "ext" + (n++), at, kind: "street", lanes: 1, median: 0, sidewalk: 3 });
+    // 延伸路网分级：每 3 条升级为林荫大道，其余为街巷（规格见 extRoadSpec）。
+    // 外围因此有主干路 / 次干路的层级，而不是一整片等宽窄巷 —— 从高处也能读出城市骨架。
+    const ext = (at, step) => ({ id: "ext" + (n++), at, ...extRoadSpec(at, step) });
     if ((!this.data || !!this.data.extRoads) && xs.length && zs.length) {
-      while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + GX));
-      while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - GX));
-      while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + GZ));
-      while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - GZ));
+      while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + GX, GX));
+      while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - GX, GX));
+      while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + GZ, GZ));
+      while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - GZ, GZ));
     }
 
     this.roadsX = xs; this.roadsZ = zs;
@@ -501,7 +531,7 @@ export class City {
         const district = districtAt((px0 + px1) / 2, (pz0 + pz1) / 2);
 
         if (bx1 - bx0 > 7 && bz1 - bz0 > 7) {
-          this._fillBlock(bx0, bx1, bz0, bz1, district, landRects);
+          this._fillBlockArea(bx0, bx1, bz0, bz1, district, landRects);
         }
 
         // pedestrian loop on the sidewalk band
@@ -509,7 +539,7 @@ export class City {
         const lx0 = px0 + inset, lx1 = px1 - inset, lz0 = pz0 + inset, lz1 = pz1 - inset;
         if (lx1 - lx0 > 3 && lz1 - lz0 > 3) {
           this.sidewalkLoops.push(this._rectLoop(lx0, lx1, lz0, lz1));
-          this._streetProps(px0, px1, pz0, pz1, rx0, rx1, rz0, rz1);
+          this._streetProps(px0, px1, pz0, pz1, rx0, rx1, rz0, rz1, bx0, bx1, bz0, bz1);
         }
         this.blocks.push({ x0: px0, x1: px1, z0: pz0, z1: pz1 });
         cnt++;
@@ -550,7 +580,9 @@ export class City {
     return { pts, segs, total };
   }
 
-  _streetProps(px0, px1, pz0, pz1, rx0, rx1, rz0, rz1) {
+  _streetProps(px0, px1, pz0, pz1, rx0, rx1, rz0, rz1, bx0, bx1, bz0, bz1) {
+    // 路灯 / 绿植密度倍率（地图编辑器可调）
+    const ld = this.gen.lampDensity, gd = this.gen.greenDensity;
     // lamps & trees along the four platform edges
     const sides = [
       { axis: "x", at: pz0 + 0.9, a: px0 + 4, b: px1 - 4, rot: 0 },
@@ -561,21 +593,41 @@ export class City {
     for (const s of sides) {
       const len = s.b - s.a;
       if (len < 8) continue;
-      // lamps every ~30m
-      const nl = Math.max(1, Math.floor(len / 30));
-      for (let k = 0; k < nl; k++) {
-        const t = s.a + (len * (k + 0.5)) / nl;
-        if (s.axis === "x") this._addLamp(t, s.at, s.rot);
-        else this._addLamp(s.at, t, s.rot);
+      // 路灯：默认每 30m 一盏，路灯密度倍率越高间距越短
+      if (ld > 0) {
+        const nl = Math.max(1, Math.floor((len * ld) / 30));
+        for (let k = 0; k < nl; k++) {
+          const t = s.a + (len * (k + 0.5)) / nl;
+          if (s.axis === "x") this._addLamp(t, s.at, s.rot);
+          else this._addLamp(s.at, t, s.rot);
+        }
       }
-      // trees every ~22m, offset inward
-      if (Math.random() < 0.75) {
-        const nt = Math.max(1, Math.floor(len / 24));
+      // 行道树：默认每 24m 一棵，数量与出现概率都随绿植密度缩放
+      if (gd > 0 && Math.random() < Math.min(1, 0.75 * gd)) {
+        const nt = Math.max(1, Math.floor((len * gd) / 24));
         for (let k = 0; k < nt; k++) {
           const t = s.a + (len * (k + 0.5)) / nt;
           if (s.axis === "x") this._addTree(t, s.at + (s.rot === 0 ? 1.4 : -1.4), 1);
           else this._addTree(s.at + (s.rot > 0 ? 1.4 : -1.4), t, 1);
         }
+      }
+    }
+
+    // 店门口的绿植：沿建筑立面随机摆花坛（间隔、放不放都随机）
+    if (gd <= 0) return;
+    const fronts = [
+      { horiz: true, at: bz0 - 0.75, a: bx0 + 2.5, b: bx1 - 2.5 },
+      { horiz: true, at: bz1 + 0.75, a: bx0 + 2.5, b: bx1 - 2.5 },
+      { horiz: false, at: bx0 - 0.75, a: bz0 + 2.5, b: bz1 - 2.5 },
+      { horiz: false, at: bx1 + 0.75, a: bz0 + 2.5, b: bz1 - 2.5 },
+    ];
+    for (const f of fronts) {
+      if (f.b - f.a < 8) continue;
+      const step = rand(8, 15) / Math.max(0.25, gd);
+      for (let t = f.a + 2; t < f.b - 2; t += step) {
+        if (Math.random() > Math.min(1, 0.34 * gd)) continue;
+        if (f.horiz) this._addPlanter(t, f.at);
+        else this._addPlanter(f.at, t);
       }
     }
   }
@@ -609,58 +661,309 @@ export class City {
     this.treeBatch.add(c2);
   }
 
-  _fillBlock(bx0, bx1, bz0, bz1, district, landRects) {
-    const W = bx1 - bx0, D = bz1 - bz0;
-    const dN = Math.min(rand(13, 18), D * 0.32);
-    const dS = Math.min(rand(13, 18), D * 0.32);
-    const dW = Math.min(rand(12, 17), W * 0.3);
-    const dE = Math.min(rand(12, 17), W * 0.3);
+  // 花坛：矮水泥边 + 两丛灌木（低面数，适合大量点缀）
+  _addPlanter(x, z) {
+    const s = rand(0.8, 1.2);
+    this.propBatch.add(applyColor(boxAt(s, 0.42, s, x, 0.37, z), 0x9a968b));
+    const g = new THREE.Color().setHSL(0.27 + Math.random() * 0.06, 0.45, 0.3 + Math.random() * 0.06);
+    this.propBatch.add(applyColor(icoAt(s * 0.4, x, 0.7, z, 0, 1, 0.9, 1), g));
+    this.propBatch.add(applyColor(icoAt(s * 0.3, x + rand(-0.2, 0.2), 0.86, z + rand(-0.2, 0.2), 0, 1, 0.9, 1), g.clone().offsetHSL(0.01, 0, 0.05)));
+  }
 
-    // north frontage
-    this._lotsAlongX(bx0, bx1, bz0, dN, "n", district, landRects);
-    // south frontage
-    this._lotsAlongX(bx0, bx1, bz1 - dS, dS, "s", district, landRects);
-    // west / east frontages
-    this._lotsAlongZ(bz0 + dN, bz1 - dS, bx0, dW, "w", district, landRects);
-    this._lotsAlongZ(bz0 + dN, bz1 - dS, bx1 - dE, dE, "e", district, landRects);
+  // 绿篱：贴着楼山墙或围墙的一段灌木
+  _addHedge(x, z) {
+    const len = rand(1.8, 3.2);
+    const ry = Math.random() < 0.5 ? 0 : Math.PI / 2;
+    this.propBatch.add(applyColor(boxAt(len, 0.55, 0.55, x, 0.435, z, ry), 0x3f7233));
+  }
 
-    // interior
-    const cx0 = bx0 + dW, cx1 = bx1 - dE;
-    const cz0 = bz0 + dN, cz1 = bz1 - dS;
-    if (cx1 - cx0 > 6 && cz1 - cz0 > 6) {
-      let x = cx0;
-      while (x < cx1 - 4) {
-        const w = Math.min(rand(8, 14), cx1 - x);
-        let z = cz0;
-        while (z < cz1 - 4) {
-          const d = Math.min(rand(9, 15), cz1 - z);
-          if (w > 4 && d > 4) this._addBuilding(x + 0.15, x + w - 0.15, z + 0.15, z + d - 0.15, null, district, landRects);
-          z += d;
-        }
-        x += w;
+  // 灌木丛：两个低面数球体，成本低但能打散水泥地
+  _addBush(x, z) {
+    const g = new THREE.Color().setHSL(0.28 + Math.random() * 0.06, 0.45, 0.28 + Math.random() * 0.07);
+    this.propBatch.add(applyColor(icoAt(0.55, x, 0.55, z, 0, 1, 0.85, 1), g));
+    this.propBatch.add(applyColor(icoAt(0.4, x + rand(-0.35, 0.35), 0.75, z + rand(-0.3, 0.3), 0, 1, 0.8, 1), g.clone().offsetHSL(0.01, 0, 0.04)));
+  }
+
+  // 庭院灯：比路灯矮，夜间和路灯一起点亮（同一盏灯罩材质）
+  _addYardLamp(x, z) {
+    this.propBatch.add(applyColor(cylAt(0.05, 0.075, 3.0, x, 1.66, z, 6), 0x3f4246));
+    const head = new THREE.SphereGeometry(0.2, 8, 6);
+    head.translate(x, 3.2, z);
+    applyColor(head, 0xfff0c8);
+    this.lampGlassBatch.add(head);
+  }
+
+  // 街廓内空地（楼间缝、巷口、中庭边缘）随机点缀绿植与庭院灯。
+  // 只在没有建筑的位置生成，密度很低，避免挤占通行空间。
+  _decorateOpenSpace(x0, x1, z0, z1) {
+    const gd = this.gen.greenDensity, ld = this.gen.lampDensity;
+    if (gd <= 0 && ld <= 0) return;
+    // 采样密度按较大的那个倍率走；类别按 绿植 / 路灯 各自权重抽取
+    const gate = Math.min(0.9, 0.22 * Math.max(gd, ld));
+    const total = 0.95 * gd + 0.05 * ld;
+    const step = 10;
+    for (let gx = x0 + 3; gx < x1 - 3; gx += step) {
+      for (let gz = z0 + 3; gz < z1 - 3; gz += step) {
+        if (Math.random() > gate) continue;
+        const px = gx + rand(-3.2, 3.2), pz = gz + rand(-3.2, 3.2);
+        if (px < x0 + 1.2 || px > x1 - 1.2 || pz < z0 + 1.2 || pz > z1 - 1.2) continue;
+        // 留出 0.85m 余量：太小的地方是两栋楼贴太近，不放东西
+        if (this.colliders.blocked(px, pz, 0.85)) continue;
+        const r = Math.random() * total;
+        if (r < 0.42 * gd) this._addHedge(px, pz);
+        else if (r < 0.72 * gd) this._addPlanter(px, pz);
+        else if (r < 0.86 * gd) this._addBush(px, pz);
+        else if (r < 0.95 * gd) {
+          // 树冠宽，需要更大的净空
+          if (!this.colliders.blocked(px, pz, 1.7)) this._addTree(px, pz, rand(0.55, 0.8));
+          else this._addPlanter(px, pz);
+        } else this._addYardLamp(px, pz);
       }
     }
   }
 
-  _lotsAlongX(x0, x1, z0, depth, facing, district, landRects) {
+  /* ---- 街廓布局：先切巷 / 判用途，再逐块铺建筑 ---- */
+
+  // 一个街廓的生成方案：park = 公园（不建房）；city = 内部巷道 + 若干可建地块
+  _blockPlan(x0, x1, z0, z1, district, landRects) {
+    const W = x1 - x0, D = z1 - z0;
+    // 地标 / 手绘描边内容所在的街廓保持原样：不开巷、不设公园，
+    // 免得巷道或草坪压在地标广场和用户画的道路上
+    if (landRects.some((r) => x0 < r.x1 && x1 > r.x0 && z0 < r.z1 && z1 > r.z0)) {
+      return { program: "city", cells: [{ x0, x1, z0, z1 }], alleys: [] };
+    }
+    for (const c of this.traceCorridors) {
+      if (this._rectHitsCorridor(x0, x1, z0, z1, c)) {
+        return { program: "city", cells: [{ x0, x1, z0, z1 }], alleys: [] };
+      }
+    }
+    // 各区分公园概率：住宅/河滨区多，西门町与车站这类高密度商圈不放
+    // （保持出生点与既有地标街区的原貌）
+    const parkChance = this.traceCorridors.length
+      ? 0
+      : ({ daan: 0.18, river: 0.2, south: 0.12, xinyi: 0.08, central: 0.07, east: 0.05, wanhua: 0.05, zhongshan: 0.04, station: 0.02, ximending: 0 }[district.id] ?? 0.055);
+    if (parkChance > 0 && W > 30 && D > 30 && Math.random() < parkChance) {
+      return { program: "park", cells: [], alleys: [] };
+    }
+    const cutsX = this._alleyCuts(x0, x1, 66);
+    const cutsZ = this._alleyCuts(z0, z1, 62);
+    const xs = this._splitSpan(x0, x1, cutsX);
+    const zs = this._splitSpan(z0, z1, cutsZ);
+    const cells = [];
+    for (const [ax0, ax1] of xs) for (const [bz0, bz1] of zs) cells.push({ x0: ax0, x1: ax1, z0: bz0, z1: bz1 });
+    const alleys = [];
+    // 南北向巷直通街廓两端；东西向巷只铺在两条纵巷之间，避免交叠面 z-fighting
+    for (const c of cutsX) alleys.push({ x0: c - ALLEY_W / 2, x1: c + ALLEY_W / 2, z0, z1 });
+    for (const c of cutsZ) {
+      for (const [ax0, ax1] of xs) alleys.push({ x0: ax0, x1: ax1, z0: c - ALLEY_W / 2, z1: c + ALLEY_W / 2 });
+    }
+    return { program: "city", cells, alleys };
+  }
+
+  // 沿一条边均匀切巷：返回巷道中心线；切完地块过窄就不开巷
+  _alleyCuts(a0, a1, target) {
+    const len = a1 - a0;
+    const n = Math.floor(len / target);
+    if (n < 1) return [];
+    const step = len / (n + 1);
+    if (step - ALLEY_W < ALLEY_CELL) return [];
+    const cuts = [];
+    for (let i = 1; i <= n; i++) cuts.push(a0 + step * i + rand(-0.08, 0.08) * step);
+    return cuts;
+  }
+
+  // 按巷道中心线把一维区间切成若干地块区间
+  _splitSpan(a0, a1, cuts) {
+    const out = [];
+    let prev = a0;
+    for (const c of cuts) {
+      out.push([prev, c - ALLEY_W / 2]);
+      prev = c + ALLEY_W / 2;
+    }
+    out.push([prev, a1]);
+    return out;
+  }
+
+  _fillBlockArea(bx0, bx1, bz0, bz1, district, landRects) {
+    const plan = this._blockPlan(bx0, bx1, bz0, bz1, district, landRects);
+    if (plan.program === "park") {
+      this._parkBlock(bx0, bx1, bz0, bz1);
+      return;
+    }
+    for (const a of plan.alleys) this._alleyFloor(a);
+    for (const c of plan.cells) {
+      // 同一地块共享高度系数：外围出现成片高矮错落的建筑群，
+      // 而不是整片屋顶高度都差不多的"地毯"
+      this._fillBlock(c.x0, c.x1, c.z0, c.z1, district, landRects, rand(0.78, 1.42));
+    }
+    // 手绘地图不自动点缀：会把绿植放到用户画的道路上
+    if (!this.traceCorridors.length) this._decorateOpenSpace(bx0, bx1, bz0, bz1);
+  }
+
+  // 巷道地面：比人行道略深的沥青色，从空中也能读出一条可走的巷子
+  _alleyFloor(a) {
+    const g = boxAt(a.x1 - a.x0, 0.02, a.z1 - a.z0, (a.x0 + a.x1) / 2, 0.171, (a.z0 + a.z1) / 2);
+    applyColor(g, 0x64686d);
+    this.propBatch.add(g);
+  }
+
+  _fillBlock(bx0, bx1, bz0, bz1, district, landRects, bias = 1) {
+    const W = bx1 - bx0, D = bz1 - bz0;
+    const dN = Math.min(rand(13, 18), D * 0.34);
+    const dS = Math.min(rand(13, 18), D * 0.34);
+    const dW = Math.min(rand(12, 17), W * 0.32);
+    const dE = Math.min(rand(12, 17), W * 0.32);
+
+    // north frontage
+    this._lotsAlongX(bx0, bx1, bz0, dN, "n", district, landRects, bias);
+    // south frontage
+    this._lotsAlongX(bx0, bx1, bz1 - dS, dS, "s", district, landRects, bias);
+    // west / east frontages
+    this._lotsAlongZ(bz0 + dN, bz1 - dS, bx0, dW, "w", district, landRects, bias);
+    this._lotsAlongZ(bz0 + dN, bz1 - dS, bx1 - dE, dE, "e", district, landRects, bias);
+
+    // interior：中间留一块中庭（采光 / 绿地 / 机车位），四周再围一圈背街建筑，
+    // 不把街廓内部整块铺满屋顶
+    const cx0 = bx0 + dW, cx1 = bx1 - dE;
+    const cz0 = bz0 + dN, cz1 = bz1 - dS;
+    const iw = cx1 - cx0, id = cz1 - cz0;
+    if (iw < 5 || id < 5) return;
+
+    const yardW = Math.min(iw - 5, rand(11, 24));
+    const yardD = Math.min(id - 5, rand(9, 20));
+    if (yardW > 9 && yardD > 8 && Math.random() < 0.7) {
+      const yx0 = (cx0 + cx1) / 2 - yardW / 2, yx1 = yx0 + yardW;
+      const yz0 = (cz0 + cz1) / 2 - yardD / 2, yz1 = yz0 + yardD;
+      this._fillInterior(cx0, yx0, cz0, cz1, district, landRects, bias);
+      this._fillInterior(yx1, cx1, cz0, cz1, district, landRects, bias);
+      this._fillInterior(yx0, yx1, cz0, yz0, district, landRects, bias);
+      this._fillInterior(yx0, yx1, yz1, cz1, district, landRects, bias);
+      this._courtyard(yx0, yx1, yz0, yz1);
+    } else {
+      this._fillInterior(cx0, cx1, cz0, cz1, district, landRects, bias);
+    }
+  }
+
+  _fillInterior(x0, x1, z0, z1, district, landRects, bias) {
+    if (x1 - x0 < 5 || z1 - z0 < 5) return;
     let x = x0;
-    while (x < x1 - 5) {
-      const w = Math.min(rand(8, 15), x1 - x);
-      if (w > 5) {
-        const zA = facing === "n" ? z0 : z0;
-        this._addBuilding(x + 0.12, x + w - 0.12, zA, zA + depth, facing, district, landRects);
+    while (x < x1 - 4) {
+      const w = Math.min(rand(8, 14), x1 - x);
+      let z = z0;
+      while (z < z1 - 4) {
+        const d = Math.min(rand(9, 15), z1 - z);
+        if (w > 4 && d > 4) {
+          // 背街建筑之间同样留缝，从空中看是一栋栋独立的楼
+          const gx = Math.min(rand(0.9, 1.6), Math.max(0.1, (w - 6) * 0.45));
+          const gz = Math.min(rand(0.9, 1.6), Math.max(0.1, (d - 6) * 0.45));
+          this._addBuilding(x + gx, x + w - gx, z + gz, z + d - gz, null, district, landRects, bias);
+        }
+        z += d;
       }
       x += w;
     }
   }
 
-  _lotsAlongZ(z0, z1, x0, depth, facing, district, landRects) {
+  // 中庭：草地或水泥地 + 少量树木 / 杂物，玩家可以从巷道走进去
+  _courtyard(x0, x1, z0, z1) {
+    const w = x1 - x0, d = z1 - z0;
+    if (w < 4 || d < 4) return;
+    const g = boxAt(w, 0.04, d, (x0 + x1) / 2, 0.18, (z0 + z1) / 2);
+    applyColor(g, Math.random() < 0.55 ? 0x40532f : 0x6d6a60);
+    this.propBatch.add(g);
+    const n = Math.round(Math.min(8, (w * d) / 70) * this.gen.greenDensity);
+    for (let i = 0; i < n; i++) {
+      const tx = rand(x0 + 1.2, x1 - 1.2), tz = rand(z0 + 1.2, z1 - 1.2);
+      if (Math.random() < 0.65) this._addTree(tx, tz, rand(0.6, 0.9));
+      else this.propBatch.add(applyColor(boxAt(1.2, 0.7, 0.8, tx, 0.51, tz), 0x8a8c86));
+    }
+  }
+
+  // 公园 / 广场街廓：草坪 + 十字步道 + 中央广场 + 树 + 长椅，给密集街区留出呼吸空间
+  _parkBlock(x0, x1, z0, z1) {
+    const w = x1 - x0, d = z1 - z0;
+    const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+    this.propBatch.add(applyColor(boxAt(w, 0.03, d, cx, 0.175, cz), 0x3d5a33));
+    const pw = Math.min(3.2, Math.min(w, d) * 0.2);
+    this.propBatch.add(applyColor(boxAt(pw, 0.02, d - 2, cx, 0.191, cz), 0xb6ad9c));
+    this.propBatch.add(applyColor(boxAt(w - 2, 0.02, pw, cx, 0.192, cz), 0xb6ad9c));
+
+    // 中央小广场 + 水池：避免整块草地空得像个操场
+    const ps = Math.min(11, Math.min(w, d) * 0.34);
+    this.propBatch.add(applyColor(boxAt(ps, 0.03, ps, cx, 0.196, cz), 0xc9c2b2));
+    this.propBatch.add(applyColor(cylAt(1.2, 1.45, 0.55, cx, 0.48, cz, 12), 0x9aa0a4));
+
+    const n = Math.round(Math.min(28, (w * d) / 80) * this.gen.greenDensity);
+    for (let i = 0; i < n; i++) {
+      const tx = rand(x0 + 2, x1 - 2), tz = rand(z0 + 2, z1 - 2);
+      if (Math.abs(tx - cx) < Math.max(pw, ps / 2) + 1.6) continue;
+      if (Math.abs(tz - cz) < Math.max(pw, ps / 2) + 1.6) continue;
+      this._addTree(tx, tz, rand(0.85, 1.25));
+    }
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const bx = cx + Math.cos(a) * (ps / 2 + 1.3);
+      const bz = cz + Math.sin(a) * (ps / 2 + 1.3);
+      this.propBatch.add(applyColor(boxAt(1.6, 0.42, 0.5, bx, 0.35, bz, a + Math.PI / 2), 0x8a6a45));
+    }
+    // 步道灯：沿十字步道间隔布置，夜间和路灯一起点亮（间距随路灯密度缩放）
+    const ld = this.gen.lampDensity;
+    if (ld > 0) {
+      const step = 18 / ld;
+      for (let z = z0 + 8; z < z1 - 8; z += step) {
+        this._addYardLamp(cx + pw / 2 + 0.8, z);
+        if (w > 60) this._addYardLamp(cx - pw / 2 - 0.8, z + step * 0.5);
+      }
+      for (let x = x0 + 8; x < x1 - 8; x += step) this._addYardLamp(x, cz - pw / 2 - 0.8);
+    }
+  }
+
+  // 相邻建筑之间的半间距：多数为 1~2m（相邻两户合计 2~4m 的缝），
+  // 少数留 2.5~4m（合计 5~8m 的侧院/防火巷），不再共用一面山墙
+  _sideGap(w) {
+    const cap = Math.max(0.1, (w - 4) * 0.42);
+    return Math.min((Math.random() < 0.16 ? rand(2.5, 4.0) : rand(1.0, 2.0)) * this.gen.gapScale, cap);
+  }
+
+  _lotsAlongX(x0, x1, z0, depth, facing, district, landRects, bias = 1) {
+    let x = x0;
+    while (x < x1 - 5) {
+      const w = Math.min(rand(8, 15), x1 - x);
+      if (w > 5) {
+        // 左右退缝：相邻建筑之间始终留出空地（不再是整排贴死）
+        const g0 = this._sideGap(w), g1 = this._sideGap(w);
+        // 前退线：一半的建筑后退 0.6~3.2m，街道立面有凹凸、不齐平
+        const setback = Math.random() < 0.5 ? rand(0.6, Math.min(3.2, depth * 0.24)) : 0;
+        // 临街面固定在该退线上，进深往背街方向微调
+        const d = Math.max(3.2, depth * rand(0.86, 1.04) - setback);
+        const zB = facing === "n" ? z0 + setback : z0 + depth - setback - d;
+        this._addBuilding(x + g0, x + w - g1, zB, zB + d, facing, district, landRects, bias);
+        // 楼间缝里随机放绿植（缝够宽时放棵小树），沿街因此有一条条绿带
+        if (g1 > 0.9 && Math.random() < 0.45 * this.gen.greenDensity) {
+          const gx = x + w, gz = zB + d * 0.5;
+          if (g1 > 1.25 && Math.random() < 0.45) this._addTree(gx, gz, rand(0.45, 0.6));
+          else this._addPlanter(gx, gz);
+        }
+      }
+      x += w;
+    }
+  }
+
+  _lotsAlongZ(z0, z1, x0, depth, facing, district, landRects, bias = 1) {
     let z = z0;
     while (z < z1 - 5) {
       const d = Math.min(rand(8, 15), z1 - z);
       if (d > 5) {
-        const xA = facing === "w" ? x0 : x0;
-        this._addBuilding(xA, xA + depth, z + 0.12, z + d - 0.12, facing, district, landRects);
+        const g0 = this._sideGap(d), g1 = this._sideGap(d);
+        const setback = Math.random() < 0.5 ? rand(0.6, Math.min(3.2, depth * 0.24)) : 0;
+        const dep = Math.max(3.2, depth * rand(0.86, 1.04) - setback);
+        const xB = facing === "w" ? x0 + setback : x0 + depth - setback - dep;
+        this._addBuilding(xB, xB + dep, z + g0, z + d - g1, facing, district, landRects, bias);
+        if (g1 > 0.9 && Math.random() < 0.45 * this.gen.greenDensity) {
+          const gz = z + d, gx = xB + dep * 0.5;
+          if (g1 > 1.25 && Math.random() < 0.45) this._addTree(gx, gz, rand(0.45, 0.6));
+          else this._addPlanter(gx, gz);
+        }
       }
       z += d;
     }
@@ -699,7 +1002,7 @@ export class City {
     return choice(pool);
   }
 
-  _addBuilding(x0, x1, z0, z1, facing, district, landRects) {
+  _addBuilding(x0, x1, z0, z1, facing, district, landRects, bias = 1) {
     if (x1 - x0 < 3 || z1 - z0 < 3) return;
     const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
     // exclusion zones (landmarks)
@@ -717,7 +1020,8 @@ export class City {
     if (nearXinyi) floors = Math.random() < 0.22 ? Math.round(rand(16, 30)) : Math.round(rand(6, 14));
     else if (district.id === "ximending") floors = Math.round(rand(4, 9));
     else floors = Math.round(rand(style.floors[0], style.floors[1]));
-    floors = Math.max(2, floors);
+    // 地块高度系数：同一片街区成团地高 / 低，天际线因此有起伏
+    floors = Math.max(2, Math.min(40, Math.round(floors * bias)));
 
     const h = GROUND_H + (floors - 1) * FLOOR_H + rand(-0.2, 0.6);
     const variant = this._pickFacade(district, floors, null);
@@ -890,7 +1194,8 @@ export class City {
     };
     for (const k of Object.keys(caps)) {
       meshes[k] = new THREE.InstancedMesh(geos[k], mats[k], caps[k]);
-      meshes[k].instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      // 停放机车是静态的：固定上传一次，避免驱动把它当成每帧会变的动态缓冲
+      meshes[k].instanceMatrix.setUsage(THREE.StaticDrawUsage);
       meshes[k].castShadow = k === "body";
       meshes[k].receiveShadow = true;
       meshes[k].count = spots.length;
@@ -956,6 +1261,69 @@ export class City {
     this.trafficInst = inst;
   }
 
+  /* ---------------- chunk streaming ---------------- */
+  // 把网格登记为可按距离调度的分块（几何已烘焙到世界坐标，包围球中心即世界位置）
+  _addChunk(mesh) {
+    const bs = mesh.geometry && mesh.geometry.boundingSphere;
+    if (bs) this.chunks.push({ mesh, x: bs.center.x, z: bs.center.z, r: bs.radius, on: mesh.visible !== false });
+    this.group.add(mesh);
+    return mesh;
+  }
+
+  /** 外部对象（地标组、编辑器内容组）也纳入按需渲染调度 */
+  registerStreamed(obj) {
+    if (!obj) return obj;
+    obj.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(obj);
+    if (!Number.isFinite(box.min.x)) return obj;
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    this.chunks.push({
+      mesh: obj,
+      x: sphere.center.x,
+      z: sphere.center.z,
+      r: sphere.radius,
+      on: obj.visible !== false,
+    });
+    return obj;
+  }
+
+  // 按需渲染：只保留玩家 renderDistance 内的分块。
+  // 每次移动超过 ~6m 才重算（上千个分块，逐帧算没必要）。
+  updateStream(focus) {
+    if (!focus || !this.chunks.length) return;
+    const distance = getRenderSettings().renderDistance;
+    const cx = focus.x, cz = focus.z;
+    const moved = !this._streamCenter ||
+      Math.abs(cx - this._streamCenter.x) > 6 || Math.abs(cz - this._streamCenter.z) > 6 ||
+      distance !== this._streamDistance;
+    if (!moved) return;
+
+    this._streamCenter = { x: cx, z: cz };
+    this._streamDistance = distance;
+    const showOut = distance * 1.12;   // 迟滞：离开用更远阈值，避免边界反复闪烁
+    let visible = 0;
+    for (const c of this.chunks) {
+      const dx = c.x - cx, dz = c.z - cz;
+      // 用"到包围球表面"的距离：大块（地标/整段道路）不会因为中心远而被误裁
+      const d = Math.sqrt(dx * dx + dz * dz) - c.r * 0.6;
+      const on = c.on ? d <= showOut : d <= distance;
+      if (on !== c.on) {
+        c.on = on;
+        c.mesh.visible = on;
+      }
+      if (on) visible++;
+    }
+    this.visibleChunks = visible;
+  }
+
+  dispose() {
+    if (this._unsubSettings) {
+      this._unsubSettings();
+      this._unsubSettings = null;
+    }
+    this.chunks = [];
+  }
+
   /* ---------------- finalize ---------------- */
   _finalize() {
     const facadeMats = this.facades.map((f) => new THREE.MeshStandardMaterial({
@@ -968,7 +1336,7 @@ export class City {
     }));
     this.facadeMaterials = facadeMats;
     this.facadeBatches.forEach((b, i) => {
-      for (const mesh of b.build(facadeMats[i], { castShadow: true, receiveShadow: true })) this.group.add(mesh);
+      for (const mesh of b.build(facadeMats[i], { castShadow: true, receiveShadow: true })) this._addChunk(mesh);
     });
 
     const sfMats = this.storefronts.map((s) => new THREE.MeshStandardMaterial({
@@ -981,13 +1349,13 @@ export class City {
     }));
     this.storefrontMaterials = sfMats;
     this.storefrontBatches.forEach((b, i) => {
-      for (const mesh of b.build(sfMats[i], { castShadow: false, receiveShadow: true })) this.group.add(mesh);
+      for (const mesh of b.build(sfMats[i], { castShadow: false, receiveShadow: true })) this._addChunk(mesh);
     });
 
     const roofMat = new THREE.MeshStandardMaterial({ map: makeRoofTexture(), color: 0x9a968e, roughness: 0.92 });
     roofMat.map.repeat.set(1, 1);
     this.materials.roof = roofMat;
-    for (const roof of this.roofBatch.build(roofMat, { receiveShadow: true })) this.group.add(roof);
+    for (const roof of this.roofBatch.build(roofMat, { receiveShadow: true })) this._addChunk(roof);
 
     const signMat = new THREE.MeshStandardMaterial({
       map: this.signAtlas,
@@ -1005,28 +1373,28 @@ export class City {
       polygonOffsetUnits: -2,
     });
     this.signMaterial = signMat;
-    for (const signs of this.signBatch.build(signMat, { castShadow: false, receiveShadow: false })) this.group.add(signs);
+    for (const signs of this.signBatch.build(signMat, { castShadow: false, receiveShadow: false })) this._addChunk(signs);
 
     const awnMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.0 });
-    for (const awn of this.awningBatch.build(awnMat, { castShadow: true, receiveShadow: true })) this.group.add(awn);
+    for (const awn of this.awningBatch.build(awnMat, { castShadow: true, receiveShadow: true })) this._addChunk(awn);
 
     const propMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.05 });
-    for (const props of this.propBatch.build(propMat, { castShadow: true, receiveShadow: true })) this.group.add(props);
+    for (const props of this.propBatch.build(propMat, { castShadow: true, receiveShadow: true })) this._addChunk(props);
 
     const treeMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0.0 });
-    for (const trees of this.treeBatch.build(treeMat, { castShadow: true, receiveShadow: true })) this.group.add(trees);
+    for (const trees of this.treeBatch.build(treeMat, { castShadow: true, receiveShadow: true })) this._addChunk(trees);
 
     const platMat = new THREE.MeshStandardMaterial({ map: makeSidewalkTexture(), color: 0xffffff, roughness: 0.92, metalness: 0.0 });
     this.materials.platform = platMat;
-    for (const plat of this.platformBatch.build(platMat, { castShadow: false, receiveShadow: true })) this.group.add(plat);
+    for (const plat of this.platformBatch.build(platMat, { castShadow: false, receiveShadow: true })) this._addChunk(plat);
 
     const whiteMat = new THREE.MeshBasicMaterial({ color: 0xe8e8e2, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
-    for (const white of this.markWhite.build(whiteMat, { castShadow: false, receiveShadow: false })) this.group.add(white);
+    for (const white of this.markWhite.build(whiteMat, { castShadow: false, receiveShadow: false })) this._addChunk(white);
     const yellowMat = new THREE.MeshBasicMaterial({ color: 0xd8a524, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
-    for (const yellow of this.markYellow.build(yellowMat, { castShadow: false, receiveShadow: false })) this.group.add(yellow);
+    for (const yellow of this.markYellow.build(yellowMat, { castShadow: false, receiveShadow: false })) this._addChunk(yellow);
 
     this.lampMat = new THREE.MeshBasicMaterial({ color: 0x6a6458, toneMapped: false });
-    for (const lamp of this.lampGlassBatch.build(this.lampMat, { castShadow: false, receiveShadow: false })) this.group.add(lamp);
+    for (const lamp of this.lampGlassBatch.build(this.lampMat, { castShadow: false, receiveShadow: false })) this._addChunk(lamp);
   }
 
   nearestEdge(x, z) {
@@ -1054,14 +1422,23 @@ export class City {
     return best;
   }
 
-  update(dt, time, night) {
-    // emissive windows
-    for (const m of this.facadeMaterials) m.emissiveIntensity = 0.02 + night * 1.25;
-    for (const m of this.storefrontMaterials) m.emissiveIntensity = 0.12 + night * 1.35;
-    if (this.signMaterial) this.signMaterial.emissiveIntensity = 0.45 + night * 1.45;
-    if (this.lampMat) {
-      const on = night > 0.34;
-      this.lampMat.color.setHex(on ? 0xfff0c8 : 0x6a6458);
+  update(dt, time, night, focus) {
+    // 按需渲染：只让玩家附近的分块参与绘制（含阴影 pass）
+    this.updateStream(focus);
+
+    // emissive windows：night 是连续插值，只有变化超过阈值才重写材质
+    if (Math.abs(night - this._nightApplied) > 0.01) {
+      this._nightApplied = night;
+      const facadeEm = 0.02 + night * 1.25;
+      for (const m of this.facadeMaterials) m.emissiveIntensity = facadeEm;
+      const sfEm = 0.12 + night * 1.35;
+      for (const m of this.storefrontMaterials) m.emissiveIntensity = sfEm;
+      if (this.signMaterial) this.signMaterial.emissiveIntensity = 0.45 + night * 1.45;
+      const lampOn = night > 0.34;
+      if (lampOn !== this._lampOn) {
+        this._lampOn = lampOn;
+        if (this.lampMat) this.lampMat.color.setHex(lampOn ? 0xfff0c8 : 0x6a6458);
+      }
     }
 
     // traffic lights: 16s cycle, NS green then EW green
@@ -1071,17 +1448,18 @@ export class City {
     const ewGreen = cyc >= 8.5 && cyc < 15;
     const ewYellow = cyc >= 15 && cyc < 16;
     this.lightState = { nsGreen, nsYellow, ewGreen, ewYellow, ns: nsGreen, ew: ewGreen };
-    if (this.trafficInst && this.trafficHeads) {
-      const col = new THREE.Color();
+
+    // 灯色只有 4 种状态：只在状态切换时重写 instanceColor，
+    // 否则每帧都要上传一整块 instance 颜色缓冲（上千个灯头）。
+    const lightKey = (nsGreen ? 1 : 0) | (nsYellow ? 2 : 0) | (ewGreen ? 4 : 0) | (ewYellow ? 8 : 0);
+    if (this.trafficInst && lightKey !== this._lightKey) {
+      this._lightKey = lightKey;
+      const headColor = (green, yellow) => (green ? 0x22ff66 : yellow ? 0xffcc33 : 0xff2a2a);
+      const cZ = headColor(nsGreen, nsYellow);
+      const cX = headColor(ewGreen, ewYellow);
+      const col = this._lightColor || (this._lightColor = new THREE.Color());
       for (let i = 0; i < this.trafficHeads.length; i++) {
-        const h = this.trafficHeads[i];
-        let c = 0x3a1010;
-        if (h.axis === "z") {
-          if (nsGreen) c = 0x22ff66; else if (nsYellow) c = 0xffcc33; else c = 0xff2a2a;
-        } else {
-          if (ewGreen) c = 0x22ff66; else if (ewYellow) c = 0xffcc33; else c = 0xff2a2a;
-        }
-        col.setHex(c);
+        col.setHex(this.trafficHeads[i].axis === "z" ? cZ : cX);
         this.trafficInst.setColorAt(i, col);
       }
       if (this.trafficInst.instanceColor) this.trafficInst.instanceColor.needsUpdate = true;

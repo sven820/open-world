@@ -14,14 +14,17 @@ function wrapAngle(a) {
 }
 
 export class Traffic {
-  constructor(scene, city, count = 38) {
+  /** @param {number} capacity 实例上限（构建期一次性创建，运行期只切换启用数量） */
+  constructor(scene, city, capacity = 38) {
     this.scene = scene;
     this.city = city;
     this.vehicles = [];
     this.night = 0;
+    this.active = capacity;
+    this.maxDistance = 280;
 
     const edges = city.edges.filter((e) => e.length > 25);
-    for (let i = 0; i < count && edges.length; i++) {
+    for (let i = 0; i < capacity && edges.length; i++) {
       const e = pick(edges);
       const roll = Math.random();
       let group, kind, baseSpeed, len;
@@ -48,6 +51,17 @@ export class Traffic {
       this.vehicles.push(v);
       this._place(v, 0);
     }
+  }
+
+  /** 画面设置：启用车流数量（不重建几何，只切换模拟/绘制范围） */
+  setActiveCount(n) {
+    this.active = Math.max(0, Math.min(this.vehicles.length, n | 0));
+    for (let i = this.active; i < this.vehicles.length; i++) this.vehicles[i].group.visible = false;
+  }
+
+  /** 画面设置：车辆显示距离 */
+  setMaxDistance(d) {
+    this.maxDistance = Math.max(40, d || 280);
   }
 
   dispose() {
@@ -137,17 +151,22 @@ export class Traffic {
     return list[list.length - 1];
   }
 
-  update(dt) {
+  update(dt, focus) {
     const vs = this.vehicles;
+    const fx = focus ? focus.x : 0;
+    const fz = focus ? focus.z : 0;
+    const far2 = this.maxDistance * this.maxDistance;
     // simple car-following: slow if another vehicle ahead on same edge/lane
-    for (const v of vs) {
+    for (let i = 0; i < this.active; i++) {
+      const v = vs[i];
       let target = v.maxSpeed;
       const e = v.edge;
       const distLeft = (1 - v.t) * e.length;
       if (!this._lightFor(e.axis) && distLeft < 15) {
         target = 0;
       }
-      for (const o of vs) {
+      for (let j = 0; j < this.active; j++) {
+        const o = vs[j];
         if (o === v || o.edge !== e || o.lane !== v.lane) continue;
         if (o.t > v.t) {
           const gap = (o.t - v.t) * e.length;
@@ -170,6 +189,10 @@ export class Traffic {
         }
       }
       this._place(v, dt);
+      // 距离裁剪：远处的车不画（也不进阴影 pass），逻辑仍按需停在原地
+      const dx = v.group.position.x - fx;
+      const dz = v.group.position.z - fz;
+      v.group.visible = !focus || dx * dx + dz * dz <= far2;
     }
     // vehicles cast shadows; sun follows handled by environment
   }

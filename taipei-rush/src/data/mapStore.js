@@ -3,6 +3,8 @@
 // { id, name, createdAt, updatedAt, roadsX, roadsZ, districts, landmarks, spawn }
 // "default" 不是存储的地图，而是回退到程序化台北。
 
+import { GEN_DEFAULTS, genConfig } from "./cityData.js";
+
 const KEY_LIST = "tr_maps";        // 所有用户地图（含完整数据）
 const KEY_ACTIVE = "tr_activeMap"; // 当前选中地图 id；"default" = 默认台北
 
@@ -28,6 +30,10 @@ export function templateData() {
     landmarks: [],
     spawn: { x: 0, z: 0, heading: -Math.PI / 2 }, // 默认出生在地图范围中心
     extRoads: false, // 程序化延伸街道：默认不生成，用户勾选后开启
+    procedural: false, // 程序化城市：默认不生成，用户勾选后开启
+    gapScale: GEN_DEFAULTS.gapScale,         // 楼间距倍率（编辑器可调）
+    greenDensity: GEN_DEFAULTS.greenDensity, // 绿植密度倍率
+    lampDensity: GEN_DEFAULTS.lampDensity,   // 路灯密度倍率
   };
 }
 
@@ -44,8 +50,15 @@ export function migrate(map) {
   map.area = map.area || { cx: 0, cz: 0, w: 4000, d: 4000, rot: 0 };
   // 程序化延伸街道开关（旧地图无此字段 → 视为未勾选）
   map.extRoads = map.extRoads === undefined ? false : !!map.extRoads;
+  // 程序化城市开关（旧地图无此字段 → 视为未勾选，不自动生成街区）
+  map.procedural = map.procedural === undefined ? false : !!map.procedural;
   // 网格层浓度（3D 编辑器显示偏好；0=完全透出影像，1=默认）
   map.gridOpacity = typeof map.gridOpacity === "number" ? Math.min(1, Math.max(0, map.gridOpacity)) : GRID_OPACITY_DEFAULT;
+  // 程序化生成参数（旧地图无此字段 → 用默认值；非法值 clamp 到可调范围）
+  const gen = genConfig(map);
+  map.gapScale = gen.gapScale;
+  map.greenDensity = gen.greenDensity;
+  map.lampDensity = gen.lampDensity;
   return map;
 }
 

@@ -1,4 +1,5 @@
 import { districtAt } from "../data/cityData.js";
+import { getRenderSettings } from "../config/renderSettings.js";
 
 export class Hud {
   constructor(city, player, environment) {
@@ -130,20 +131,12 @@ export class Hud {
   }
 
   update(dt, fps) {
-    const h = this.env.hour;
-    const hh = Math.floor(h);
-    const mm = Math.floor((h - hh) * 60);
-    this.elTime.textContent = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
-    const night = this.env.night;
-    this.elWeather.textContent = night > 0.5 ? "夜" : "晴";
-
-    const d = districtAt(this.player.pos.x, this.player.pos.z);
-    if (this._lastD !== d.id) {
-      this._lastD = d.id;
-      this.elDistrictZh.textContent = d.zh;
-      this.elDistrictEn.textContent = d.en;
-      this.elDistrictSub.textContent = d.sub;
-    }
+    // HUD 是 2D canvas + DOM：小地图每帧整块重绘（220² + 静态底图 + 车流点）没必要，
+    // 按设置的刷新率降频；车速/上车提示这类"跟手"信息仍每帧更新。
+    const interval = 1 / Math.max(4, getRenderSettings().hudFps || 12);
+    this._acc = (this._acc || 0) + dt;
+    const slow = this._acc >= interval;
+    if (slow) this._acc = 0;
 
     if (this.player.driving) {
       const kmh = Math.abs(this.player.driveSpeed) * 3.6 * 1.7;
@@ -163,13 +156,42 @@ export class Hud {
     if (v && !this.player.driving) this.elPrompt.classList.remove("hidden");
     else this.elPrompt.classList.add("hidden");
 
+    // 大地图打开时单独按 30Hz 重绘：比 HUD 常规刷新跟手，拖动/滚轮另有即时重绘
+    if (this.bigmapEl && !this.bigmapEl.classList.contains("hidden")) {
+      this._bigAcc = (this._bigAcc || 0) + dt;
+      if (this._bigAcc >= 1 / 30) {
+        this._bigAcc = 0;
+        this._drawBig();
+      }
+    }
+
+    // 以下都是低频信息：时钟 / 区名 / 小地图 / FPS 读数
+    if (!slow) return;
+
+    const h = this.env.hour;
+    const hh = Math.floor(h);
+    const mm = Math.floor((h - hh) * 60);
+    this.elTime.textContent = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    this.elWeather.textContent = this.env.night > 0.5 ? "夜" : "晴";
+
+    const d = districtAt(this.player.pos.x, this.player.pos.z);
+    if (this._lastD !== d.id) {
+      this._lastD = d.id;
+      this.elDistrictZh.textContent = d.zh;
+      this.elDistrictEn.textContent = d.en;
+      this.elDistrictSub.textContent = d.sub;
+    }
+
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.MM, this.MM);
     ctx.save();
     ctx.beginPath(); ctx.arc(this.MM / 2, this.MM / 2, this.R + 2, 0, 7); ctx.clip();
     ctx.drawImage(this.staticMap, 0, 0);
     if (this.city.traffic) {
-      for (const ve of this.city.traffic.vehicles) {
+      const vs = this.city.traffic.vehicles;
+      const n = this.city.traffic.active ?? vs.length;
+      for (let i = 0; i < n; i++) {
+        const ve = vs[i];
         const mx = this._wx(ve.group.position.x), mz = this._wz(ve.group.position.z);
         ctx.fillStyle = ve.kind === "scooter" ? "#7fd6ff" : ve.kind === "bus" ? "#ffd24a" : "#ff7a7a";
         ctx.fillRect(mx - 1, mz - 1, 2.2, 2.2);
@@ -186,8 +208,6 @@ export class Hud {
     ctx.fill();
     ctx.restore();
     ctx.restore();
-
-    if (this.bigmapEl && !this.bigmapEl.classList.contains("hidden")) this._drawBig();
 
     if (this.fpsEl) this.fpsEl.textContent = "FPS " + fps.toFixed(0) + " · " + Math.round(this.player.pos.x) + "," + Math.round(this.player.pos.z);
   }
@@ -236,6 +256,8 @@ export class Hud {
           this._bigCx -= (c * cdx - s * cdy) / sc;
           this._bigCz -= (s * cdx + c * cdy) / sc;
         }
+        // 拖动期间立即重绘（HUD 常规刷新已降频，交互必须跟手）
+        this._drawBig();
       },
       wheel: (e) => {
         e.preventDefault();
@@ -256,6 +278,7 @@ export class Hud {
           this._bigCx += rx / sc0 - rx / sc1;
           this._bigCz += ry / sc0 - ry / sc1;
         }
+        this._drawBig();   // 滚轮缩放同样要即时反馈
       },
     };
     overlay.addEventListener("contextmenu", this._bh.ctx);

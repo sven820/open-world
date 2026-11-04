@@ -35,6 +35,39 @@ export const LANE_W = 3.4;
 export const EXT_STEP_X = 110;
 export const EXT_STEP_Z = 100;
 
+// 延伸路网的分级规格：每 3 条升级为林荫大道（双车道 + 中央绿化带 + 宽人行道），
+// 其余为街巷。建城（city.js）与两个地图编辑器的预览共用这一份规则，
+// 保证"预览 = 游戏里实际生成的街道"。
+export function extRoadSpec(at, step) {
+  const i = Math.round(at / step);
+  const avenue = ((i % 3) + 3) % 3 === 0;
+  return avenue
+    ? { kind: "avenue", lanes: 2, median: 4, sidewalk: 5, treeMedian: true }
+    : { kind: "street", lanes: 1, median: 0, sidewalk: 4 };
+}
+
+// 程序化城市生成参数（地图编辑器里可调，随地图保存在 localStorage）：
+//   procedural   是否自动生成程序化城市（街区建筑 / 绿植 / 路灯 / 街边停车），
+//                用户地图默认关闭，需在编辑器里勾选；默认台北始终生成
+//   gapScale     楼间距倍率（1 = 默认，相邻建筑之间约 2~4m 缝）
+//   greenDensity 绿植密度倍率（0 = 不种，1 = 默认）
+//   lampDensity  路灯密度倍率（0 = 不装，1 = 默认）
+export const GEN_DEFAULTS = { procedural: true, gapScale: 1, greenDensity: 1, lampDensity: 1 };
+
+// 把地图数据里的生成参数规整成安全范围（缺省 / 非法值回退到默认）
+export function genConfig(map) {
+  const src = map || {};
+  const num = (v, min, max, def) =>
+    (typeof v === "number" && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def);
+  return {
+    // 地图未写该字段时（含默认台北 null 数据）沿用默认；用户地图由 mapStore 显式写入
+    procedural: src.procedural === undefined ? GEN_DEFAULTS.procedural : !!src.procedural,
+    gapScale: num(src.gapScale, 0.4, 2.2, GEN_DEFAULTS.gapScale),
+    greenDensity: num(src.greenDensity, 0, 2.5, GEN_DEFAULTS.greenDensity),
+    lampDensity: num(src.lampDensity, 0, 2.5, GEN_DEFAULTS.lampDensity),
+  };
+}
+
 // 用户地图的世界边界：按路网范围四周延伸缓冲推导
 export function mapBounds(roadsX, roadsZ) {
   const xs = (roadsX || []).map((r) => r.at);
