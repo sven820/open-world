@@ -156,6 +156,49 @@ function offsetPolyline(points, off) {
   return out;
 }
 
+// 闭合多边形顶点整体内缩 d（miter join，尖角按 4d 截断）：取面路的路缘白实线
+// 沿边界内侧走，需要把边界线向路面内收一点
+function insetPolygon(pts, d) {
+  const n = pts.length;
+  if (n < 3) return null;
+  let area2 = 0;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    area2 += a[0] * b[1] - b[0] * a[1];
+  }
+  const s = area2 >= 0 ? 1 : -1; // 缠绕方向决定「内侧」法线取哪一侧
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const p = pts[(i + n - 1) % n], c = pts[i], q = pts[(i + 1) % n];
+    let e1x = c[0] - p[0], e1z = c[1] - p[1];
+    let e2x = q[0] - c[0], e2z = q[1] - c[1];
+    const l1 = Math.hypot(e1x, e1z) || 1, l2 = Math.hypot(e2x, e2z) || 1;
+    e1x /= l1; e1z /= l1; e2x /= l2; e2z /= l2;
+    const n1x = -e1z * s, n1z = e1x * s, n2x = -e2z * s, n2z = e2x * s;
+    const mx = n1x + n2x, mz = n1z + n2z;
+    if (mx * mx + mz * mz < 1e-9) { // 掉头折返：miter 退化，取第一条边的法线
+      out.push({ x: c[0] + n1x * d, z: c[1] + n1z * d });
+      continue;
+    }
+    const k = Math.min(4 * d, d / (mx * n1x + mz * n1z));
+    out.push({ x: c[0] + mx * k, z: c[1] + mz * k });
+  }
+  return out;
+}
+
+// 线段 a→b 落在「程序化路条带」（轴线过 j、半宽 progHalf+pad）内的 t 区间：
+// 用于取面路的路缘白实线在路口断开，不横穿程序化路的车道
+function spanInRoadBand(a, b, j, pad) {
+  const hw = (j.progHalf || 0) + pad;
+  const dw = (b.x - a.x) * j.mx + (b.z - a.z) * j.mz;
+  const w0 = (a.x - j.x) * j.mx + (a.z - j.z) * j.mz;
+  if (Math.abs(dw) < 1e-9) return Math.abs(w0) <= hw ? [0, 1] : null;
+  let t0 = (-hw - w0) / dw, t1 = (hw - w0) / dw;
+  if (t0 > t1) { const t = t0; t0 = t1; t1 = t; }
+  t0 = Math.max(0, t0); t1 = Math.min(1, t1);
+  return t0 < t1 - 1e-6 ? [t0, t1] : null;
+}
+
 // 沿段方向的标线四边形（略加长补段间缝隙）
 function markQuad(x0, z0, x1, z1, w, y) {
   const dx = x1 - x0, dz = z1 - z0;
@@ -460,6 +503,34 @@ export function buildCustomMap(data, colliders, junctions = []) {
       }
     }
     const spans = cutPolyline(pts, cutRanges);
+
+    // 取面路的路缘白实线：程序化路与开路都有（偏移 0.16、宽 0.14），面路此前没有 ——
+    // 沿边界内缩 0.16 画一圈，落在程序化路条带内的段在路口断开，不横穿程序化路的车道
+    if (r.closed && r.points.length >= 3) {
+      const ring = insetPolygon(r.points, 0.16);
+      if (ring && ring.length >= 3) {
+        ring.push(ring[0]); // 闭合
+        const cuts = [];
+        let acc = 0;
+        for (let i = 0; i + 1 < ring.length; i++) {
+          const a = ring[i], b = ring[i + 1];
+          const len = Math.hypot(b.x - a.x, b.z - a.z);
+          if (len > 1e-6) {
+            for (const j of junctions || []) {
+              if (j.roadIndex !== ri) continue;
+              const iv = spanInRoadBand(a, b, j, 0.6);
+              if (iv) cuts.push([acc + iv[0] * len, acc + iv[1] * len]);
+            }
+          }
+          acc += len;
+        }
+        const edgeWhites = [];
+        for (const span of cutPolyline(ring, cuts)) {
+          if (span.length >= 2) emitSolid(span, 0.19, 0.14, edgeWhites);
+        }
+        if (edgeWhites.length) group.add(new THREE.Mesh(mergeGeometries(edgeWhites), markWhiteMat()));
+      }
+    }
 
     // 人行道：沿两侧偏移的窄条带（路缘高出路面 6cm）；取面路为整块填充，无侧边不生成
     const sw = Math.min(Math.max(r.sidewalk ?? 3, 0), 12);

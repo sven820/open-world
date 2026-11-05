@@ -5,42 +5,31 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
-import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { Line2 } from "three/addons/lines/Line2.js";
-import { LineGeometry } from "three/addons/lines/LineGeometry.js";
-import { LineMaterial } from "three/addons/lines/LineMaterial.js";
-import {
-  buildImageryLayers, basemapInfo, basemapSources,
-  getBasemapSource, setBasemapSource,
-} from "../config/cesium.js";
-import { searchPlaces } from "../config/placeSearch.js";
 import { dropAt, bendGeometry } from "../config/curvature.js";
 import { EXT_STEP_X, EXT_STEP_Z, extRoadSpec, genConfig, asphaltHalf, corridorHalf } from "../data/cityData.js";
 import { areaPoly, clipAxisLine, worldBounds, polyCenterLine } from "../world/customMap.js";
 import { GRID_OPACITY_DEFAULT, ORIGIN_DEFAULT } from "../data/mapStore.js";
 import { genParamsHtml, bindGenParams } from "./genParams.js";
-
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const uid = () => "o" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-const fmtDist = (m) => (m >= 1000 ? `${(m / 1000).toFixed(2)}km` : `${Math.round(m)}m`);
-
-// 程序化道路类型（与 2D 编辑器一致）
-const ROAD_KINDS = ["street", "arterial", "boulevard"];
-const ROAD_KIND_ZH = { street: "街道", arterial: "干道", boulevard: "大道" };
-
-// 米 ↔ 经纬度（局部 ENU 近似，3km 内误差 <0.5m）
-// origin 语义 = 地图范围中心 (area.cx, area.cz) 在地球上的经纬度；
-// 任意局部点 (x,z) 的经纬度按相对中心的偏移换算。移动范围即整体搬移地图在地球上的落点。
-const M_PER_DEG_LAT = 111320;
-function lonLatAt(origin, area, x, z) {
-  const dx = x - (area ? area.cx : 0), dz = z - (area ? area.cz : 0);
-  return {
-    lon: origin.lon + dx / (M_PER_DEG_LAT * Math.cos((origin.lat * Math.PI) / 180)),
-    lat: origin.lat + -dz / M_PER_DEG_LAT,
-  };
-}
-// 经纬度偏移 → 局部米位移：未直接使用，保留公式备注
-// dx = dLon · M_PER_DEG_LAT · cos(lat)；dz = -dLat · M_PER_DEG_LAT
+import { clamp, uid, fmtDist, ROAD_KINDS, ROAD_KIND_ZH, lonLatAt, polyArea, polylineLen, smoothPath } from "./editor3d/util.js";
+import {
+  initCesium, toggleBasemap, applyBasemap, rebuildBasemap,
+  applyImageryVis, resizeCesium, syncFrustum, updateEnu,
+  syncCesiumCamera, renderCesiumSync,
+} from "./editor3d/cesium.js";
+import {
+  layerDefs, toggleLayers, openLayers, closeLayers, setLayerVis, applyLayerVis,
+  settingsSections, wireOriginSearch, toggleSettings, openSettings, closeSettings,
+} from "./editor3d/panels.js";
+import {
+  startMeasure, endMeasure, clearMeasure, measureAddPoint, finishMeasure,
+  renderMeasurePanel, updateMeasureLive, renderMeasureResult,
+  buildMeasureGroup, measureLabel,
+} from "./editor3d/measure.js";
+import {
+  fatLine, roadRibbon,
+  matRoad, matRiver, matBuilding, matRoof, stripGeometry,
+  buildRoadMesh, buildRiverMesh, buildBuildingMesh, buildTreeMesh, buildLampMesh, buildObjectMesh,
+} from "./editor3d/meshes.js";
 
 export class MapEditor3d {
   // opts: { map, onSave(data)=>bool, onPlay(), onClose() }
@@ -81,6 +70,7 @@ export class MapEditor3d {
     this._initThree();
     this._initUI();
     this._rebuildAll();
+    this._applyLayerVis(); // 应用记忆中的图层面板显隐（含 Cesium 就绪前的 Three 侧）
     this._pushUndo("打开编辑器");
     try {
       await this._initCesium(); // 失败不影响编辑（仅无底图）
@@ -247,32 +237,10 @@ export class MapEditor3d {
     this._syncFrustum();
   }
 
-  // Cesium 渲染外置后其自有循环里的 resize/configureCameraFrustum 不再执行，
-  // 显式按视口尺寸同步 backing store，并在尺寸变化时同步相机纵横比
-  _resizeCesium() {
-    if (!this._cesium) return;
-    const vp = document.getElementById("e3-viewport");
-    const c = document.querySelector("#e3-cesium canvas");
-    if (!c || !vp.clientWidth) return;
-    const dpr = Math.min(window.devicePixelRatio, 2);
-    const bw = Math.round(vp.clientWidth * dpr), bh = Math.round(vp.clientHeight * dpr);
-    if (c.width !== bw || c.height !== bh) {
-      c.width = bw; c.height = bh;
-      c.style.width = vp.clientWidth + "px";
-      c.style.height = vp.clientHeight + "px";
-      this._cesium.viewer.camera.frustum.aspectRatio = bw / bh;
-    }
-  }
+  // Cesium 桥接方法：实现见 ui/editor3d/cesium.js（以编辑器实例为上下文）
+  _resizeCesium() { resizeCesium(this); }
 
-  // 视锥对齐：Cesium 的 fov 语义是"水平 FOV"（aspect>1 时），Three 是垂直 FOV。
-  // 不对齐时影像与网格投影比例不一致，平移视角后错位越来越明显。
-  _syncFrustum() {
-    if (!this._cesium || !this._three) return;
-    const size = this._three.renderer.getSize(new THREE.Vector2());
-    const aspect = size.x / Math.max(1, size.y);
-    const vFovHalf = (this._three.camera.fov * Math.PI) / 360;
-    this._cesium.viewer.camera.frustum.fov = 2 * Math.atan(Math.tan(vFovHalf) * aspect);
-  }
+  _syncFrustum() { syncFrustum(this); }
 
   _loop() {
     const tick = () => {
@@ -302,441 +270,43 @@ export class MapEditor3d {
   }
 
   /* ---------------- cesium base map ---------------- */
-  async _initCesium() {
-    const Cesium = await import("cesium");
-    await import("cesium/Build/Cesium/Widgets/widgets.css");
-    window.CESIUM_BASE_URL = "/cesium/";
-    const info = basemapInfo();
-    if (info.builtinToken) {
-      this.status("天地图使用内置公共 token（.env.local: VITE_TIANDITU_KEY 可配专属 key）");
-    }
+  async _initCesium() { await initCesium(this); }
 
-    const el = document.getElementById("e3-cesium");
-    const credit = document.createElement("div"); // 隐藏版权容器
-    credit.style.display = "none";
-    el.appendChild(credit);
-    const viewer = new Cesium.Viewer(el, {
-      imageryProvider: false,
-      baseLayerPicker: false, animation: false, timeline: false, geocoder: false,
-      homeButton: false, sceneModePicker: false, navigationHelpButton: false,
-      fullscreenButton: false, infoBox: false, selectionIndicator: false,
-      creditContainer: credit,
-      requestRenderMode: false, // 渲染循环外置（见下），每帧显式渲染
-      contextOptions: { webgl: { alpha: false } },
-    });
-    for (const p of buildImageryLayers(Cesium)) viewer.imageryLayers.addImageryProvider(p);
-    this._applyImageryVis(); // 恢复图层面板里被关闭的影像层
-    const scene = viewer.scene;
-    scene.globe.baseColor = Cesium.Color.fromCssColorString("#0d141c");
-    scene.skyBox.show = false;
-    scene.sun.show = false;
-    scene.moon.show = false;
-    scene.screenSpaceCameraController.enableInputs = false; // 相机由 Three 驱动
-    // 渲染循环外置：Cesium 不再自建 RAF。其回调比编辑器 tick 恒早注册、先执行，
-    // 总是用「上一帧」的相机姿态画底图；静止时两层姿态相同看不出，
-    // 缩放/旋转时每帧差一个增量，网格相对底图来回跳（视觉上闪烁）。
-    // 改由 _loop 里 _renderCesiumSync 与 Three 在同一回调内先后渲染，姿态恒同帧
-    viewer.useDefaultRenderLoop = false;
+  _toggleBasemap() { toggleBasemap(this); }
 
-    this._cesium = { Cesium, viewer, enu: null, creditEl: credit };
-    window.__e3 = this; // dev 调试句柄
-    // Cesium 锚点标记（金色点 + 标签，disableDepthTest 保证远处可见）
-    const o = this.map.origin;
-    this._originEntity = viewer.entities.add({
-      position: Cesium.Cartesian3.fromDegrees(o.lon, o.lat, 30),
-      point: {
-        pixelSize: 14, color: Cesium.Color.fromCssColorString("#f2c14e"),
-        outlineColor: Cesium.Color.WHITE, outlineWidth: 2,
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      },
-      label: {
-        text: "锚点", font: "600 13px sans-serif", fillColor: Cesium.Color.WHITE,
-        outlineColor: Cesium.Color.BLACK, outlineWidth: 3,
-        pixelOffset: new Cesium.Cartesian2(0, -18),
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      },
-    });
-    this._updateEnu();
-    this._applyBasemap(); // 应用记忆中的开/关状态
-    this._resizeCesium(); // 底图创建后按当前视口校正尺寸
-    this._syncFrustum();  // 视锥与 Three 相机对齐
-    this.status(`底图：${info.credit} · 地理锚点 ${this.map.origin.lat.toFixed(4)}, ${this.map.origin.lon.toFixed(4)}`);
-  }
+  _applyBasemap() { applyBasemap(this); }
 
-  /* ---------------- basemap on/off ---------------- */
-  _toggleBasemap() {
-    this._cesiumOn = !this._cesiumOn;
-    localStorage.setItem("tr_e3_basemap", this._cesiumOn ? "1" : "0");
-    this._applyBasemap();
-  }
+  _rebuildBasemap() { rebuildBasemap(this); }
 
-  _applyBasemap() {
-    const el = document.getElementById("e3-cesium");
-    const btn = document.getElementById("e3-basemap");
-    if (btn) btn.classList.toggle("off", !this._cesiumOn);
-    if (!this._cesium) return; // 底图尚未加载完成，仅同步按钮；加载完成后会再调用
-    el.style.visibility = this._cesiumOn ? "visible" : "hidden";
-    if (this._cesiumOn) {
-      this._cesium.viewer.scene.requestRender(); // 恢复时立即重绘一帧
-    }
-  }
+  /* ---------------- 图层控制 / 设置面板 ---------------- */
+  // 面板实现见 ui/editor3d/panels.js（以编辑器实例为上下文）
+  _layerDefs() { return layerDefs(this); }
 
-  // 切换图源后重建 imagery layers（无需重开编辑器）
-  _rebuildBasemap() {
-    if (!this._cesium) {
-      this.status("底图尚未加载完成，图源选择将在加载后生效");
-      return;
-    }
-    const { Cesium, viewer } = this._cesium;
-    viewer.imageryLayers.removeAll();
-    for (const p of buildImageryLayers(Cesium)) viewer.imageryLayers.addImageryProvider(p);
-    this._applyImageryVis(); // 图源切换重建后恢复影像层显隐
-    const info = basemapInfo();
-    this.status(info.builtinToken
-      ? `底图已切换：${info.credit}（内置公共 token，可配 VITE_TIANDITU_KEY 替换）`
-      : `底图已切换：${info.credit}`);
-    if (this._cesiumOn) viewer.scene.requestRender();
-  }
+  _toggleLayers() { toggleLayers(this); }
 
-  /* ---------------- 图层控制 ---------------- */
-  // 底图影像层按 provider URL 分类（GeoQ 垫底 / 天地图注记 / 其余=卫星影像），
-  // 场景内容层按分组节点与 wrapper kind 开关；显隐状态持久化在 localStorage。
-  _layerDefs() {
-    const isTd = getBasemapSource() === "tianditu";
-    return [
-      {
-        title: "底图影像",
-        items: [
-          { key: "base", label: "深色矢量垫底", hint: "GeoQ · 免 key" },
-          { key: "img", label: "卫星影像", hint: isTd ? "天地图 img_w" : "Esri World Imagery" },
-          ...(isTd ? [{ key: "anno", label: "中文注记", hint: "天地图 cia_w" }] : []),
-        ],
-      },
-      {
-        title: "场景内容",
-        items: [
-          { key: "area", label: "范围网格", hint: "地图范围底板 + 网格" },
-          { key: "skeleton", label: "路网骨架", hint: "2D 数据：路网/地标/出生点" },
-          { key: "road", label: "道路", hint: "描边/手工道路要素" },
-          { key: "river", label: "河流", hint: "描边河流要素" },
-          { key: "object", label: "物件", hint: "树木 / 路灯 / 建筑" },
-          { key: "origin", label: "锚点标记", hint: "金色立柱 = 范围中心" },
-          { key: "measure", label: "测距结果", hint: "测距工具保留的标注" },
-        ],
-      },
-    ];
-  }
+  _openLayers() { openLayers(this); }
 
-  _toggleLayers() {
-    if (this._layersPop.classList.contains("hidden")) this._openLayers();
-    else this._closeLayers();
-  }
+  _closeLayers() { closeLayers(this); }
 
-  _openLayers() {
-    const pop = this._layersPop;
-    pop.innerHTML = "";
-    for (const group of this._layerDefs()) {
-      const h = document.createElement("div");
-      h.className = "e3-layer-cat";
-      h.textContent = group.title;
-      pop.appendChild(h);
-      for (const def of group.items) {
-        const on = this._layerVis[def.key] !== false;
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "e3-layer-row" + (on ? " on" : "");
-        row.innerHTML = `<span class="e3-layer-check"></span><span class="e3-layer-name">${def.label}<small>${def.hint}</small></span>`;
-        row.addEventListener("click", () => {
-          this._setLayerVis(def.key, this._layerVis[def.key] === false);
-          row.classList.toggle("on", this._layerVis[def.key] !== false);
-        });
-        pop.appendChild(row);
-      }
-    }
-    const hint = document.createElement("small");
-    hint.className = "e3-set-hint";
-    hint.textContent = "「卫星底图」整体开关在顶栏按钮";
-    pop.appendChild(hint);
-    pop.classList.remove("hidden");
-    this._layersBtn.classList.add("active");
-    // 捕获阶段监听外部点击关闭（与设置面板同套路）；先移除旧监听防堆积
-    setTimeout(() => {
-      if (this._onLayersOutside) document.removeEventListener("pointerdown", this._onLayersOutside, true);
-      this._onLayersOutside = (e) => {
-        if (!pop.contains(e.target) && e.target !== this._layersBtn) this._closeLayers();
-      };
-      document.addEventListener("pointerdown", this._onLayersOutside, true);
-    }, 0);
-  }
-
-  _closeLayers() {
-    this._layersPop.classList.add("hidden");
-    this._layersBtn.classList.remove("active");
-    if (this._onLayersOutside) {
-      document.removeEventListener("pointerdown", this._onLayersOutside, true);
-      this._onLayersOutside = null;
-    }
-  }
-
-  _setLayerVis(key, on) {
-    this._layerVis[key] = on;
-    try { localStorage.setItem("tr_e3_layers", JSON.stringify(this._layerVis)); } catch { /* 忽略 */ }
-    this._applyLayerVis();
-  }
+  _setLayerVis(key, on) { setLayerVis(this, key, on); }
 
   // 统一应用显隐：影像层 + 场景分组 + 实体 wrapper（重建后由各创建点单独重设）
-  _applyLayerVis() {
-    this._applyImageryVis();
-    const vis = this._layerVis;
-    const t = this._three;
-    if (!t) return;
-    t.areaGroup.visible = vis.area !== false;
-    this._skeleton.visible = vis.skeleton !== false;
-    if (this._originMarker) this._originMarker.visible = vis.origin !== false;
-    if (this._measureGroup) this._measureGroup.visible = vis.measure !== false;
-    for (const w of this._wrappers?.values() || []) w.root.visible = vis[w.kind] !== false;
-  }
+  _applyLayerVis() { applyLayerVis(this); }
 
-  _applyImageryVis() {
-    if (!this._cesium) return;
-    const { viewer } = this._cesium;
-    for (const layer of viewer.imageryLayers) {
-      const url = String((layer.provider || layer.imageryProvider)?.url || "");
-      const key = url.includes("geoq") ? "base" : url.includes("T=cia_w") ? "anno" : "img";
-      layer.show = this._layerVis[key] !== false;
-    }
-    if (this._cesiumOn) viewer.scene.requestRender();
-  }
+  _applyImageryVis() { applyImageryVis(this); }
 
-  /* ---------------- settings panel ---------------- */
-  // 可扩展设置面板：分节渲染，新增设置项只需在 _settingsSections 返回数组里加一项
-  // { id, title, render(bodyEl) }，面板定位、开关、外部点击关闭均自动处理。
-  _settingsSections() {
-    return [
-      {
-        id: "basemap-src",
-        title: "地图图源",
-        render: (el) => {
-          const current = getBasemapSource();
-          for (const s of basemapSources) {
-            const row = document.createElement("button");
-            row.type = "button";
-            row.className = "e3-set-item" + (s.id === current ? " active" : "");
-            row.innerHTML = `<span class="e3-set-radio"></span><span class="e3-set-label">${s.label}<small>${s.desc}</small></span>`;
-            row.addEventListener("click", () => {
-              if (s.id === getBasemapSource()) { this._closeSettings(); return; }
-              setBasemapSource(s.id);
-              this._rebuildBasemap();
-              this._openSettings(); // 重渲染以更新选中态
-            });
-            el.appendChild(row);
-          }
-        },
-      },
-      {
-        id: "origin",
-        title: "地图位置 · 范围中心的经纬度",
-        render: (el) => {
-          const o = this.map.origin;
-          el.innerHTML = `
-            <div class="e3-org-search">
-              <input id="e3-org-q" type="text" placeholder="搜索地点，如：上海东方明珠" spellcheck="false" autocomplete="off" />
-              <ul id="e3-org-q-list" class="hidden"></ul>
-            </div>
-            <div class="e3-set-xy">
-              <label>纬度 lat<input id="e3-org-lat" type="number" step="0.000001" min="-90" max="90" value="${o.lat.toFixed(6)}" /></label>
-              <label>经度 lon<input id="e3-org-lon" type="number" step="0.000001" min="-180" max="180" value="${o.lon.toFixed(6)}" /></label>
-            </div>
-            <div class="e3-set-row">
-              <button id="e3-org-apply" class="e3-set-btn primary">应用坐标</button>
-              <button id="e3-org-pick" class="e3-set-btn">在地图上拾取</button>
-            </div>
-            <small class="e3-set-hint">搜索 / 拾取 / 手动输入均会把地图整体搬到该处（范围中心 = 金色立柱）。调整范围位置时坐标自动跟随。</small>
-          `;
-          this._wireOriginSearch(el);
-          el.querySelector("#e3-org-apply").addEventListener("click", () => {
-            const lat = parseFloat(el.querySelector("#e3-org-lat").value);
-            const lon = parseFloat(el.querySelector("#e3-org-lon").value);
-            if (this._setOriginLL(lat, lon)) this._openSettings(); // 重渲染以刷新输入框
-          });
-          el.querySelector("#e3-org-pick").addEventListener("click", () => {
-            this._closeSettings();
-            this._setOriginPickMode();
-          });
-        },
-      },
-      {
-        id: "measure",
-        title: "测量工具 · 距离",
-        render: (el) => {
-          const m = this._measureResult;
-          const measuring = !!(this.draft && this.draft.measure);
-          el.innerHTML = `
-            <div class="e3-set-row">
-              <button id="e3-ms-start" class="e3-set-btn primary">${measuring ? "回到测距（进行中）" : "在地图上测距"}</button>
-              <button id="e3-ms-clear" class="e3-set-btn" ${m ? "" : "disabled"}>清除结果</button>
-            </div>
-            ${m ? `<small class="e3-set-hint">上次测距：<b>${fmtDist(m.length)}</b> · ${m.points.length} 个点</small>` : ""}
-            <small class="e3-set-hint">单击地图依次加点，实时显示每段与总距离（贴地直线距离）；双击 / Enter 结束，Esc 取消，Shift 锁 45° 直线。完成后结果保留在图上，直到清除或重新测距。</small>
-          `;
-          el.querySelector("#e3-ms-start").addEventListener("click", () => {
-            this._closeSettings();
-            if (measuring) this._renderMeasurePanel(); // 测距进行中：恢复右侧会话面板
-            else this._startMeasure();
-          });
-          el.querySelector("#e3-ms-clear").addEventListener("click", () => {
-            this._clearMeasure();
-            this._openSettings(); // 重渲染以更新按钮/结果状态
-          });
-        },
-      },
-      // 后续设置项示例：
-      // { id: "grid", title: "网格", render: (el) => {...} },
-    ];
-  }
+  // 设置面板：分节渲染（图源 / 地图位置搜索 / 测量入口），实现见 ui/editor3d/panels.js
+  _settingsSections() { return settingsSections(this); }
 
-  // 设置面板地名搜索：输入关键字（350ms 防抖）搜天地图 POI，下拉选择后
-  // 回填经纬度并把地图整体搬到该处（= 设为范围中心）。搜索框仿
-  // work/uav-inspection 的 PlaceSearchBox（键盘上下/回车/Esc、过期请求取消）。
-  // 监听与状态挂在本次面板渲染的 DOM 上，面板重渲染即自然丢弃。
-  _wireOriginSearch(el) {
-    const input = el.querySelector("#e3-org-q");
-    const list = el.querySelector("#e3-org-q-list");
-    if (!input || !list) return;
-    let debounceTimer = 0;
-    let abortController = null;
-    let results = [];
-    let activeIndex = -1;
+  _wireOriginSearch(el) { wireOriginSearch(this, el); }
 
-    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-    const show = (html) => { list.innerHTML = html; list.classList.remove("hidden"); };
-    const hide = () => { list.classList.add("hidden"); list.innerHTML = ""; };
-    const renderResults = () => {
-      show(results.map((r, i) => `
-        <li data-i="${i}" class="${i === activeIndex ? "active" : ""}">
-          <div class="e3-org-q-name">${esc(r.name)}</div>
-          ${r.meta ? `<div class="e3-org-q-meta">${esc(r.meta)}</div>` : ""}
-        </li>`).join(""));
-    };
+  _toggleSettings() { toggleSettings(this); }
 
-    const choose = (i) => {
-      const r = results[i];
-      if (!r) return;
-      input.value = r.name;
-      hide();
-      abortController?.abort();
-      el.querySelector("#e3-org-lat").value = r.lat.toFixed(6);
-      el.querySelector("#e3-org-lon").value = r.lng.toFixed(6);
-      this._setOriginLL(r.lat, r.lng);
-      this.status(`已定位到「${r.name}」· 地图整体搬至 ${r.lat.toFixed(6)}, ${r.lng.toFixed(6)} · 记得保存`);
-    };
+  _openSettings() { openSettings(this); }
 
-    const runSearch = async (q) => {
-      abortController?.abort();
-      abortController = new AbortController();
-      const { signal } = abortController;
-      show(`<li class="e3-org-q-empty">搜索中…</li>`);
-      try {
-        const rows = await searchPlaces(q, { signal });
-        if (signal.aborted) return;
-        results = rows;
-        activeIndex = rows.length ? 0 : -1;
-        if (results.length) renderResults();
-        else show(`<li class="e3-org-q-empty">未找到匹配的地点</li>`);
-      } catch (err) {
-        if (signal.aborted || err?.name === "AbortError") return;
-        results = []; activeIndex = -1;
-        show(`<li class="e3-org-q-empty">${err?.name === "TimeoutError" ? "搜索超时，请检查网络" : "搜索服务暂不可用"}</li>`);
-      }
-    };
+  _closeSettings() { closeSettings(this); }
 
-    input.addEventListener("input", () => {
-      clearTimeout(debounceTimer);
-      const q = input.value.trim();
-      if (!q) { clearTimeout(debounceTimer); abortController?.abort(); results = []; activeIndex = -1; hide(); return; }
-      debounceTimer = setTimeout(runSearch, 350, q);
-    });
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        if (!results.length) return;
-        e.preventDefault();
-        const delta = e.key === "ArrowDown" ? 1 : -1;
-        activeIndex = (activeIndex + delta + results.length) % results.length;
-        renderResults();
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        choose(activeIndex >= 0 ? activeIndex : 0);
-      } else if (e.key === "Escape") {
-        hide();
-      }
-    });
-    // mousedown.prevent 保住输入框焦点；click 兜底（键盘选择的回车路径已由 keydown 处理）
-    list.addEventListener("mousedown", (e) => {
-      const li = e.target.closest("li[data-i]");
-      if (li) { e.preventDefault(); choose(+li.dataset.i); }
-    });
-  }
-
-  _toggleSettings() {
-    const pop = document.getElementById("e3-settings-pop");
-    if (pop.classList.contains("hidden")) this._openSettings();
-    else this._closeSettings();
-  }
-
-  _openSettings() {
-    const pop = document.getElementById("e3-settings-pop");
-    const btn = document.getElementById("e3-settings");
-    pop.innerHTML = "";
-    // 面板定位于设置按钮下方，超出右边界时回退
-    const r = btn.getBoundingClientRect();
-    pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 268)) + "px";
-    pop.style.top = r.bottom + 8 + "px";
-    for (const sec of this._settingsSections()) {
-      const box = document.createElement("div");
-      box.className = "e3-set-sec";
-      const h = document.createElement("h5");
-      h.textContent = sec.title;
-      const body = document.createElement("div");
-      body.className = "e3-set-body";
-      sec.render(body);
-      box.append(h, body);
-      pop.appendChild(box);
-    }
-    pop.classList.remove("hidden");
-    // 捕获阶段监听外部点击关闭；setTimeout 避免本次点击立即触发。
-    // 先移除旧监听（面板内操作会反复 _openSettings 重渲染，不移除会越积越多）
-    setTimeout(() => {
-      if (this._onSettingsOutside) document.removeEventListener("pointerdown", this._onSettingsOutside, true);
-      this._onSettingsOutside = (e) => {
-        if (!pop.contains(e.target) && e.target !== btn) this._closeSettings();
-      };
-      document.addEventListener("pointerdown", this._onSettingsOutside, true);
-    }, 0);
-  }
-
-  _closeSettings() {
-    const pop = document.getElementById("e3-settings-pop");
-    pop.classList.add("hidden");
-    if (this._onSettingsOutside) {
-      document.removeEventListener("pointerdown", this._onSettingsOutside, true);
-      this._onSettingsOutside = null;
-    }
-  }
-
-  _updateEnu() {
-    if (!this._cesium) return;
-    const { Cesium, viewer } = this._cesium;
-    const o = this.map.origin || { ...ORIGIN_DEFAULT };
-    this._cesium.enu = Cesium.Transforms.eastNorthUpToFixedFrame(
-      Cesium.Cartesian3.fromDegrees(o.lon, o.lat),
-    );
-    viewer.scene.globe.show = true;
-    // 同步 Cesium 锚点标记位置
-    if (this._originEntity) {
-      this._originEntity.position = Cesium.Cartesian3.fromDegrees(o.lon, o.lat, 30);
-      if (this._cesiumOn) viewer.scene.requestRender();
-    }
-  }
+  _updateEnu() { updateEnu(this); }
 
   /* ---------------- map area（网格/底板范围） ---------------- */
   // 两种形态：
@@ -869,48 +439,12 @@ export class MapEditor3d {
     }
   }
 
-  // 屏幕空间胖线（Line2）：线宽恒定像素，任意视角/距离都清晰可见（不受雾影响）；
-  // 曲率下沉直接烘焙进端点（相邻点间距内弯曲量可忽略），不参与 _bendArea 顶点重写。
-  // ox/oz：几何存储的相对原点（位置减去原点，曲率仍按绝对坐标计算）
+  // 屏幕空间胖线 / 世界宽度路带（实现见 ui/editor3d/meshes.js）
   _fatLine(pts, widthPx, colorHex, opacity, lift, ox = 0, oz = 0) {
-    const geo = new LineGeometry();
-    geo.setPositions(pts.flatMap((p) => [p.x - ox, lift - this._curveOffset(p.x, p.z), p.z - oz]));
-    const mat = new LineMaterial({
-      color: colorHex, linewidth: widthPx, transparent: true, opacity, depthWrite: false,
-    });
-    const size = this._three.renderer.getSize(new THREE.Vector2());
-    mat.resolution.set(size.x, size.y);
-    const line = new Line2(geo, mat);
-    line.userData.fatLine = true;
-    return line;
+    return fatLine(this, pts, widthPx, colorHex, opacity, lift, ox, oz);
   }
 
-  // 世界宽度路带（贴合曲率）：中心线 pts 两侧偏移 halfW 构建三角条带。
-  // 真实世界宽 → 透视正确（近宽远窄，平视不失真）；同一几何体无接缝，
-  // 不会出现屏幕空间胖线的段接缝亮斑 / 近轴向光斑
-  _roadRibbon(pts, halfW, colorHex, opacity) {
-    const pos = [], idx = [];
-    for (let i = 0; i < pts.length; i++) {
-      const p0 = pts[Math.max(i - 1, 0)], p1 = pts[Math.min(i + 1, pts.length - 1)];
-      const dx = p1.x - p0.x, dz = p1.z - p0.z;
-      const len = Math.hypot(dx, dz) || 1;
-      const ox = (-dz / len) * halfW, oz = (dx / len) * halfW;
-      const y = 0.02 - this._curveOffset(pts[i].x, pts[i].z);
-      pos.push(pts[i].x + ox, y, pts[i].z + oz, pts[i].x - ox, y, pts[i].z - oz);
-      if (i) {
-        const a = (i - 1) * 2;
-        idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
-      }
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-    geo.setIndex(idx);
-    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-      color: colorHex, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide,
-    }));
-    mesh.renderOrder = 1;
-    return mesh;
-  }
+  _roadRibbon(pts, halfW, colorHex, opacity) { return roadRibbon(this, pts, halfW, colorHex, opacity); }
 
   // 多边形内网格线：逐条与多边形边界求交，取内部区段（20m 细线 / 100m 粗线，同矩形网格密度）。
   // 顶点按 (ox, oz) 相对存储，y 置 0 由 _bendArea 按世界坐标统一下沉
@@ -1066,53 +600,10 @@ export class MapEditor3d {
     this._three.scene.add(g);
   }
 
-  // Three(局部米) → Cesium ECEF 相机同步。
-  // ENU 原点 = 范围中心（origin 经纬度），相机局部坐标按相对中心换算。
-  // 轴映射：ENU.x=game.x, ENU.y=-game.z, ENU.z=game.y
-  _syncCesiumCamera() {
-    if (!this._cesium || !this._cesiumOn) return;
-    const { Cesium, viewer, enu } = this._cesium;
-    const cam = this._three.camera;
-    const a = this.map.area || { cx: 0, cz: 0 };
-    const pos = Cesium.Matrix4.multiplyByPoint(
-      enu,
-      new Cesium.Cartesian3(cam.position.x - a.cx, -(cam.position.z - a.cz), cam.position.y),
-      new Cesium.Cartesian3(),
-    );
-    // 方向/up 是 ENU 切平面向量，同样要经 enu 旋转到 ECEF（不含平移）。
-    // up 必须传相机真实"屏幕上方"基向量（matrixWorld 列 1），不能传世界竖直 cam.up=(0,1,0)：
-    // Cesium setView 内部会把 direction/up 往返转成 heading/pitch/roll，而该转换在接近天顶
-    // （视线与 up 平行，俯仰 ±2.6° 内）退化——heading 退取 up 的水平残差、roll 被直接丢弃。
-    // 世界竖直 up 俯视时与视线平行，残差只剩噪声级几何量 → 底图姿态随俯视跳变，
-    // 网格相对影像旋转几十°~180°（"俯视时网格不贴地图"的根源）；
-    // 屏幕上方恒 ⊥ 视线，退化分支变成"由屏幕上方精确推方位角"，全俯仰连续贴合。
-    const d = cam.getWorldDirection(this._v);
-    const su = this._v2.setFromMatrixColumn(cam.matrixWorld, 1);
-    const dir = Cesium.Matrix4.multiplyByPointAsVector(
-      enu,
-      new Cesium.Cartesian3(d.x, -d.z, d.y),
-      new Cesium.Cartesian3(),
-    );
-    const up = Cesium.Matrix4.multiplyByPointAsVector(
-      enu,
-      new Cesium.Cartesian3(su.x, -su.z, su.y),
-      new Cesium.Cartesian3(),
-    );
-    viewer.camera.setView({
-      destination: pos,
-      orientation: { direction: dir, up },
-    });
-  }
+  // Three(局部米) → Cesium ECEF 相机同步 + 同帧渲染（实现见 ui/editor3d/cesium.js）
+  _syncCesiumCamera() { syncCesiumCamera(this); }
 
-  // 底图同步渲染（useDefaultRenderLoop 已关）：在编辑器的 RAF 回调里显式绘制，
-  // 与 Three 的 renderer.render 同帧执行，两层 canvas 姿态恒一致。
-  // viewer.render = initializeFrame + clock.tick + scene.render，与 Cesium 自有循环逐帧等价，
-  // 总渲染工作量不变（此前也是每帧 requestRender 画一帧）
-  _renderCesiumSync() {
-    const viewer = this._cesium.viewer;
-    this._resizeCesium(); // 逐帧校验画布尺寸（值不变时零开销）
-    viewer.render();
-  }
+  _renderCesiumSync() { renderCesiumSync(this); }
 
   // 切换工具并同步左侧工具栏高亮
   _setTool(t) {
@@ -1450,147 +941,12 @@ export class MapEditor3d {
     this.status(`面道路已生成：${pts.length} 节点 · 约 ${area}㎡ · 可点选继续编辑`);
   }
 
-  // 鞋带公式：多边形面积（有符号）
-  _polyArea(pts) {
-    let a = 0;
-    for (let i = 0; i < pts.length; i++) {
-      const [x1, z1] = pts[i], [x2, z2] = pts[(i + 1) % pts.length];
-      a += x1 * z2 - x2 * z1;
-    }
-    return a / 2;
-  }
+  // 鞋带面积 / 折线长度 / 描边平滑（实现见 ui/editor3d/util.js）
+  _polyArea(pts) { return polyArea(pts); }
 
-  _polylineLen(pts) {
-    let L = 0;
-    for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
-    return L;
-  }
+  _polylineLen(pts) { return polylineLen(pts); }
 
-  // 手工描边平滑：① 1-2-1 卷积两轮去除手抖噪声（闭合时环绕，刻意直角/收口区不动）；
-  // ② Chaikin 角切割两轮（严格在凸包内，绝不外凸；直角顶点原样保留）；
-  // ③ 弦长等距线性重采样（Chaikin 后已足够圆滑）；
-  // ④ 闭合面按质心等比放大回原面积（平滑会使面积略缩）。
-  // keepEnds > 0 时（闭合面）：收口起点沿路径两侧该弧长内的顶点全部保持原样，头尾拐角不磨圆
-  _smoothPath(pts, closed, step = 3, keepEnds = 0) {
-    if (pts.length < 3) return pts.map((p) => [p[0], p[1]]);
-    const n0 = pts.length;
-    // 收口保护区：闭合面起点沿路径正/反向 keepEnds 弧长内
-    const protect = new Array(n0).fill(false);
-    if (closed && keepEnds > 0) {
-      const d = [0];
-      for (let i = 1; i < n0; i++) d.push(d[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
-      const total = d[n0 - 1] + Math.hypot(pts[0][0] - pts[n0 - 1][0], pts[0][1] - pts[n0 - 1][1]);
-      for (let i = 0; i < n0; i++) if (Math.min(d[i], total - d[i]) <= keepEnds) protect[i] = true;
-    }
-    // 转角检测（带符号）：|转角| >40° 且相邻转角非大角度异号（排除左右交替的手抖尖刺）
-    // → 刻意直角，平滑时保持原位。全直角多边形（矩形）所有顶点同号，全部保留
-    const sharpMarks = (arr) => {
-      const n = arr.length, turn = new Array(n).fill(0);
-      for (let i = 0; i < n; i++) {
-        const p = arr[closed ? (i - 1 + n) % n : Math.max(0, i - 1)];
-        const v = arr[i], q = arr[closed ? (i + 1) % n : Math.min(n - 1, i + 1)];
-        const a1 = Math.atan2(v[1] - p[1], v[0] - p[0]);
-        const a2 = Math.atan2(q[1] - v[1], q[0] - v[0]);
-        let t = a2 - a1;
-        while (t > Math.PI) t -= 2 * Math.PI;
-        while (t < -Math.PI) t += 2 * Math.PI;
-        turn[i] = t;
-      }
-      return turn.map((t, i) => {
-        if (!closed && (i === 0 || i === n - 1)) return false;
-        if (Math.abs(t) <= 0.7) return false;
-        // 手抖尖刺特征：相邻即出现异号大转角，且两点几乎重合（真凹角与相邻拐角相距很远）
-        const pi = closed ? (i - 1 + n) % n : Math.max(0, i - 1);
-        const ni = closed ? (i + 1) % n : Math.min(n - 1, i + 1);
-        const spike = (Math.abs(turn[pi]) > 0.5 && turn[pi] * t < 0 && Math.hypot(arr[i][0] - arr[pi][0], arr[i][1] - arr[pi][1]) < 3) ||
-                      (Math.abs(turn[ni]) > 0.5 && turn[ni] * t < 0 && Math.hypot(arr[i][0] - arr[ni][0], arr[i][1] - arr[ni][1]) < 3);
-        return !spike;
-      });
-    };
-    let src = pts.map((p) => [p[0], p[1]]);
-    let marks = sharpMarks(src);
-    for (let k = 0; k < 2; k++) {
-      const n = src.length, out = [];
-      for (let i = 0; i < n; i++) {
-        const p = src[i];
-        if (protect[i] || marks[i]) { out.push([p[0], p[1]]); continue; } // 直角/收口顶点保持原位
-        const prev = src[closed ? (i - 1 + n) % n : Math.max(0, i - 1)];
-        const next = src[closed ? (i + 1) % n : Math.min(n - 1, i + 1)];
-        out.push([(prev[0] + 2 * p[0] + next[0]) / 4, (prev[1] + 2 * p[1] + next[1]) / 4]);
-      }
-      src = out;
-    }
-    for (let k = 0; k < 2; k++) {
-      const n = src.length, out = [];
-      const segs = closed ? n : n - 1;
-      if (!closed) out.push([src[0][0], src[0][1]]);
-      for (let i = 0; i < segs; i++) {
-        const p = src[i], q = src[(i + 1) % n];
-        // 直角顶点不切割，原样保留，拐角 crisp
-        out.push(marks[i] ? [p[0], p[1]] : [p[0] * 0.75 + q[0] * 0.25, p[1] * 0.75 + q[1] * 0.25]);
-        out.push(marks[(i + 1) % n] ? [q[0], q[1]] : [p[0] * 0.25 + q[0] * 0.75, p[1] * 0.25 + q[1] * 0.75]);
-      }
-      if (!closed) out.push([src[n - 1][0], src[n - 1][1]]);
-      // 直角顶点原样保留会产生连续重复点（零长度段），需去重，否则转角检测与面积补偿失真
-      const ded = [];
-      for (const p of out) {
-        const l = ded[ded.length - 1];
-        if (!l || Math.hypot(p[0] - l[0], p[1] - l[1]) > 0.01) ded.push(p);
-      }
-      if (closed && ded.length > 1) {
-        const f = ded[0], l = ded[ded.length - 1];
-        if (Math.hypot(f[0] - l[0], f[1] - l[1]) < 0.01) ded.pop(); // 闭合环首尾重复
-      }
-      src = ded;
-      marks = sharpMarks(src); // 顶点数已变，重算直角标记
-    }
-    // 弦长等距重采样（线性插值足够：Chaikin 后折线已圆滑）
-    const m = src.length;
-    const segN = closed ? m : m - 1;
-    const segL = [];
-    let total = 0;
-    for (let i = 0; i < segN; i++) {
-      const p = src[i], q = src[(i + 1) % m];
-      const l = Math.hypot(q[0] - p[0], q[1] - p[1]);
-      segL.push(l); total += l;
-    }
-    const count = Math.max(8, Math.min(2000, Math.round(total / step)));
-    const res = [];
-    let seg = 0, acc = 0;
-    for (let k = 0; k < count; k++) {
-      const target = (total * k) / count;
-      while (seg < segN - 1 && acc + segL[seg] < target) { acc += segL[seg]; seg++; }
-      const p = src[seg], q = src[(seg + 1) % m];
-      const t = segL[seg] > 0 ? (target - acc) / segL[seg] : 0;
-      res.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
-    }
-    if (!closed) res.push([src[m - 1][0], src[m - 1][1]]);
-    if (closed) {
-      // 平滑使面积略缩：按质心等比放大回原面积
-      const area = (ps) => {
-        let a = 0;
-        for (let i = 0; i < ps.length; i++) {
-          const p = ps[i], q = ps[(i + 1) % ps.length];
-          a += p[0] * q[1] - q[0] * p[1];
-        }
-        return a / 2;
-      };
-      const a0 = Math.abs(area(pts)), a1 = Math.abs(area(res));
-      if (a0 > 0.0001 && a1 > 0.0001) {
-        const s = Math.min(1.1, Math.sqrt(a0 / a1)); // 上限 1.1，避免局部圆角损失被整体放大越界
-        const cx = res.reduce((t, p) => t + p[0], 0) / res.length;
-        const cz = res.reduce((t, p) => t + p[1], 0) / res.length;
-        for (const p of res) { p[0] = cx + (p[0] - cx) * s; p[1] = cz + (p[1] - cz) * s; }
-      }
-    }
-    const out = [];
-    for (const p of res) {
-      const q = [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10];
-      const last = out[out.length - 1];
-      if (!last || Math.hypot(q[0] - last[0], q[1] - last[1]) >= 0.2) out.push(q);
-    }
-    return out.length >= 2 ? out : src.map((p) => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10]);
-  }
+  _smoothPath(pts, closed, step = 3, keepEnds = 0) { return smoothPath(pts, closed, step, keepEnds); }
 
   // 描边会话右侧面板：模式切换 / 路宽预设与输入 / 实时进度 / 完成按钮
   _renderTracePanel() {
@@ -1657,197 +1013,26 @@ export class MapEditor3d {
   }
 
   /* ---------------- 测距工具（设置面板入口） ---------------- */
-  // 会话式测距：单击地图依次加点，实时显示每段与总距离（局部米坐标直线距离，
-  // 与 lonLatAt 同一平面近似）。绿色胖线 + 屏幕空间恒定大小的距离标注（sprite 贴图缓存），
-  // 双击/Enter 结束后结果保留在图上，直到清除或重新开始。
-  _startMeasure() {
-    this._select(null);
-    this._discardDraft();
-    this._measureResult = null; // 开始新测距即移除上次结果
-    this._renderMeasureResult();
-    this.draft = { points: [], measure: true, redo: [] };
-    this._setTool("measure");
-    this._three.orbit.mouseButtons.LEFT = null; // 左键让位给加点，右键旋转 / 滚轮缩放不受影响
-    this._updateDraftPreview();
-    this._renderMeasurePanel();
-    this.status("测距：单击地图依次加点 —— 每段与总距离实时标注 · 双击/Enter 结束 · Esc 取消");
-  }
+  // 会话式测距实现见 ui/editor3d/measure.js（以编辑器实例为上下文）
+  _startMeasure() { startMeasure(this); }
 
-  // 结束测距会话：清草稿、恢复左键视角控制、右侧面板回到默认
-  _endMeasure(msg) {
-    this.draft = null;
-    this._three.orbit.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
-    if (this.tool === "measure") this._setTool("select");
-    this._updateDraftPreview();
-    this._renderProps();
-    if (msg) this.status(msg);
-  }
+  _endMeasure(msg) { endMeasure(this, msg); }
 
-  _clearMeasure() {
-    this._measureResult = null;
-    this._renderMeasureResult();
-  }
+  _clearMeasure() { clearMeasure(this); }
 
-  // 加点：双击结束产生的重复点击按 <0.8m 去重；Shift 锁 45° 方向
-  _measureAddPoint(pt, e) {
-    const d = this.draft;
-    if (!d || !d.measure) return;
-    if (e && e.shiftKey) pt = this._snap45(pt);
-    const last = d.points[d.points.length - 1];
-    if (last && Math.hypot(pt.x - last.x, pt.z - last.z) < 0.8) return;
-    d.points.push(pt);
-    d.redo = [];
-    this._updateDraftPreview();
-    this._renderMeasurePanel();
-  }
+  _measureAddPoint(pt, e) { measureAddPoint(this, pt, e); }
 
-  _finishMeasure() {
-    const d = this.draft;
-    if (!d || !d.measure) return;
-    if (d.points.length < 2) { this.status("测距：至少需要 2 个点（继续单击加点）"); return; }
-    const pts = d.points.map((p) => ({ x: Math.round(p.x * 10) / 10, z: Math.round(p.z * 10) / 10 }));
-    const length = this._polylineLen(pts.map((p) => [p.x, p.z]));
-    this._endMeasure();
-    this._measureResult = { points: pts, length };
-    this._renderMeasureResult();
-    this.status(`测距完成：总距离 ${fmtDist(length)} · ${pts.length} 个点（设置面板可清除 / 重新测距）`);
-  }
+  _finishMeasure() { finishMeasure(this); }
 
-  // 测距会话右侧面板：实时距离 + 完成/撤销/恢复/取消
-  _renderMeasurePanel() {
-    const d = this.draft;
-    if (!d || !d.measure) return;
-    const path = d.cursor ? [...d.points, d.cursor] : [...d.points];
-    const total = this._polylineLen(path.map((p) => [p.x, p.z]));
-    const el = document.getElementById("e3-props");
-    el.innerHTML = `
-      <h4>测距 · 进行中</h4>
-      <div class="me-stat">总距离 <b id="ep-ms-total">${fmtDist(total)}</b> · 节点 <b id="ep-ms-n">${d.points.length}</b></div>
-      <div class="me-stat">上一段 <b id="ep-ms-last">—</b></div>
-      <button class="me-btn" id="ep-ms-done">完成测距（Enter / 双击）</button>
-      <button class="me-btn" id="ep-ms-undo">撤销上一节点（Ctrl+Z）</button>
-      <button class="me-btn" id="ep-ms-redo">恢复节点（Ctrl+Y）</button>
-      <button class="me-del" id="ep-ms-cancel">取消测距（Esc）</button>
-      <p class="me-hint">单击地图依次加点（Shift 锁 45° 直线）· 每段距离标注在图上，总距离在末端 · 双击结束，结果保留到下次测距</p>`;
-    const bind = (id, fn, disabled) => {
-      const btn = el.querySelector(id);
-      btn.disabled = !!disabled;
-      btn.addEventListener("click", (e) => { e.currentTarget.blur(); fn(); });
-    };
-    bind("#ep-ms-done", () => this._finishMeasure(), d.points.length < 2);
-    bind("#ep-ms-undo", () => this._undoDraftPoint(), !d.points.length);
-    bind("#ep-ms-redo", () => this._redoDraftPoint(), !d.redo.length);
-    bind("#ep-ms-cancel", () => this._endMeasure("已取消测距"));
-  }
+  _renderMeasurePanel() { renderMeasurePanel(this); }
 
-  // 轻量刷新：鼠标移动只更新数字（拖动频繁，不能整面板重绘）
-  _updateMeasureLive() {
-    const d = this.draft;
-    if (!d || !d.measure) return;
-    const path = d.cursor ? [...d.points, d.cursor] : [...d.points];
-    const total = this._polylineLen(path.map((p) => [p.x, p.z]));
-    this.status(`测距中：总距离 ${fmtDist(total)} · ${d.points.length} 点 · 双击/Enter 结束 · Esc 取消`);
-    const el = document.getElementById("e3-props");
-    const t = el.querySelector("#ep-ms-total"), n = el.querySelector("#ep-ms-n"), last = el.querySelector("#ep-ms-last");
-    if (t) t.textContent = fmtDist(total);
-    if (n) n.textContent = d.points.length;
-    if (last && path.length >= 2) {
-      const a = path[path.length - 2], b = path[path.length - 1];
-      last.textContent = fmtDist(Math.hypot(b.x - a.x, b.z - a.z));
-    }
-  }
+  _updateMeasureLive() { updateMeasureLive(this); }
 
-  // 已完成测距结果的常驻显示（不参与草稿预览/重建清理，直到清除）
-  _renderMeasureResult() {
-    if (this._measureGroup) {
-      this._three.scene.remove(this._measureGroup);
-      this._measureGroup.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
-      this._measureGroup = null;
-    }
-    if (!this._measureResult) return;
-    this._measureGroup = this._buildMeasureGroup(this._measureResult.points, null);
-    this._three.scene.add(this._measureGroup);
-    this._measureGroup.visible = this._layerVis.measure !== false; // 保持面板里的显隐状态
-  }
+  _renderMeasureResult() { renderMeasureResult(this); }
 
-  // 测距绘制组：绿色胖线（深色衬底）+ 节点圆点 + 每段中点距离标注 + 末端总距离标注，
-  // 全部跟随曲率下沉；cursor 为橡皮筋预览段
-  _buildMeasureGroup(points, cursor) {
-    const g = new THREE.Group();
-    const path = cursor ? [...points, cursor] : [...points];
-    const yAt = (p) => 0.16 - this._curveOffset(p.x, p.z);
-    if (path.length >= 2) {
-      const casing = this._fatLine(path, 8, 0x0b1220, 0.85, 0.14);
-      casing.renderOrder = 3;
-      const main = this._fatLine(path, 4, 0x4ade80, 1, 0.16);
-      main.renderOrder = 4;
-      g.add(casing, main);
-    }
-    for (const p of path) {
-      const dot = new THREE.Mesh(
-        new THREE.SphereGeometry(1.1, 10, 8),
-        new THREE.MeshBasicMaterial({ color: 0x4ade80, depthWrite: false }),
-      );
-      dot.position.set(p.x, yAt(p), p.z);
-      dot.renderOrder = 5;
-      g.add(dot);
-    }
-    for (let i = 1; i < path.length; i++) {
-      const a = path[i - 1], b = path[i];
-      const sp = this._measureLabel(fmtDist(Math.hypot(b.x - a.x, b.z - a.z)), false);
-      sp.position.set((a.x + b.x) / 2, yAt(a) + 5, (a.z + b.z) / 2);
-      g.add(sp);
-    }
-    if (path.length >= 2) {
-      const end = path[path.length - 1];
-      const total = this._polylineLen(path.map((p) => [p.x, p.z]));
-      const sp = this._measureLabel(`总 ${fmtDist(total)}`, true);
-      sp.position.set(end.x, yAt(end) + 14, end.z);
-      g.add(sp);
-    }
-    return g;
-  }
+  _buildMeasureGroup(points, cursor) { return buildMeasureGroup(this, points, cursor); }
 
-  // 屏幕空间恒定大小的距离标注（sprite，sizeAttenuation=false）：
-  // 文字贴图按文本缓存（材质可随组丢弃，贴图保留复用，避免逐帧重建 canvas）
-  _measureLabel(text, accent) {
-    const cache = (this._labelTex ||= new Map());
-    const key = (accent ? "!" : "") + text;
-    if (cache.size > 80) { for (const t of cache.values()) t.dispose(); cache.clear(); }
-    let tex = cache.get(key);
-    if (!tex) {
-      const fs = 44, pad = 16;
-      const cnv = document.createElement("canvas");
-      let ctx = cnv.getContext("2d");
-      ctx.font = `600 ${fs}px sans-serif`;
-      cnv.width = Math.ceil(ctx.measureText(text).width) + pad * 2;
-      cnv.height = fs + pad * 2;
-      ctx = cnv.getContext("2d");
-      ctx.font = `600 ${fs}px sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      const r = cnv.height / 2, w = cnv.width;
-      ctx.beginPath();
-      if (ctx.roundRect) ctx.roundRect(1.5, 1.5, w - 3, cnv.height - 3, r); else ctx.rect(1.5, 1.5, w - 3, cnv.height - 3);
-      ctx.fillStyle = accent ? "rgba(6,26,16,.92)" : "rgba(11,18,32,.88)";
-      ctx.fill();
-      ctx.strokeStyle = accent ? "#4ade80" : "rgba(255,255,255,.4)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.fillStyle = accent ? "#8df0b6" : "#e8f2ff";
-      ctx.fillText(text, w / 2, cnv.height / 2 + 2);
-      tex = new THREE.CanvasTexture(cnv);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      cache.set(key, tex);
-    }
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: tex, transparent: true, depthTest: false, depthWrite: false, sizeAttenuation: false,
-    }));
-    const h = accent ? 0.052 : 0.04; // 屏幕高度占比（远近视角下标注大小恒定可读）
-    sp.scale.set(h * (tex.image.width / tex.image.height), h, 1);
-    sp.renderOrder = 10; // 恒在胖线/网格之上
-    return sp;
-  }
+  _measureLabel(text, accent) { return measureLabel(this, text, accent); }
 
   /* ---------------- 范围描边（多边形地图范围） ---------------- */
   // 进入范围描边模式：单击加点，双击/Enter/「完成描边」按钮结束（≥3 点），Esc 取消；
@@ -1954,114 +1139,23 @@ export class MapEditor3d {
   }
 
   /* ---------------- entity build ---------------- */
-  _matRoad() {
-    // 与程序化纵横路带同色同透明度（0x8ea3bd @ 0.5），编辑器内视觉统一
-    return new THREE.MeshBasicMaterial({ color: 0x8ea3bd, transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide });
-  }
-  _matRiver() { return new THREE.MeshStandardMaterial({ color: 0x1d5f8f, transparent: true, opacity: 0.8, roughness: 0.25, metalness: 0.1 }); }
-  _matBuilding() { return new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.85 }); }
-  _matRoof() { return new THREE.MeshStandardMaterial({ color: 0x6f6a60, roughness: 0.9 }); }
+  // 实体材质 / 网格构建（实现见 ui/editor3d/meshes.js）
+  _matRoad() { return matRoad(); }
+  _matRiver() { return matRiver(); }
+  _matBuilding() { return matBuilding(); }
+  _matRoof() { return matRoof(); }
 
-  // 折线 → 带状网格（两三角/段 + 接头圆片补缝）；yBase 区分叠放层次
-  _stripGeometry(points, width, yBase = 0.05) {
-    const hw = width / 2;
-    const verts = [], idx = [];
-    const dirs = [];
-    for (let i = 0; i < points.length; i++) {
-      const p = points[i];
-      const prev = points[Math.max(0, i - 1)], next = points[Math.min(points.length - 1, i + 1)];
-      const dx = next.x - prev.x, dz = next.z - prev.z;
-      const len = Math.hypot(dx, dz) || 1;
-      dirs.push({ nx: -dz / len, nz: dx / len });
-    }
-    for (let i = 0; i < points.length; i++) {
-      const p = points[i], n = dirs[i];
-      const y = yBase - this._curveOffset(p.x, p.z); // 贴合球面（中心零基准）
-      verts.push(p.x + n.nx * hw, y, p.z + n.nz * hw);
-      verts.push(p.x - n.nx * hw, y, p.z - n.nz * hw);
-      if (i < points.length - 1) {
-        const a = i * 2;
-        // 绕朝上（CCW）：A_i → A_{i+1} → B_i，否则正面朝下被剔除，从上看只剩接头圆片
-        idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
-      }
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
-    geo.setIndex(idx);
-    geo.computeVertexNormals();
-    // 接头圆片（去掉 uv 以与带状几何属性一致，否则 mergeGeometries 返回 null）
-    const discs = [];
-    for (const p of points) {
-      const c = new THREE.CircleGeometry(hw, 12);
-      c.deleteAttribute("uv");
-      c.rotateX(-Math.PI / 2);
-      c.translate(p.x, yBase - this._curveOffset(p.x, p.z), p.z);
-      discs.push(c);
-    }
-    const discMerged = mergeGeometries(discs);
-    return mergeGeometries([geo, discMerged]) || geo;
-  }
+  _stripGeometry(points, width, yBase = 0.05) { return stripGeometry(this, points, width, yBase); }
 
-  _buildRoadMesh(data) {
-    if (data.closed && data.points.length >= 3) {
-      // 取面道路：围合多边形整体填充为路面
-      const shape = new THREE.Shape(data.points.map(([x, z]) => new THREE.Vector2(x, -z)));
-      const geo = bendGeometry(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2));
-      geo.translate(0, 0.05, 0);
-      const mesh = new THREE.Mesh(geo, this._matRoad());
-      mesh.receiveShadow = true;
-      return mesh;
-    }
-    const geo = this._stripGeometry(data.points.map(([x, z]) => ({ x, z })), data.width || 12);
-    const mesh = new THREE.Mesh(geo, this._matRoad());
-    mesh.receiveShadow = true;
-    return mesh;
-  }
+  _buildRoadMesh(data) { return buildRoadMesh(this, data); }
 
-  _buildRiverMesh(data) {
-    const geo = this._stripGeometry(data.points.map(([x, z]) => ({ x, z })), data.width || 26);
-    const mesh = new THREE.Mesh(geo, this._matRiver());
-    mesh.position.y = -0.02;
-    return mesh;
-  }
+  _buildRiverMesh(data) { return buildRiverMesh(this, data); }
 
-  _buildBuildingMesh(obj) {
-    const fp = (obj.params.footprint || []).map(([x, z]) => new THREE.Vector2(x, -z));
-    if (fp.length < 3) return null;
-    const h = obj.params.height || 24;
-    const shape = new THREE.Shape(fp);
-    const geo = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false });
-    geo.rotateX(-Math.PI / 2); // (x, y, 0..h) → (x, h..0?) 旋转后挤出方向变为 +Y
-    const walls = new THREE.Mesh(geo, this._matBuilding());
-    walls.castShadow = true; walls.receiveShadow = true;
-    const roofGeo = new THREE.ShapeGeometry(shape);
-    roofGeo.rotateX(-Math.PI / 2);
-    roofGeo.translate(0, h, 0);
-    const roof = new THREE.Mesh(roofGeo, this._matRoof());
-    const group = new THREE.Group();
-    group.add(walls, roof);
-    return group;
-  }
+  _buildBuildingMesh(obj) { return buildBuildingMesh(obj); }
 
-  _buildTreeMesh() {
-    const g = new THREE.Group();
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.35, 3, 6), new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 1 }));
-    trunk.position.y = 1.5; trunk.castShadow = true;
-    const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(2.2, 0), new THREE.MeshStandardMaterial({ color: 0x2f7a3f, roughness: 1, flatShading: true }));
-    crown.position.y = 4.6; crown.castShadow = true;
-    g.add(trunk, crown);
-    return g;
-  }
+  _buildTreeMesh() { return buildTreeMesh(); }
 
-  _buildLampMesh() {
-    const g = new THREE.Group();
-    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 6.5, 6), new THREE.MeshStandardMaterial({ color: 0x3c4650, roughness: 0.6 }));
-    pole.position.y = 3.25; pole.castShadow = true;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.45, 10, 8), new THREE.MeshStandardMaterial({ color: 0xfff3c4, emissive: 0xffd873, emissiveIntensity: 1.4 }));
-    head.position.y = 6.6;
-    g.add(pole, head);
-    return g;
-  }
+  _buildLampMesh() { return buildLampMesh(); }
 
   /* ---------------- wrappers（data ↔ three 对象） ---------------- */
   _makeWrapper(kind, data, object3d) {
@@ -2261,12 +1355,7 @@ export class MapEditor3d {
 
   _rebuildObjects() { this._rebuildAll(); }
 
-  _buildObjectMesh(o) {
-    if (o.type === "building") return this._buildBuildingMesh(o);
-    if (o.type === "tree") return this._buildTreeMesh();
-    if (o.type === "lamp") return this._buildLampMesh();
-    return null;
-  }
+  _buildObjectMesh(o) { return buildObjectMesh(this, o); }
 
   _addObject(data) {
     this.map.objects.push(data);
