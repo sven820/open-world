@@ -51,6 +51,8 @@ export function migrate(map) {
     map.features = map.features || { roads: [], rivers: [] };
     map.objects = map.objects || [];
   }
+  // 拼接式路块要素（3D 编辑器「路块拼接」工具）：旧地图/旧快照补空数组
+  if (map.features) map.features.roadTiles = map.features.roadTiles || [];
   // 基准地址仍是旧默认（台北车站）= 用户没在编辑器里改过锚点 → 跟随新默认搬到合肥淮河路步行街
   if (map.origin && map.origin.lat === ORIGIN_LEGACY.lat && map.origin.lon === ORIGIN_LEGACY.lon) {
     map.origin = { ...ORIGIN_DEFAULT };

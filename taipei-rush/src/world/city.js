@@ -62,6 +62,7 @@ export class City {
     // 程序化生成参数（地图编辑器可调）：楼间距 / 绿植 / 路灯 倍率
     this.gen = genConfig(data);
     this.custom = null;         // buildCustomMap 结果（描边内容渲染数据）
+    this.buildProgress = 0;     // 程序化城市分块生成进度（0~1，main.js 加载条轮询）
     // 3D 描边道路走廊预计算：程序化建筑避让 + 玩家脚底高度（路面 0.18 / 人行道 0.24）
     this.traceCorridors = [];
     const roadDefs = (data && data.features && data.features.roads) || [];
@@ -92,6 +93,41 @@ export class City {
         index: ri,   // data.features.roads 中的原始下标（customMap 侧按同一顺序遍历）
         pts: ptsRaw, closed: !!r.closed, segs, samples,
         roadHalf, edgeHalf: roadHalf + sw, keepHalf: roadHalf + sw + 1.5,
+      });
+    }
+    // 拼接路块（3D 编辑器「路块拼接」）并入同一走廊体系：程序化建筑/绿植/街具
+    // 避让拼接路（_rectHitsCorridor / inTraceCorridor），程序化路网与其求交得
+    // 路口（斑马线 / 灯杆，见 computeTraceJunctions 的闭合面路分支）。
+    // 每块 = 一个闭合矩形走廊（四角平口矩形，miter 端头外扩量忽略 —— 走廊本就
+    // 外扩人行道+余量）；index 加 1e6 偏移，避免与 features.roads 的下标撞号
+    // （customMap 按 roadIndex 给描边路开断口，拼接路是整块贴图不需要断口）
+    const tileDefs = (data && data.features && data.features.roadTiles) || [];
+    for (let ri = 0; ri < tileDefs.length; ri++) {
+      const t = tileDefs[ri];
+      const hl = (t.len || 3) / 2, hw = (t.w || 2) / 2;
+      const s = Math.sin(t.rot || 0), c = Math.cos(t.rot || 0);
+      // 本地 (lx, lz) → 世界：world = O + n·lx + f·lz（n=(cosθ,−sinθ) 侧向，f=(sinθ,cosθ) 前进向）
+      const pts = [
+        [t.x + hw * c + hl * s, t.z - hw * s + hl * c],
+        [t.x - hw * c + hl * s, t.z + hw * s + hl * c],
+        [t.x - hw * c - hl * s, t.z + hw * s - hl * c],
+        [t.x + hw * c - hl * s, t.z - hw * s - hl * c],
+      ];
+      // 沿前进向 ~6m 采样：keepHalf 圆盘半径 ≥ 半宽+3.5m，6m 间距覆盖无缝
+      const samples = [];
+      const n = Math.max(1, Math.ceil((hl * 2) / 6));
+      for (let k = 0; k <= n; k++) {
+        const lz = -hl + (2 * hl * k) / n;
+        samples.push({ x: t.x + lz * s, z: t.z + lz * c });
+      }
+      this.traceCorridors.push({
+        index: 1e6 + ri, tile: t, pts, closed: true,
+        segs: pts.map((p, i) => {
+          const q = pts[(i + 1) % 4];
+          return { ax: p[0], az: p[1], bx: q[0], bz: q[1] };
+        }),
+        samples,
+        roadHalf: hw, edgeHalf: hw + 2, keepHalf: hw + 3.5,
       });
     }
     this.spawnPoint = null;     // 出生点：编辑器设置的 spawn 优先，未设置时用描边内容包围盒中心
@@ -177,13 +213,21 @@ export class City {
     const b = this.bounds;
     const w = b.maxX - b.minX + 60;
     const d = b.maxZ - b.minZ + 60;
-    const asphalt = makeAsphaltTexture();
-    // 按世界尺寸换算平铺次数：一张图固定 16m，描边路面用同一周期算 uv（见 customMap）
-    asphalt.repeat.set(w / ASPHALT_TILE, d / ASPHALT_TILE);
-    const mat = new THREE.MeshStandardMaterial({ map: asphalt, color: 0xffffff, roughness: 0.95, metalness: 0.0 });
-    const road = new THREE.Mesh(new THREE.PlaneGeometry(w, d), mat);
-    road.rotation.x = -Math.PI / 2;
-    road.position.set((b.minX + b.maxX) / 2, 0, (b.minZ + b.maxZ) / 2);
+    // 世界米制 planar uv（与描边路面 customMap.planarUV 同式）：横纵路地面与描边路
+    // 共用同一张贴图同一世界相位，交接处颗粒/明暗斑/轮迹无缝衔接（此前 repeat 平铺
+    // 与 planarUV 相位错开且 V 轴镜像，路缘两侧纹理对不上）
+    const geo = new THREE.PlaneGeometry(w, d)
+      .rotateX(-Math.PI / 2)
+      .translate((b.minX + b.maxX) / 2, 0, (b.minZ + b.maxZ) / 2);
+    const gpos = geo.attributes.position;
+    const guv = new Float32Array(gpos.count * 2);
+    for (let i = 0; i < gpos.count; i++) {
+      guv[i * 2] = gpos.getX(i) / ASPHALT_TILE;
+      guv[i * 2 + 1] = gpos.getZ(i) / ASPHALT_TILE;
+    }
+    geo.setAttribute("uv", new THREE.BufferAttribute(guv, 2));
+    const mat = new THREE.MeshStandardMaterial({ map: makeAsphaltTexture(), color: 0xffffff, roughness: 0.95, metalness: 0.0 });
+    const road = new THREE.Mesh(geo, mat);
     road.receiveShadow = true;
     this.group.add(road);
 
@@ -199,28 +243,64 @@ export class City {
     // downtown roads stay exactly as-is; ordinary "street" roads are appended
     // on each side so the procedural city scales to the configured map size.
     // 用户地图：延伸街默认不生成，地图数据 extRoads 勾选后才生成；默认台北不受限。
+    // 拼接路：程序化城市开启时只补「边界路」—— 拼接路越出已有路网的外侧，每侧
+    // 至多补一条边界大道（+120m 余量），横纵路因此延伸到与拼接路相交、沿线街区
+    // 能生成；不按固定间距铺满网格（避免产生大片用户没画的街道）。
+    // 显式勾选「程序化延伸街道」仍按固定间距铺满世界边界（既有行为）。
     const GX = EXT_STEP_X, GZ = EXT_STEP_Z, b = this.bounds;
     let n = 0;
     // 延伸路网分级：每 3 条升级为林荫大道，其余为街巷（规格见 extRoadSpec）。
     // 外围因此有主干路 / 次干路的层级，而不是一整片等宽窄巷 —— 从高处也能读出城市骨架。
     const ext = (at, step) => ({ id: "ext" + (n++), at, ...extRoadSpec(at, step) });
     if ((!this.data || !!this.data.extRoads) && xs.length && zs.length) {
-      while (xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + GX, GX));
-      while (xs[0].at > b.minX) xs.unshift(ext(xs[0].at - GX, GX));
-      while (zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + GZ, GZ));
-      while (zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - GZ, GZ));
+      // guard：边界异常（Infinity/NaN 被污染）时比较恒真会死循环，单方向封顶 600 条
+      let guard = 600;
+      while (guard-- > 0 && xs[xs.length - 1].at < b.maxX) xs.push(ext(xs[xs.length - 1].at + GX, GX));
+      guard = 600;
+      while (guard-- > 0 && xs[0].at > b.minX) xs.unshift(ext(xs[0].at - GX, GX));
+      guard = 600;
+      while (guard-- > 0 && zs[zs.length - 1].at < b.maxZ) zs.push(ext(zs[zs.length - 1].at + GZ, GZ));
+      guard = 600;
+      while (guard-- > 0 && zs[0].at > b.minZ) zs.unshift(ext(zs[0].at - GZ, GZ));
+    } else if (this.data && this.gen.procedural && xs.length && zs.length) {
+      // 拼接路参与街区划分：整条拼接路完全越出某一侧路网时，贴其近端边缘补一条
+      // 「虚拟边界路」（virtual: true）—— 不画标线 / 不产生路口 / 不进交通图，
+      // 仅作为街区划分的外边界，让路网与拼接路之间的相交区域生成建筑（建筑由
+      // 拼接路走廊自动避让）；横纵路的标线段自然延伸到拼接路边。
+      const tiles = this.data.features.roadTiles || [];
+      if (tiles.length) {
+        let mnx = Infinity, mxx = -Infinity, mnz = Infinity, mxz = -Infinity;
+        for (const t of tiles) {
+          const s = Math.sin(t.rot || 0), c = Math.cos(t.rot || 0);
+          const ex = Math.abs(c) * ((t.w || 2) / 2) + Math.abs(s) * ((t.len || 3) / 2) + 3; // +3: 端头斜切外扩余量
+          const ez = Math.abs(s) * ((t.w || 2) / 2) + Math.abs(c) * ((t.len || 3) / 2) + 3;
+          if (t.x - ex < mnx) mnx = t.x - ex;
+          if (t.x + ex > mxx) mxx = t.x + ex;
+          if (t.z - ez < mnz) mnz = t.z - ez;
+          if (t.z + ez > mxz) mxz = t.z + ez;
+        }
+        const vrt = (at, step) => ({ id: "vbk" + (n++), at, virtual: true, ...extRoadSpec(at, step) });
+        const M = 2; // 虚拟边界贴拼接路近端边缘，建筑与路缘的间距由走廊避让负责
+        // 仅当整条拼接路都在该侧路网之外时才补（跨界/在路网内部时既有街区 + 走廊避让已覆盖）
+        if (mnx > xs[xs.length - 1].at) xs.push(vrt(mnx - M, GX));
+        else if (mxx < xs[0].at) xs.unshift(vrt(mxx + M, GX));
+        if (mnz > zs[zs.length - 1].at) zs.push(vrt(mnz - M, GZ));
+        else if (mxz < zs[0].at) zs.unshift(vrt(mxz + M, GZ));
+      }
     }
 
     this.roadsX = xs; this.roadsZ = zs;
 
-    // intersections
+    // intersections（虚拟边界路不产生路口/斑马线）
     xs.forEach((rx, ix) => zs.forEach((rz, iz) => {
+      if (rx.virtual || rz.virtual) return;
       this.intersections.push({ ix, iz, x: rx.at, z: rz.at, hx: asphaltHalf(rx), hz: asphaltHalf(rz) });
     }));
 
     // markings per segment
     for (let i = 0; i < xs.length; i++) {
       const rx = xs[i];
+      if (rx.virtual) continue; // 虚拟边界路不可见：不画标线
       const ah = asphaltHalf(rx);
       for (let j = 0; j < zs.length - 1; j++) {
         const za = zs[j].at + asphaltHalf(zs[j]);
@@ -240,6 +320,7 @@ export class City {
     }
     for (let j = 0; j < zs.length; j++) {
       const rz = zs[j];
+      if (rz.virtual) continue; // 虚拟边界路不可见：不画标线
       const ah = asphaltHalf(rz);
       for (let i = 0; i < xs.length - 1; i++) {
         const xa = xs[i].at + asphaltHalf(xs[i]);
@@ -262,16 +343,20 @@ export class City {
       this._crosswalks(it);
     }
 
-    // traffic graph edges
+    // traffic graph edges（虚拟边界路不进交通图：车流不会开上不可见的路）
     for (let i = 0; i < xs.length; i++) {
+      if (xs[i].virtual) continue;
       for (let j = 0; j < zs.length - 1; j++) {
+        if (zs[j].virtual || zs[j + 1].virtual) continue;
         const a = { x: xs[i].at, z: zs[j].at, ix: i, iz: j };
         const b = { x: xs[i].at, z: zs[j + 1].at, ix: i, iz: j + 1 };
         this._addEdgePair(a, b, "z", xs[i]);
       }
     }
     for (let j = 0; j < zs.length; j++) {
+      if (zs[j].virtual) continue;
       for (let i = 0; i < xs.length - 1; i++) {
+        if (xs[i].virtual || xs[i + 1].virtual) continue;
         const a = { x: xs[i].at, z: zs[j].at, ix: i, iz: j };
         const b = { x: xs[i + 1].at, z: zs[j].at, ix: i + 1, iz: j };
         this._addEdgePair(a, b, "x", zs[j]);

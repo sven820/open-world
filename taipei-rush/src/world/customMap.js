@@ -4,7 +4,7 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { mapBounds } from "../data/cityData.js";
-import { ASPHALT_TILE, makeAsphaltTexture } from "./textures.js";
+import { ASPHALT_TILE, makeAsphaltTexture, makeRoadTileTexture } from "./textures.js";
 
 const wallMat = () => new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.85 });
 const roofMat = () => new THREE.MeshStandardMaterial({ color: 0x6f6a60, roughness: 0.9 });
@@ -19,6 +19,335 @@ function roadMat() {
   return asphaltMat;
 }
 const sidewalkMat = () => new THREE.MeshStandardMaterial({ color: 0x9aa2ab, roughness: 0.92 });
+// 拼接式路块材质：整块贴图（含路缘石/标线），UV 0..1，按尺寸+样式缓存
+const tileMatCache = new Map();
+function roadTileMat(len, w, style, lanes) {
+  const key = `${len}x${w}:${style}:${lanes}`;
+  let m = tileMatCache.get(key);
+  if (!m) {
+    m = new THREE.MeshStandardMaterial({
+      map: makeRoadTileTexture(len, w, style, lanes), roughness: 0.94, metalness: 0,
+    });
+    tileMatCache.set(key, m);
+  }
+  return m;
+}
+// 同尺寸路块共享几何已由 rtTileQuadGeometry 按端头参数逐块生成取代
+// （端头取决于相邻块，无法按尺寸共享；单块几十个顶点，开销可忽略）
+/* ---------------- 拼接路块转角对接（圆弧转角 / 端头斜切 miter / 平口焊接） ---------------- */
+// 矩形路块按角度拼接时，弯道外侧出现楔形缺口、内侧两块互相重叠（路缘石与
+// 边线在重叠区交叉穿行）。基础方案借鉴相框拼角：把每块端头按「两块侧边线的
+// 交点连线」切割 —— 切割线在世界系由两块共同确定，相接两块的端头顶点精确
+// 落在同一条直线上：外缘连续无缺口、内缘不再交叉，任意转角(<150°)严格无缝，
+// 且对端口舍入/漂移（旧地图 ~cm 级错位）免疫 —— 两块各自求自己角点与公共
+// 切割线的交点，误差被切割线本身吸收。
+// 端口配对放宽到 1.5m（RT_PAIR_TOL）：gizmo 手挪 / 自由落钉造成的厘米~米级
+// 错位也能焊上（正是切割线公式的强项），磁吸/链条放置的精确端口行为不变。
+// 小转角(<3.5°)时侧边线近乎平行、交点发散到远处，改用「过端口中点、垂直于
+// 前进角平分方向」的公共垂线焊接平口 —— 两块原本各自垂直断开留下的楔形缝
+// （缝宽 ≈ 半宽×转角）同样闭合。
+// 圆弧转角（更接近真实道路的曲线转弯）：等宽块优先用相切圆弧代替直斜切 ——
+// 圆心 C 在世界系唯一确定（两块轴线各向弯内侧平移 R 后的交点，随 R 线性移动），
+// 两块各裁直 t_i（= 圆心到端口的投影差），端头之间补一段环形带（半径 R±h）；
+// 两块半带共用同一 C/R/半角，角平分面处精确共边，路缘石/边线沿圆弧连续转向。
+// 纯派生计算不落数据，编辑器（ui/editor3d/roadTiles.js）与运行时共用同一套逻辑。
+
+export const RT_PAIR_TOL = 1.5;  // 端口配对半径：≤1.5m 即视为相接（宽限救回手挪/自由落钉的错位——
+                                 // 端头切割线由两块共同确定，对端口错位天然免疫；磁吸/链条放置本就精确）
+const RT_MIN_MITER_ANGLE = 0.06; // 转角小于 ~3.5° 不做斜切/圆弧，改用平口焊接（公共垂线）
+const RT_MAX_MITER_ANGLE = (Math.PI * 5) / 6; // 转角超过 150° 不处理（近乎掉头的叠放，无法挽救）
+
+// 块的 A/B 端口世界坐标（与 ui/editor3d/roadTiles.tilePorts 同式，跨层复制的纯函数）
+function rtTilePorts(t) {
+  const s = Math.sin(t.rot || 0), c = Math.cos(t.rot || 0);
+  const hl = (t.len || 3) / 2;
+  return [
+    { x: t.x - s * hl, z: t.z - c * hl },
+    { x: t.x + s * hl, z: t.z + c * hl },
+  ];
+}
+
+// 端口相接的块对 [[tileA, tileB, { x, z, d }], ...]（1m 网格桶聚类，O(n)）。
+// 同一块对允许多对端口各自配对（平行错放的两块 A/A、B/B 端都对得上时两端都对齐）；
+// P.d = 两端口距离，rtMiters 用它做「同端多对相接时的优先级」。
+export function rtPortPairs(tiles) {
+  const CELL = 1;
+  const ports = [];
+  for (const t of tiles || []) {
+    const s = Math.sin(t.rot || 0), c = Math.cos(t.rot || 0);
+    const hl = (t.len || 3) / 2;
+    ports.push({ t, end: 0, x: t.x - s * hl, z: t.z - c * hl });
+    ports.push({ t, end: 1, x: t.x + s * hl, z: t.z + c * hl });
+  }
+  const buckets = new Map();
+  for (const p of ports) {
+    const k = Math.floor(p.x / CELL) + "," + Math.floor(p.z / CELL);
+    let b = buckets.get(k);
+    if (!b) buckets.set(k, (b = []));
+    b.push(p);
+  }
+  const pairs = [];
+  const seen = new Set();
+  for (const p of ports) {
+    const cx = Math.floor(p.x / CELL), cz = Math.floor(p.z / CELL);
+    // ±2 桶覆盖 RT_PAIR_TOL（桶内最远 2m + 半径 1.5m 需要 5×5 邻域）
+    for (let i = -2; i <= 2; i++) {
+      for (let j = -2; j <= 2; j++) {
+        const b = buckets.get((cx + i) + "," + (cz + j));
+        if (!b) continue;
+        for (const q of b) {
+          if (q.t === p.t) continue;
+          const d = Math.hypot(p.x - q.x, p.z - q.z);
+          if (d < RT_PAIR_TOL) {
+            const key = p.t.id < q.t.id
+              ? p.t.id + ":" + p.end + "|" + q.t.id + ":" + q.end
+              : q.t.id + ":" + q.end + "|" + p.t.id + ":" + p.end;
+            if (!seen.has(key)) {
+              seen.add(key);
+              pairs.push([p.t, q.t, { x: (p.x + q.x) / 2, z: (p.z + q.z) / 2, d }]);
+            }
+          }
+        }
+      }
+    }
+  }
+  return pairs;
+}
+
+// 每块两端的对接参数：Map<id, { a, b }>。端记录两种：
+//  · { mode:'arc',   ang, side, R, half, t }  圆弧转角：t = 本块裁直长度（圆心到
+//                                             本块端线的投影），公共圆心对两块一致
+//  · { mode:'miter', ang, m1, m2 }            直线对接：m1/m2 = 端头 +x/−x 角沿
+//                                             前进方向的外向延伸量（正 = 伸出块外，
+//                                             B 端角 z=+L+m，A 端角 z=−L−m）
+//  a/b = 入口端（本地 z=-len/2）/ 出口端（z=+len/2）；arc 的 side = 弯道外侧在
+//  本地哪侧（+1 = +x，-1 = -x；任意转角下相接两块同号）。均为纯派生数据。
+//  miter 端两角必落在同一条公共切割线上 —— 与相邻块的端头严格共线无缝。
+export function rtMiters(tiles) {
+  const map = new Map();
+  const rec = (t) => {
+    let r = map.get(t.id);
+    if (!r) map.set(t.id, (r = { t, a: null, b: null }));
+    return r;
+  };
+  // 直线求交：p1 + u·d1 = p2 + v·d2（|d1×d2| 过小时返回 null）
+  const isect = (p1x, p1z, d1x, d1z, p2x, p2z, d2x, d2z) => {
+    const det = d1x * d2z - d1z * d2x;
+    if (Math.abs(det) < 1e-9) return null;
+    const u = ((p2x - p1x) * d2z - (p2z - p1z) * d2x) / det;
+    return { x: p1x + d1x * u, z: p1z + d1z * u };
+  };
+  // 端头两角的世界点(+x 角 q1 / −x 角 q2) → 端记录：角点投影到本地 z，
+  // 与平端口 z=±L 的差即延伸量
+  const endRec = (t, end, ang, q1, q2) => {
+    const s = Math.sin(t.rot || 0), c = Math.cos(t.rot || 0);
+    const L = (t.len || 3) / 2;
+    const z1 = (q1.x - t.x) * s + (q1.z - t.z) * c;
+    const z2 = (q2.x - t.x) * s + (q2.z - t.z) * c;
+    return end === "b"
+      ? { mode: "miter", ang, m1: z1 - L, m2: z2 - L }
+      : { mode: "miter", ang, m1: -(z1 + L), m2: -(z2 + L) };
+  };
+  for (const [t1, t2, P] of rtPortPairs(tiles)) {
+    const dr = (t2.rot || 0) - (t1.rot || 0);
+    const d = Math.atan2(Math.sin(dr), Math.cos(dr)); // wrap 到 [-π, π]
+    const ang = Math.abs(d);
+    if (ang > RT_MAX_MITER_ANGLE) continue;
+    const f1 = { x: Math.sin(t1.rot || 0), z: Math.cos(t1.rot || 0) };
+    const n1 = { x: f1.z, z: -f1.x }; // 本地 +x 侧向
+    const f2 = { x: Math.sin(t2.rot || 0), z: Math.cos(t2.rot || 0) };
+    const n2 = { x: f2.z, z: -f2.x };
+    const h1 = (t1.w || 2) / 2, h2 = (t2.w || 2) / 2;
+    const side = d > 0 ? -1 : 1; // 右转（d>0）外侧在本地 -x 侧
+    // 端口 → 端（距 P 近者）
+    const nearEnd = (t) => {
+      const s = Math.sin(t.rot || 0), c = Math.cos(t.rot || 0), hl = (t.len || 3) / 2;
+      const dA = (P.x - t.x + s * hl) ** 2 + (P.z - t.z + c * hl) ** 2;
+      const dB = (P.x - t.x - s * hl) ** 2 + (P.z - t.z - c * hl) ** 2;
+      return dB < dA ? "b" : "a";
+    };
+    const end1 = nearEnd(t1), end2 = nearEnd(t2);
+    let e1 = null, e2 = null;
+    if (ang < RT_MIN_MITER_ANGLE) {
+      // 平口焊接：侧边线近乎平行、交点发散到远处，公共切割线改取「过端口
+      // 中点 P、垂直于前进角平分方向」—— 两块各自求侧边线与该线的交点作为
+      // 端角，原本各自垂直断开留下的楔形缝（缝宽 ≈ 半宽×转角）随之闭合
+      let bx = f1.x + f2.x, bz = f1.z + f2.z;
+      const bl = Math.hypot(bx, bz) || 1;
+      const dx = -bz / bl, dz = bx / bl; // 切割线方向（⊥ 角平分方向）
+      const butt = (t, end) => {
+        const h = (t.w || 2) / 2;
+        const nx = Math.cos(t.rot || 0), nz = -Math.sin(t.rot || 0);
+        const fx = Math.sin(t.rot || 0), fz = Math.cos(t.rot || 0);
+        const q1 = isect(t.x + h * nx, t.z + h * nz, fx, fz, P.x, P.z, dx, dz);
+        const q2 = isect(t.x - h * nx, t.z - h * nz, fx, fz, P.x, P.z, dx, dz);
+        return q1 && q2 ? endRec(t, end, ang, q1, q2) : null;
+      };
+      e1 = butt(t1, end1);
+      e2 = butt(t2, end2);
+    } else {
+      // 精确对接：公共切割线 = 两块同号侧边线交点的连线（+x 配 +x、−x 配 −x，
+      // 任意转角/宽度差/端口错位下都成立）—— 两块端角精确共线
+      const qP = isect(t1.x + h1 * n1.x, t1.z + h1 * n1.z, f1.x, f1.z,
+                       t2.x + h2 * n2.x, t2.z + h2 * n2.z, f2.x, f2.z);
+      const qM = isect(t1.x - h1 * n1.x, t1.z - h1 * n1.z, f1.x, f1.z,
+                       t2.x - h2 * n2.x, t2.z - h2 * n2.z, f2.x, f2.z);
+      if (qP && qM) {
+        e1 = endRec(t1, end1, ang, qP, qM);
+        e2 = endRec(t2, end2, ang, qP, qM);
+        // 等宽：优先圆弧转角。圆心 C 在世界系唯一：把两块轴线各向弯内侧平移 R，
+        // 交点即 C(R)（随 R 线性移动）→ 两块半带共用 C/R/half，角平分面精确共边；
+        // 裁直长度 t_i 改为按本块端线到 C 的投影逐块求解，端口错位不再撕裂圆弧
+        if (Math.abs(h1 - h2) < 1e-4) {
+          const half = ang / 2;
+          const C0 = isect(t1.x, t1.z, f1.x, f1.z, t2.x, t2.z, f2.x, f2.z);
+          const C1 = isect(t1.x - side * n1.x, t1.z - side * n1.z, f1.x, f1.z,
+                           t2.x - side * n2.x, t2.z - side * n2.z, f2.x, f2.z);
+          if (C0 && C1) {
+            const dcx = C1.x - C0.x, dcz = C1.z - C0.z;
+            const tOf = (t, end, R) => {
+              const fx = Math.sin(t.rot || 0), fz = Math.cos(t.rot || 0);
+              const zc = (C0.x + R * dcx - t.x) * fx + (C0.z + R * dcz - t.z) * fz;
+              const L = (t.len || 3) / 2;
+              return end === "b" ? L - zc : zc + L;
+            };
+            const len1 = t1.len || 3, len2 = t2.len || 3;
+            const a1 = tOf(t1, end1, 0), b1 = tOf(t1, end1, 1) - a1;
+            const a2 = tOf(t2, end2, 0), b2 = tOf(t2, end2, 1) - a2;
+            // 可行 R 区间：内半径为正（R ≥ 1.06h）+ t_i 保持在 [−0.15, 0.75] 块长。
+            // 0.75：钝角弯允许裁直吃掉大半块长换圆弧 —— 收得太紧会让 95°~130°
+            // 掉进直线斜切区，外角伸出半个块长成尖刺（锯齿状连接的来源之一）
+            let lo = h1 * 1.06;
+            let hi = Math.min(h1 * 2.5, (0.75 * Math.min(len1, len2)) / Math.tan(half));
+            const fit = (a, b, min, max) => {
+              if (Math.abs(b) < 1e-9) return a >= min && a <= max;
+              let r1 = (min - a) / b, r2 = (max - a) / b;
+              if (r1 > r2) { const tmp = r1; r1 = r2; r2 = tmp; }
+              lo = Math.max(lo, r1);
+              hi = Math.min(hi, r2);
+              return lo <= hi;
+            };
+            if (hi > lo &&
+                fit(a1, b1, -0.15 * len1, 0.75 * len1) &&
+                fit(a2, b2, -0.15 * len2, 0.75 * len2) &&
+                hi > lo) {
+              const R = hi;
+              e1 = { mode: "arc", ang, side, R, half, t: tOf(t1, end1, R) };
+              e2 = { mode: "arc", ang, side, R, half, t: tOf(t2, end2, R) };
+            }
+          }
+        }
+      }
+    }
+    const set = (t, end, e, d) => {
+      if (!e) return;
+      e._d = d || 0;
+      const r = rec(t);
+      const cur = r[end];
+      // 同端多对相接：优先端口更近者（宽容配对下，真正的延续压过邻近分支的
+      // 大转角）；距离相同（端口重合的交叉）取转角更大者
+      if (!cur || e._d < cur._d - 1e-9 ||
+          (Math.abs(e._d - cur._d) < 1e-9 && e.ang > cur.ang)) r[end] = e;
+    };
+    set(t1, end1, e1, P.d);
+    set(t2, end2, e2, P.d);
+  }
+  // 防退化后置钳制：同一块两端的「端头占用」（miter = 两角最大延伸，arc = t）
+  // 合计不得超过块长（切割边不得在块内交叉成蝶形）。arc 的构造上已受限，只收缩
+  // miter 端 —— 仅「短块 + 两端都是急弯」的极端叠放会触发，优先保证几何不自交
+  for (const r of map.values()) {
+    const len = r.t.len || 3;
+    const tSum = (r.a && r.a.mode === "arc" ? r.a.t : 0) + (r.b && r.b.mode === "arc" ? r.b.t : 0);
+    const ext = (e) => (e && e.mode === "miter" ? Math.max(Math.abs(e.m1), Math.abs(e.m2)) : 0);
+    const mA = ext(r.a), mB = ext(r.b);
+    const mSum = mA + mB;
+    if (mSum > len * 0.98 - tSum && mSum > 0) {
+      const k = Math.max(0, len * 0.98 - tSum) / mSum;
+      if (mA) { r.a.m1 *= k; r.a.m2 *= k; }
+      if (mB) { r.b.m1 *= k; r.b.m2 *= k; }
+    }
+  }
+  return map;
+}
+
+// 端记录 → 几何缓存键片段（编辑器 ui/editor3d/roadTiles.js 的几何缓存共用，
+// 端记录字段变化时两处自动同步）
+export const rtEndKey = (e) => !e ? "-"
+  : e.mode === "arc" ? `a${e.t.toFixed(3)},${e.side},${e.R.toFixed(2)},${e.half.toFixed(3)}`
+  : `m${e.m1.toFixed(3)},${e.m2.toFixed(3)}`;
+
+// 路块几何：中心为原点、沿本地 +z 前进、法线 +y。eA/eB = 两端对接参数
+// （null = 平口；mode 'miter' 直线对接（逐角延伸量）/ 'arc' 圆弧转角，见 rtMiters）。
+// 主体四边形顶点按物理侧边排序（A端+x → B端+x → B端−x → A端−x），两端外侧在
+// 不同物理侧（S 弯）也不会自交。UV 沿本地坐标线性映射（x→u 全宽 0..1，v =
+// z/len + 0.5）：miter 端 v 允许略超 0..1（ClampToEdge 取边行像素），arc 端裁边
+// 内缩 —— 路缘石/边线像素列随端头转向，弯道标线视觉连续。arc 端在裁边之外拼接
+// 半段环形带（切线边与裁边重合、角平分面与邻块半带共边），圆弧段路缘石/标线
+// 连续，中心虚线自然延续后收笔。
+export function rtTileQuadGeometry(len, w, eA, eB, y) {
+  const h = w / 2, L = len / 2;
+  // 端头两角的 z：z1 = +x 侧角、z2 = −x 侧角（sign=+1 B 端 / -1 A 端）
+  const endZ = (e, sign) => {
+    if (!e) return [sign * L, sign * L];
+    if (e.mode === "arc") { const z = sign * (L - e.t); return [z, z]; }
+    return sign > 0 ? [L + e.m1, L + e.m2] : [-L - e.m1, -L - e.m2];
+  };
+  const [az1, az2] = endZ(eA, -1), [bz1, bz2] = endZ(eB, 1);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute([
+    h, y, az1,  // A 端 +x 侧
+    h, y, bz1,  // B 端 +x 侧
+    -h, y, bz2, // B 端 −x 侧
+    -h, y, az2, // A 端 −x 侧
+  ], 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute([
+    1, az1 / len + 0.5,
+    1, bz1 / len + 0.5,
+    0, bz2 / len + 0.5,
+    0, az2 / len + 0.5,
+  ], 2));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
+  g.setIndex([0, 2, 1, 0, 3, 2]); // 上方看逆时针 → 法线朝上
+  const parts = [g];
+  if (eA && eA.mode === "arc") parts.push(rtArcBandGeometry(len, w, eA, -1, y));
+  if (eB && eB.mode === "arc") parts.push(rtArcBandGeometry(len, w, eB, 1, y));
+  return parts.length > 1 ? mergeGeometries(parts) : g;
+}
+
+// 圆弧转角的半段环形带（本块一侧）：从裁边（切线，φ=0）扫到角平分面（φ=half），
+// 与邻块半带在此共边。side = 弯道外侧在本地 ±x 侧；endSign = +1 B 端 / -1 A 端。
+// 圆心在弯内侧 (−side·R, z0)，内/外边缘半径 R∓h、R+h，贴图 v 随弧长 R·φ 延续
+// （t = R·tan(half) > R·half，v 始终落在 0..1 内，不触发 ClampToEdge）。
+function rtArcBandGeometry(len, w, e, endSign, y) {
+  const h = w / 2, L = len / 2;
+  const { R, half, t, side } = e;
+  const N = Math.max(2, Math.ceil(half / 0.17)); // ~10° 步进
+  const z0 = endSign * (L - t);                   // 裁边位置
+  const vT = endSign > 0 ? 1 - t / len : t / len; // 裁边处 v
+  const uOut = side > 0 ? 1 : 0;                  // 外侧边 u（+x 侧为 1）
+  const pos = [], uv = [], nrm = [];
+  for (let k = 0; k <= N; k++) {
+    const phi = (half * k) / N, c = Math.cos(phi), s = Math.sin(phi);
+    pos.push(side * ((R + h) * c - R), y, z0 + endSign * (R + h) * s); // 外边缘
+    pos.push(side * ((R - h) * c - R), y, z0 + endSign * (R - h) * s); // 内边缘
+    const v = vT + (endSign * R * phi) / len;
+    uv.push(uOut, v, 1 - uOut, v);
+    nrm.push(0, 1, 0, 0, 1, 0);
+  }
+  const idx = [];
+  const flip = side * endSign > 0; // 换端/换侧的镜像会翻转三角形朝向
+  for (let k = 0; k < N; k++) {
+    const a = k * 2;
+    if (flip) idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    else idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+  g.setIndex(idx);
+  return g;
+}
 const medianBedMat = () => new THREE.MeshStandardMaterial({ color: 0x9aa2ab, roughness: 0.92 });
 const hedgeMat = () => new THREE.MeshStandardMaterial({ color: 0x2f5426, roughness: 1 });
 const markWhiteMat = () => new THREE.MeshBasicMaterial({ color: 0xe8e8e2, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
@@ -331,6 +660,23 @@ export function customBBox(data) {
   };
   for (const r of data.features.roads || []) for (const [x, z] of r.points) ext(x, z);
   for (const r of data.features.rivers || []) for (const [x, z] of r.points) ext(x, z);
+  // 拼接路块：四角（前进向 f=(sinθ,cosθ)，侧向 side=(cosθ,−sinθ)）；
+  // 端头斜切的外角会伸出块外，偏移量一并计入
+  const tileMiters = rtMiters(data.features.roadTiles || []);
+  for (const t of data.features.roadTiles || []) {
+    const mm = tileMiters.get(t.id);
+    // 端头沿前进方向伸出块外的量：miter = 两角最大外向延伸；arc = 外弧中点越过原端线的距离
+    const endExt = (e) => !e ? 0 : e.mode === "arc"
+      ? Math.max(0, (e.R + (t.w || 2) / 2) * Math.sin(e.half) - e.t)
+      : Math.max(0, e.m1, e.m2);
+    const mx = mm ? Math.max(endExt(mm.a), endExt(mm.b)) : 0;
+    const hl = (t.len || 3) / 2 + mx, hw = (t.w || 2) / 2;
+    const s = Math.sin(t.rot || 0), c = Math.cos(t.rot || 0);
+    ext(t.x + s * hl + c * hw, t.z + c * hl - s * hw);
+    ext(t.x + s * hl - c * hw, t.z + c * hl + s * hw);
+    ext(t.x - s * hl + c * hw, t.z - c * hl - s * hw);
+    ext(t.x - s * hl - c * hw, t.z - c * hl + s * hw);
+  }
   for (const o of data.objects || []) {
     ext(o.pos[0], o.pos[1]);
     const box = footprintAABB(o);
@@ -623,6 +969,20 @@ export function buildCustomMap(data, colliders, junctions = []) {
   for (const r of data.features.rivers || []) {
     if (!r.points || r.points.length < 2) continue;
     const m = new THREE.Mesh(stripGeometry(polyline(r.points), r.width || 26, 0.05), riverMat());
+    m.receiveShadow = true;
+    group.add(m);
+  }
+  // 拼接式路块（3D 编辑器「路块拼接」）：整块贴图，抬到描边路面(0.18)之上避免 z-fighting；
+  // 端头按相邻块转角斜切（miter），弯道外缘连续、内缘不重叠
+  const tiles = data.features.roadTiles || [];
+  const tileMiters = rtMiters(tiles);
+  for (const t of tiles) {
+    const len = t.len || 3, w = t.w || 2;
+    const mi = tileMiters.get(t.id);
+    const geo = rtTileQuadGeometry(len, w, mi && mi.a, mi && mi.b, 0.19);
+    const m = new THREE.Mesh(geo, roadTileMat(len, w, t.style || "dash", t.lanes || 1));
+    m.position.set(t.x, 0, t.z);
+    m.rotation.y = t.rot || 0;
     m.receiveShadow = true;
     group.add(m);
   }

@@ -659,6 +659,21 @@ export class MapEditor {
           c.setLineDash([]);
         }
       }
+      // 拼接式路块（3D 编辑器放置）：旋转矩形示意（编辑在 3D 编辑器完成）
+      c.fillStyle = "#56606e";
+      for (const t of f.roadTiles || []) {
+        c.save();
+        c.translate(this._w2sX(t.x), this._w2sY(t.z));
+        c.rotate(-(t.rot || 0)); // 世界 rotation.y → 屏幕 y 向下坐标系取反
+        const tw = (t.w || 2) * s, tl = (t.len || 3) * s;
+        c.fillRect(-tw / 2, -tl / 2, tw, tl);
+        if (s > 0.5) {
+          c.strokeStyle = "rgba(255,255,255,0.22)";
+          c.lineWidth = 1;
+          c.strokeRect(-tw / 2, -tl / 2, tw, tl);
+        }
+        c.restore();
+      }
       c.fillStyle = "#2c3947";
       c.strokeStyle = "#4b5b6e";
       c.lineWidth = 1;

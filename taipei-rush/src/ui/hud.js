@@ -1,5 +1,6 @@
 import { districtAt } from "../data/cityData.js";
 import { getRenderSettings } from "../config/renderSettings.js";
+import { polyCenterLine } from "../world/customMap.js";
 
 export class Hud {
   constructor(city, player, environment) {
@@ -81,12 +82,29 @@ export class Hud {
       r.points.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
       ctx.stroke();
     }
-    ctx.strokeStyle = "#9aa8b8";
+    // 描边道路与 2D 地图编辑器同一套显示样式：开路 = 按路宽填充的条带，
+    // 取面路 = 整体填充多边形。不再沿边界描边 —— 旧画法把取面路画成空心轮廓，
+    // 边线宽度随路宽与缩放放大，和横纵路的细线风格不一致。放大后叠加中心虚线。
     for (const r of cu.roads) {
-      ctx.lineWidth = Math.max(1.2, (r.width || 12) * sc);
+      if (!r.points || r.points.length < 2) continue;
+      if (r.closed && r.points.length >= 3) {
+        ctx.fillStyle = "#2c3947";
+        ctx.beginPath();
+        r.points.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
+        ctx.closePath();
+        ctx.fill();
+        if (sc > 0.18) {
+          const cl = polyCenterLine(r.points, 80);
+          if (cl) this._dashLine(ctx, wx, wz, [cl[0], cl[1]]);
+        }
+        continue;
+      }
+      ctx.strokeStyle = "#9aa8b8";
+      ctx.lineWidth = Math.max(2, (r.width || 12) * sc);
       ctx.beginPath();
       r.points.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
       ctx.stroke();
+      if (sc > 0.18) this._dashLine(ctx, wx, wz, r.points);
     }
     ctx.fillStyle = "#2c3947";
     ctx.strokeStyle = "#4b5b6e";
@@ -121,6 +139,17 @@ export class Hud {
       ctx.stroke();
       ctx.setLineDash([]);
     }
+  }
+
+  // 中心虚线（与 2D 编辑器同款：1px 白色 28%，8/10 虚线段）
+  _dashLine(ctx, wx, wz, pts) {
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([8, 10]);
+    ctx.beginPath();
+    pts.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   showNotify(text, ms = 2400) {

@@ -30,6 +30,11 @@ import {
   matRoad, matRiver, matBuilding, matRoof, stripGeometry,
   buildRoadMesh, buildRiverMesh, buildBuildingMesh, buildTreeMesh, buildLampMesh, buildObjectMesh,
 } from "./editor3d/meshes.js";
+import {
+  rtGhostState, rtUpdateGhost, rtPlace, rtStart, rtLeave, rtMarkDirty, rtDisposeGhost, rtRenderPanel,
+  rtRebuildOne, buildRoadTileMesh, TILE_STYLE_ZH, rtRoadGroupOf, tilePorts,
+} from "./editor3d/roadTiles.js";
+import { rtMiters, RT_PAIR_TOL } from "../world/customMap.js";
 
 export class MapEditor3d {
   // opts: { map, onSave(data)=>bool, onPlay(), onClose() }
@@ -49,11 +54,26 @@ export class MapEditor3d {
     this._q = new THREE.Quaternion();
     this._snap = 5;
     this._dirty = false;
+    // 路块拼接工具状态（实现见 ui/editor3d/roadTiles.js）
+    this._rtLen = 20;         // 路块长度（米）= 链式放置时每步前进的距离
+    this._rtW = 10;           // 路块宽度（米，最小 6）
+    this._rtStep = 15;        // 角度步进（度，0 = 自由）
+    this._rtStyle = "dash";   // 贴图样式
+    this._rtLanes = 1;        // 每方向车道数（影响贴图车道分隔线）
+    this._rtChain = null;     // 链条粘滞端口 { x, z }（放置后 = 新块出口）
+    this._rtPin = null;       // 自由放置落钉点 { x, z }（两段式：落点 → 瞄准 → 放置）
+    this._rtGhostState = null; // 幽灵路块状态
+    this._rtYaw = 0;          // 自由放置时的上次方向
+    this._rtPortsDirty = true; // 空闲端口缓存脏标记
+    this._rtFreePorts = null;
+    this._rtLastRef = null;    // 自由放置时的方向参考点（上次块中心）
+    this._rtLastMovePt = null; // 上次光标世界坐标（判定光标是否真正移动）
     this._measureResult = null; // 上次测距结果 { points: [{x,z}], length }
     this._cesiumOn = localStorage.getItem("tr_e3_basemap") !== "0"; // 记住上次选择
-    // 图层显隐状态（图层控制面板）：持久化到 localStorage，重开编辑器后保持
-    this._layerVis = { base: true, img: true, anno: true, area: true, skeleton: true, road: true, river: true, object: true, origin: true, measure: true };
-    try { Object.assign(this._layerVis, JSON.parse(localStorage.getItem("tr_e3_layers") || "{}")); } catch { /* 忽略脏数据 */ }
+    // 图层显隐状态（图层控制面板）：默认全开；持久化用 v2 键，
+    // 旧键 tr_e3_layers 里存有旧版勾选失效期间写入的错误状态，弃用不读
+    this._layerVis = { base: true, img: true, anno: true, area: true, skeleton: true, road: true, river: true, roadTile: true, object: true, origin: true, measure: true };
+    try { Object.assign(this._layerVis, JSON.parse(localStorage.getItem("tr_e3_layers_v2") || "{}")); } catch { /* 忽略脏数据 */ }
     // 顶栏按钮等是 index.html 里的单例 DOM：监听挂到本实例 controller 上，
     // close() 一次性摘除。否则旧实例仍绑在同一个「保存」按钮上，保存时会把
     // 上一张地图按当前名称输入框的内容再写一遍（表现为另一张地图被改名）。
@@ -66,6 +86,7 @@ export class MapEditor3d {
     const root = document.getElementById("map-editor3d");
     root.classList.remove("hidden");
     document.getElementById("e3-name").value = this.map.name || "";
+    window.__e3 = this; // dev 调试句柄（同 cesium.js 约定）
 
     this._initThree();
     this._initUI();
@@ -101,6 +122,7 @@ export class MapEditor3d {
       for (const t of this._labelTex.values()) t.dispose();
       this._labelTex.clear();
     }
+    rtDisposeGhost(this); // 路块幽灵网格（非 entityRoot，不在 _rebuildAll 清理范围）
     window.removeEventListener("resize", this._onResize);
     window.removeEventListener("keydown", this._onKey);
     if (this._compassEl) {
@@ -203,7 +225,7 @@ export class MapEditor3d {
       if (this.sel && this.sel.kind === "area") this._syncAreaFromGroup(); // 拖拽中实时重烘焙曲率
       this._dirty = true;
     });
-    tc.addEventListener("mouseUp", () => { this._syncGizmoToData(); this._pushUndo("变换"); });
+    tc.addEventListener("mouseUp", () => { this._syncGizmoToData(true); this._pushUndo("变换"); });
     scene.add(tc.getHelper()); // r169 起 TransformControls 不再是 Object3D，需加 helper
 
     this._three = { renderer, scene, camera, canvas, raycaster, groundPlane, orbit, tc, areaGroup };
@@ -610,6 +632,7 @@ export class MapEditor3d {
     this.tool = t;
     document.querySelectorAll("#e3-tools .e3-tool").forEach((b) => b.classList.toggle("active", b.dataset.tool === t));
     this._syncRoadToolUI();
+    if (t !== "place-road") rtLeave(this); // 离开路块工具：清链条 + 藏幽灵（工具间来回切保留链不做，简单一致）
   }
 
   // 左侧「道路」按钮显示当前子模式（道路 / 地图描边 / 添加纵路 / 添加横路），子菜单高亮当前项
@@ -693,8 +716,9 @@ export class MapEditor3d {
       plane.constant = dropAt(hit.x, hit.z);
       if (!ray.intersectPlane(plane, hit)) return null;
     }
-    // 描边绘制中（草稿激活）绕过网格吸附：吸附会把弯路量化成锯齿台阶，严重走形
-    const snap = !this.draft && this._snap > 1 ? this._snap : 0;
+    // 描边绘制中（草稿激活）绕过网格吸附：吸附会把弯路量化成锯齿台阶，严重走形；
+    // 路块拼接同样绕过：位置由端口磁吸决定，网格量化会破坏端口对齐
+    const snap = !this.draft && this.tool !== "place-road" && this._snap > 1 ? this._snap : 0;
     return snap ? { x: Math.round(hit.x / snap) * snap, z: Math.round(hit.z / snap) * snap } : { x: hit.x, z: hit.z };
   }
   _pickObject(e) {
@@ -752,6 +776,8 @@ export class MapEditor3d {
       this.draft.redo = [];
       this._updateDraftPreview();
       this._renderAreaDraftPanel();
+    } else if (this.tool === "place-road") {
+      this._roadTilePlace(e); // 放置/延续路块链（磁吸与方向已在幽灵状态里算好）
     } else if (this.tool === "place-tree" || this.tool === "place-lamp") {
       const type = this.tool === "place-tree" ? "tree" : "lamp";
       this._addObject({ id: uid(), type, pos: [pt.x, pt.z], rot: 0, params: {} });
@@ -772,7 +798,14 @@ export class MapEditor3d {
       this._measureAddPoint(pt, e);
     } else if (this.tool === "select") {
       const picked = this._pickObject(e);
-      if (picked) this._select(picked.wrapper);
+      if (picked && picked.wrapper.kind === "roadTile") {
+        // 拼接路两级选择：端口连通的整条路优先（单击 = 选整条）；组已选中时
+        // 再点组内某块 = 回到单块编辑；孤立的散块（组内仅 1 块）直接单选
+        const grp = rtRoadGroupOf(this.map.features.roadTiles || [], picked.wrapper.data);
+        const inSelGroup = this.sel && this.sel.kind === "roadGroup" && grp.includes(picked.wrapper.data);
+        if (grp.length > 1 && !inSelGroup) this._selectRoadGroup(grp, picked.wrapper);
+        else this._select(picked.wrapper);
+      } else if (picked) this._select(picked.wrapper);
       else {
         const road = this._pickRoad(pt);
         if (road) this._selectRoad(road);
@@ -782,6 +815,7 @@ export class MapEditor3d {
   }
 
   _onMove(e) {
+    if (this.tool === "place-road") { this._roadTileMove(e); return; } // 幽灵路块跟随（无需草稿）
     const d = this.draft;
     if (!d || !(this.tool.startsWith("draw") || d.area || d.measure)) return;
     let pt = this._groundPoint(e);
@@ -1034,6 +1068,79 @@ export class MapEditor3d {
 
   _measureLabel(text, accent) { return measureLabel(this, text, accent); }
 
+  /* ---------------- 路块拼接（实现见 ui/editor3d/roadTiles.js） ---------------- */
+  _startRoadTile() { rtStart(this); }
+
+  _roadTileMove(e) {
+    const pt = this._groundPoint(e);
+    if (!pt) { this._rtGhostState = null; rtUpdateGhost(this); return; }
+    // 惯性基准 _rtLastMovePt 只在放置时写入：moved = 相对放置点累计位移，
+    // 慢速拖动也能累积触发转向（旧版逐事件覆盖导致慢移永远「未移动」）
+    this._rtGhostState = rtGhostState(this, pt, e.shiftKey);
+    rtUpdateGhost(this);
+    // 落钉瞄准中：状态栏实时回显方向角（0° = 北/+z，顺时针），方便对齐精确角度
+    if (this._rtPin && this._rtGhostState) {
+      const deg = ((this._rtGhostState.yaw * 180) / Math.PI % 360 + 360) % 360;
+      this.status(`瞄准中 · 方向 ${deg.toFixed(1)}° · 单击放置 · Esc 取消落点`);
+    }
+  }
+
+  _roadTilePlace(e) {
+    const pt = this._groundPoint(e);
+    if (!pt) return;
+    rtPlace(this, pt, e.shiftKey);
+  }
+
+  /* ---------------- 整条拼接路（端口连通分组） ---------------- */
+  // 分组是派生数据（rtRoadGroupOf 按端口连通现算）：不落数据，旧地图自动生效，
+  // 单块增删/挪动后分组自动跟随拓扑。组选中 = 质心上的代理对象挂 Gizmo，
+  // mouseUp 时把位移/旋转增量刚性应用到组内每块（端口贴合关系保持）。
+
+  _selectRoadGroup(tiles, focus) {
+    const wraps = tiles.map((t) => this._wrappers.get(t.id)).filter(Boolean);
+    if (!wraps.length) return;
+    let cx = 0, cz = 0;
+    for (const t of tiles) { cx += t.x; cz += t.z; }
+    cx /= tiles.length; cz /= tiles.length;
+    this._clearGroupVisuals();
+    if (!this._rtGroupProxy) this._rtGroupProxy = new THREE.Group();
+    const proxy = this._rtGroupProxy;
+    if (!proxy.parent) this._three.scene.add(proxy);
+    proxy.position.set(cx, 0, cz);
+    proxy.rotation.set(0, 0, 0);
+    const box = new THREE.Box3();
+    for (const w of wraps) box.expandByObject(w.root);
+    box.expandByScalar(0.5);
+    this._rtGroupHelper = new THREE.Box3Helper(box, 0x4ade80); // 绿框标出整条路的范围
+    this._three.scene.add(this._rtGroupHelper);
+    this._rtGroupBaseline = { px: cx, pz: cz, dr: 0, tiles: tiles.map((t) => ({ t, x: t.x, z: t.z, rot: t.rot || 0 })) };
+    this._rtGroupFocus = focus || wraps[0];
+    this._select({ kind: "roadGroup", data: tiles, root: proxy });
+    this.status(`已选中整条拼接路（${tiles.length} 块）· Gizmo 平移 / E 键旋转整条路 · 单击组内某块单独编辑 · Delete 删除整条路`);
+  }
+
+  _clearGroupVisuals() {
+    if (this._rtGroupHelper) {
+      this._three.scene.remove(this._rtGroupHelper);
+      if (this._rtGroupHelper.geometry) this._rtGroupHelper.geometry.dispose();
+      this._rtGroupHelper = null;
+    }
+    this._rtGroupBaseline = null;
+    this._rtGroupFocus = null;
+  }
+
+  _updateGroupHelper() {
+    if (!this._rtGroupHelper || !this.sel || this.sel.kind !== "roadGroup") return;
+    const box = new THREE.Box3();
+    for (const t of this.sel.data) {
+      const w = this._wrappers.get(t.id);
+      if (w) box.expandByObject(w.root);
+    }
+    box.expandByScalar(0.5);
+    this._rtGroupHelper.box.copy(box);
+    this._rtGroupHelper.update();
+  }
+
   /* ---------------- 范围描边（多边形地图范围） ---------------- */
   // 进入范围描边模式：单击加点，双击/Enter/「完成描边」按钮结束（≥3 点），Esc 取消；
   // 绘制中右侧面板停留在描边面板（点数 + 撤销/恢复/完成/取消），支持点级 Ctrl+Z / Ctrl+Y
@@ -1165,6 +1272,7 @@ export class MapEditor3d {
     root.visible = this._layerVis[kind] !== false; // 重建出的实体保持面板里的显隐状态
     // 物件整体下沉贴合球面（数据仍存平面 x/z，y 仅是渲染偏移，中心零基准）
     if (kind === "object") root.position.set(data.pos[0], -this._curveOffset(data.pos[0], data.pos[1]), data.pos[1]), root.rotation.y = data.rot || 0;
+    else if (kind === "roadTile") root.position.set(data.x, -this._curveOffset(data.x, data.z), data.z), root.rotation.y = data.rot || 0;
     root.add(object3d);
     const pickMeshes = [];
     object3d.traverse((o) => { if (o.isMesh) { o.userData.entityId = data.id; pickMeshes.push(o); } });
@@ -1189,6 +1297,12 @@ export class MapEditor3d {
     }
     for (const r of this.map.features.rivers) {
       this._makeWrapper("river", r, this._buildRiverMesh(r));
+    }
+    this.map.features.roadTiles = this.map.features.roadTiles || []; // 旧地图补空
+    rtMarkDirty(this); // 端口缓存随数据整体失效
+    const rtM = rtMiters(this.map.features.roadTiles); // 端头斜切参数（按相邻块转角）
+    for (const t of this.map.features.roadTiles) {
+      this._makeWrapper("roadTile", t, buildRoadTileMesh(this, t, false, rtM));
     }
     for (const o of this.map.objects) {
       const m = this._buildObjectMesh(o);
@@ -1217,6 +1331,9 @@ export class MapEditor3d {
     this._roadLines = [];
     const xs = this.map.roadsX.map((r) => ({ obj: r, at: r.at, ext: false })).sort((p, q) => p.at - q.at);
     const zs = this.map.roadsZ.map((r) => ({ obj: r, at: r.at, ext: false })).sort((p, q) => p.at - q.at);
+    // 与运行时 _buildRoads 同源：勾选「程序化延伸街道」= 按固定间距铺满世界边界。
+    // 拼接路 + 程序化城市时，运行时补的是「虚拟边界路」（不画线 / 无路口 / 不进
+    // 交通图，仅参与街区划分），因此预览不绘制任何额外道路 —— 用户只看到自己画的路。
     if (this.map.extRoads) {
       // 延伸路规格与运行时同源：大道 / 街巷的宽度在预览里也要一致
       const extAt = (at, step) => ({ at, ext: true, spec: extRoadSpec(at, step) });
@@ -1240,9 +1357,10 @@ export class MapEditor3d {
     const roadLine = (r, pts) => {
       const sel = this.sel && this.sel.data === r.obj;
       const worldW = r.ext ? asphaltHalf(r.spec) * 2 : asphaltHalf(r.obj) * 2;
-      const color = sel ? 0xf2c14e : r.ext ? 0x55637a : 0x8ea3bd;
+      // 路带贴图与「路块拼接」一致（沥青表面），tint 仅区分状态：选中金色 / 延伸路暗调
+      const color = sel ? 0xf2c14e : r.ext ? 0x8a93a2 : 0xffffff;
       // 世界宽度路带：真实透视（近宽远窄），平视地球不失真
-      g.add(this._roadRibbon(pts, worldW / 2, color, sel ? 0.9 : 0.5));
+      g.add(this._roadRibbon(pts, worldW / 2, color, 1));
       // 中心引导线：远景路带缩到亚像素时仍可辨路网走向；近景淡化为路面标线
       const line = this._fatLine(pts, sel ? 3 : 2, color, sel ? 0.95 : 0.8, 0.06);
       line.userData.roadW = worldW;
@@ -1365,6 +1483,7 @@ export class MapEditor3d {
 
   /* ---------------- selection / properties ---------------- */
   _select(w) {
+    if (this._rtGroupHelper && (!w || w.kind !== "roadGroup")) this._clearGroupVisuals();
     const wasRoad = this.sel && (this.sel.kind === "roadX" || this.sel.kind === "roadZ" || this.sel.kind === "road");
     this.sel = w;
     const tc = this._three.tc;
@@ -1380,7 +1499,7 @@ export class MapEditor3d {
     if (wasRoad || (w && (w.kind === "roadX" || w.kind === "roadZ" || w.kind === "road"))) this._rebuildSkeleton();
   }
 
-  _syncGizmoToData() {
+  _syncGizmoToData(commit = false) {
     if (!this.sel) return;
     const r = this.sel.root;
     if (this.sel.kind === "area") { this._syncAreaFromGroup(true); return; }
@@ -1396,10 +1515,43 @@ export class MapEditor3d {
       this._dirty = true;
       return;
     }
+    if (this.sel.kind === "roadGroup") {
+      // 整条拼接路：把代理相对基线的位移/旋转增量刚性应用到组内每块
+      // （绕基线锚点旋转 + 平移，块间端口贴合关系保持），随后全量重建刷新端头
+      const base = this._rtGroupBaseline;
+      if (base) {
+        const dx = r.position.x - base.px, dz = r.position.z - base.pz;
+        const dr = (r.rotation.y || 0) - base.dr;
+        const cos = Math.cos(dr), sin = Math.sin(dr);
+        const q = (v) => Math.round(v * 1e4) / 1e4;
+        for (const b of base.tiles) {
+          const ox = b.x - base.px, oz = b.z - base.pz;
+          b.t.x = q(base.px + ox * cos + oz * sin + dx);
+          b.t.z = q(base.pz - ox * sin + oz * cos + dz);
+          b.t.rot = q(b.rot + dr);
+        }
+        this._rebuildAll(); // 端口位置变了 → miter/圆弧端头按新拓扑重算
+        this._rtGroupBaseline = {
+          px: r.position.x, pz: r.position.z, dr: r.rotation.y || 0,
+          tiles: this.sel.data.map((t) => ({ t, x: t.x, z: t.z, rot: t.rot || 0 })),
+        };
+        this._updateGroupHelper();
+        this.status(`整条路已移动（${this.sel.data.length} 块）· 可继续拖动调整 · Ctrl+Z 撤销`);
+      }
+      r.position.y = 0; // 组只在地面平移/旋转，忽略误拖的竖直轴
+      this._dirty = true;
+      return;
+    }
     if (this.sel.kind === "object") {
       this.sel.data.pos = [Math.round(r.position.x * 10) / 10, Math.round(r.position.z * 10) / 10];
       this.sel.data.rot = Math.round((r.rotation.y || 0) * 100) / 100;
       r.position.y = -this._curveOffset(r.position.x, r.position.z); // 维持球面贴合
+    } else if (this.sel.kind === "roadTile") {
+      this.sel.data.x = Math.round(r.position.x * 10) / 10;
+      this.sel.data.z = Math.round(r.position.z * 10) / 10;
+      this.sel.data.rot = Math.round((r.rotation.y || 0) * 1000) / 1000;
+      r.position.y = -this._curveOffset(r.position.x, r.position.z); // 维持球面贴合
+      if (commit) this._rtHealTile(this.sel.data); // 松手自愈：端口吸回邻近端口
     } else {
       const d = this.sel.data;
       d.points = d.points.map(([x, z]) => [x + Math.round(r.position.x * 10) / 10, z + Math.round(r.position.z * 10) / 10]);
@@ -1411,6 +1563,33 @@ export class MapEditor3d {
     this._dirty = true;
   }
 
+  // 拼接路块拖拽松手自愈：单块被挪/转后端口错开（超过配对半径就不再焊接，
+  // 留下方口楔缝）。RT_PAIR_TOL 内有其他块的端口时，把整块平移吸回最近的一对
+  // —— 焊接公式对端口错位/转角免疫，平移对齐即可无缝；只平移不转（转动会
+  // 带着另一端端口跑，残余错位交给宽容配对处理）
+  _rtHealTile(t) {
+    const tiles = this.map.features.roadTiles || [];
+    const my = tilePorts(t);
+    let best = null;
+    for (const o of tiles) {
+      if (o === t) continue;
+      for (const p of tilePorts(o)) {
+        for (let i = 0; i < 2; i++) {
+          const d = Math.hypot(p.x - my[i].x, p.z - my[i].z);
+          if (d < RT_PAIR_TOL && (!best || d < best.d)) best = { d, dx: p.x - my[i].x, dz: p.z - my[i].z };
+        }
+      }
+    }
+    if (!best) return;
+    const q = (v) => Math.round(v * 1e4) / 1e4;
+    t.x = q(t.x + best.dx);
+    t.z = q(t.z + best.dz);
+    this._rebuildAll(); // 端口对齐 → 端头焊接按新拓扑重算
+    const w = this._wrappers.get(t.id);
+    if (w) { this.sel = w; this._three.tc.attach(w.root); }
+    this.status(`路块已自动吸附邻近端口（错位 ${best.d.toFixed(2)}m）· Ctrl+Z 撤销`);
+  }
+
   _deleteSel() {
     if (!this.sel) return;
     if (this.sel.kind === "area") { this.status("地图范围不可删除，可在右侧重新描边或用 Gizmo 调整"); return; }
@@ -1419,12 +1598,18 @@ export class MapEditor3d {
     else if (kind === "roadZ") this.map.roadsZ = this.map.roadsZ.filter((r) => r !== data);
     else if (kind === "road") this.map.features.roads = this.map.features.roads.filter((r) => r !== data);
     else if (kind === "river") this.map.features.rivers = this.map.features.rivers.filter((r) => r !== data);
-    else this.map.objects = this.map.objects.filter((o) => o !== data);
+    else if (kind === "roadTile") this.map.features.roadTiles = (this.map.features.roadTiles || []).filter((t) => t !== data);
+    else if (kind === "roadGroup") {
+      // 整条拼接路删除：按组过滤（组内块集合），剩余块按端口拓扑自动重分组
+      const set = new Set(data);
+      this.map.features.roadTiles = (this.map.features.roadTiles || []).filter((t) => !set.has(t));
+    } else this.map.objects = this.map.objects.filter((o) => o !== data);
     this._three.tc.detach();
     this.sel = null;
+    this._clearGroupVisuals();
     this._rebuildAll();
     this._pushUndo("删除");
-    this.status("已删除");
+    this.status(kind === "roadGroup" ? `已删除整条拼接路（${data.length} 块）` : "已删除");
   }
 
   _renderProps() {
@@ -1436,9 +1621,10 @@ export class MapEditor3d {
         <h4 class="me-tiprow">地图内容<span class="me-tip" data-tip="描边道路：道路菜单 →「地图描边」沿影像勾画 · 河流：折线描边（双击结束）· 建筑：多边形描边（≥3 点自动闭合）· 树 / 路灯：点击放置 · W/E/R 切换移动 / 旋转 / 缩放">?</span></h4>
         <div class="me-stat">描边道路 <b>${f.roads.length}</b></div>
         <div class="me-stat">河流 <b>${f.rivers.length}</b></div>
+        <div class="me-stat">拼接路块 <b>${(f.roadTiles || []).length}</b></div>
         <div class="me-stat">建筑/物件 <b>${this.map.objects.length}</b></div>
         <div class="me-stat me-tiprow">程序化路网 <b>${this.map.roadsX.length}×${this.map.roadsZ.length}</b>（2D 编辑器管理）<span class="me-tip" data-tip="灰色路带 / 紫色圆点 / 绿色标记 = 程序化城市骨架，与游戏实际生成的街道一致，仅显示不可选中；手工道路可点选编辑。两个编辑器编辑的是同一张地图。">?</span></div>
-        <label class="me-check me-tiprow" data-tip="勾选后按固定间距自动补满世界边缘的默认街道（游戏内与预览同步）；不勾选则只保留手工道路。"><input id="ep-ext" type="checkbox" ${this.map.extRoads ? "checked" : ""} /> 程序化延伸街道</label>
+        <label class="me-check me-tiprow" data-tip="勾选后按固定间距自动补满世界边缘的默认街道（游戏内与预览同步）；不勾选则只保留手工道路。放置拼接路且程序化城市开启时，游戏内仅在拼接路越出路网的外侧补一条不可见的虚拟边界（不画线、无路口、不进交通图），仅用于划分街区：横纵路标线延伸到拼接路，相交区域正常生成建筑。"><input id="ep-ext" type="checkbox" ${this.map.extRoads ? "checked" : ""} /> 程序化延伸街道</label>
         <div class="me-slider">
           <div class="me-slider-head"><span>网格透明度</span><b id="ep-grid-op-val">${opT}%</b></div>
           <input id="ep-grid-op-range" type="range" min="0" max="100" step="5" value="${opT}" style="--fill: ${opT}%" />
@@ -1625,6 +1811,59 @@ export class MapEditor3d {
         el.querySelector("#ep-w").addEventListener("change", () => this._pushUndo("调整道路宽度"));
       }
       el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
+      return;
+    }
+    if (kind === "roadGroup") {
+      const tiles = data;
+      const total = tiles.reduce((s, t) => s + (t.len || 3), 0);
+      el.innerHTML = `
+        <h4>拼接路 · 整条</h4>
+        <div class="me-stat">路块 <b>${tiles.length}</b> · 总长约 <b>${Math.round(total)}m</b></div>
+        <div class="me-pos">按端口连通自动分组：整条移动/旋转时块间贴合关系保持</div>
+        <button class="me-btn" id="ep-rg-one">单独编辑一块</button>
+        <button class="me-del" id="ep-del">删除整条路</button>
+        <p class="me-hint">Gizmo 平移整条路；E 键切旋转 = 绕组质心整体旋转。「单独编辑」后再点组内任一路块可单块调整；拼接工具下从路两端可继续延长，新块自动并入这条路；Ctrl+Z 撤销。</p>`;
+      el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
+      el.querySelector("#ep-rg-one").addEventListener("click", () => {
+        if (this._rtGroupFocus && this._wrappers.get(this._rtGroupFocus.data.id)) this._select(this._rtGroupFocus);
+        else this.status("单击组内任一路块即可单独选中编辑");
+      });
+      return;
+    }
+    if (kind === "roadTile") {
+      const t = data;
+      const grpN = rtRoadGroupOf(this.map.features.roadTiles || [], t).length;
+      el.innerHTML = `
+        <h4>路块 · 属性</h4>
+        <div class="trace-row">${Object.entries(TILE_STYLE_ZH).map(([k, z]) => `<button class="trace-seg${t.style === k ? " active" : ""}" data-style="${k}">${z}</button>`).join("")}</div>
+        <div class="me-stat">每方向车道数</div>
+        <div class="trace-wrow">
+          ${[1, 2, 3, 4].map((v) => `<button class="trace-w${(t.lanes || 1) === v ? " active" : ""}" data-lanes="${v}">${v}</button>`).join("")}
+        </div>
+        <div class="me-pos">X ${t.x} · Z ${t.z} · ${(t.len || 3)}×${t.w || 2}m · ${Math.round(((t.rot || 0) * 180) / Math.PI)}°</div>
+        ${grpN > 1 ? `<button class="me-btn" id="ep-tile-group">选中整条路（${grpN} 块）</button>` : ""}
+        <button class="me-del" id="ep-del">删除路块</button>
+        <p class="me-hint">Gizmo 拖动/旋转（E 键切旋转）会同步更新端口位置，其他路块可重新磁吸到新端口</p>`;
+      const editTile = (label) => {
+        rtRebuildOne(this, t); // 单块重建，避免全量 rebuild 卡顿
+        this._dirty = true;
+        this._pushUndo(label);
+        this._renderProps();
+      };
+      el.querySelectorAll("[data-style]").forEach((b) => b.addEventListener("click", () => {
+        t.style = b.dataset.style;
+        editTile("路块样式");
+      }));
+      el.querySelectorAll("[data-lanes]").forEach((b) => b.addEventListener("click", () => {
+        t.lanes = +b.dataset.lanes;
+        editTile("路块车道数");
+      }));
+      el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
+      const grpBtn = el.querySelector("#ep-tile-group");
+      if (grpBtn) grpBtn.addEventListener("click", () => {
+        const grp = rtRoadGroupOf(this.map.features.roadTiles || [], t);
+        if (grp.length > 1) this._selectRoadGroup(grp, this.sel);
+      });
       return;
     }
     if (kind === "river") {
@@ -1864,6 +2103,7 @@ export class MapEditor3d {
     if (d.rz) this.map.roadsZ = d.rz;
     this.map.extRoads = !!d.ex;
     if ("pg" in d) this.map.procedural = !!d.pg; // 旧快照无该字段 → 保持当前值
+    this._rtChain = null; // 快照后的链端端口可能已不存在，断链让磁吸重新接管
     const extCb = document.getElementById("ep-ext");
     if (extCb) extCb.checked = this.map.extRoads;
     this._select(null);
@@ -1881,6 +2121,7 @@ export class MapEditor3d {
       ["select", "◇", "选择/移动"],
       ["area", "▢", "地图范围"],
       ["draw-road", "║", "道路"],
+      ["place-road", "▦", "路块拼接"],
       ["draw-river", "≈", "河流描边"],
       ["draw-building", "▲", "建筑描边"],
       ["place-tree", "♣", "放置树木"],
@@ -1932,9 +2173,15 @@ export class MapEditor3d {
           this.status("地图范围：Gizmo 拖拽移动 · 右侧可数值编辑 / 描边绘制多边形");
           return;
         }
+        if (t === "place-road") {
+          this._rtPin = null;
+          this._rtGhostState = null;
+          rtRenderPanel(this); // 路块工具右侧参数面板（替代默认地图内容面板）
+        }
         this.status({
           "draw-river": "河流描边：点击加点，双击结束（宽度默认 26m）",
           "draw-building": "建筑描边：点击多边形顶点（≥3 点自动闭合生成盒子）",
+          "place-road": "路块拼接：单击落点、瞄准后再击放置 · 靠近空闲端口磁吸单击直放 · Esc 取消落点/断链/退出",
           "place-tree": "点击地面放置树木",
           "place-lamp": "点击地面放置路灯",
         }[t] || "");
@@ -1963,6 +2210,22 @@ export class MapEditor3d {
         if (pop && !pop.classList.contains("hidden")) { this._closeSettings(); return; }
         closeRoadSub();
         if (this.tool === "set-origin") { this._setTool("select"); this.status("已取消锚点拾取"); return; }
+        if (this.tool === "place-road") {
+          if (this._rtPin) {
+            this._rtPin = null; // 分阶段取消：先取消落点，再断链，最后退出工具
+            this._rtGhostState = null;
+            rtUpdateGhost(this);
+            this.status("已取消落点：重新单击落点，靠近空闲端口自动磁吸");
+          } else if (this._rtChain) {
+            this._rtChain = null;
+            rtRenderPanel(this);
+            this.status("已断开链条：下一次单击重新开始（靠近空闲端口仍会自动磁吸）");
+          } else {
+            this._setTool("select");
+            this.status("已退出路块拼接");
+          }
+          return;
+        }
         if (this.draft && this.draft.area) {
           this.draft = null; this._updateDraftPreview();
           this._selectArea(); this.status("已取消范围描边");
@@ -1972,13 +2235,26 @@ export class MapEditor3d {
         if (this.draft && this.draft.measure) { this._endMeasure("已取消测距"); return; }
         this.draft = null; this._updateDraftPreview(); this._select(null);
       }
-      else if (e.key === "Enter") this._finishDraft();
+      else if (e.key === "Enter") {
+        if (this.tool === "place-road" && this._rtChain) { this._rtChain = null; rtRenderPanel(this); this.status("已断开链条"); return; }
+        this._finishDraft();
+      }
       else if (e.key === "Delete" || e.key === "Backspace") {
         if (this.draft && (this.draft.area || this.draft.road || this.draft.measure)) { this._undoDraftPoint(); return; } // 描边/测距中：撤销上一顶点
         this._deleteSel();
       }
       else if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); this._undo(); }
       else if ((e.ctrlKey || e.metaKey) && e.key === "y") { e.preventDefault(); this._redo(); }
+      else if (this.tool === "place-road" && (e.key === "q" || e.key === "Q" || e.key === "e" || e.key === "E")) {
+        // 路块工具下 Q/E 旋转幽灵（自由放置态；吸附态方向由端口→光标决定，会被移动刷新覆盖）
+        const st = this._rtGhostState;
+        if (st && !st.anchor) {
+          const stepDeg = (+this._rtStep || 0) || 15;
+          this._rtYaw = (this._rtYaw || 0) + (e.key.toLowerCase() === "q" ? -1 : 1) * (stepDeg * Math.PI) / 180;
+          st.yaw = this._rtYaw;
+          rtUpdateGhost(this);
+        }
+      }
       else if (e.key === "w" || e.key === "W") this._three.tc.setMode("translate");
       else if (e.key === "e" || e.key === "E") this._three.tc.setMode("rotate");
       else if (e.key === "r" || e.key === "R") this._three.tc.setMode("scale");

@@ -8,6 +8,20 @@ import { Line2 } from "three/addons/lines/Line2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { bendGeometry } from "../../config/curvature.js";
+import { makeAsphaltTexture, ASPHALT_TILE } from "../../world/textures.js";
+
+// 世界米制 planar UV（与运行时 customMap.planarUV 同式）：纹理按世界坐标对齐，
+// 交叠 / 相邻路面的颗粒、明暗斑与轮迹无缝衔接
+function planarUV(geo) {
+  const pos = geo.attributes.position;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uv[i * 2] = pos.getX(i) / ASPHALT_TILE;
+    uv[i * 2 + 1] = pos.getZ(i) / ASPHALT_TILE;
+  }
+  geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  return geo;
+}
 
 // 屏幕空间胖线（Line2）：线宽恒定像素，任意视角/距离都清晰可见（不受雾影响）；
 // 曲率下沉直接烘焙进端点（相邻点间距内弯曲量可忽略），不参与 _bendArea 顶点重写。
@@ -45,8 +59,13 @@ export function roadRibbon(ed, pts, halfW, colorHex, opacity) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   geo.setIndex(idx);
-  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-    color: colorHex, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide,
+  geo.computeVertexNormals();
+  planarUV(geo);
+  // 贴图与「路块拼接」同一张沥青表面（tint 乘色：选中高亮 / 延伸路区分）；
+  // transparent + 不写深度：交叉路带间无 z-fighting，又能被上方路块/条带正确遮挡
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    map: makeAsphaltTexture(), color: colorHex, roughness: 0.94, metalness: 0.0,
+    transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide,
   }));
   mesh.renderOrder = 1;
   return mesh;
@@ -54,9 +73,12 @@ export function roadRibbon(ed, pts, halfW, colorHex, opacity) {
 
 /* ---------------- 实体材质 / 网格 ---------------- */
 
-export function matRoad() {
-  // 与程序化纵横路带同色同透明度（0x8ea3bd @ 0.5），编辑器内视觉统一
-  return new THREE.MeshBasicMaterial({ color: 0x8ea3bd, transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide });
+export function matRoad(tint = 0xffffff) {
+  // 与「路块拼接」/程序化横纵路带同一张沥青表面贴图，编辑器内三种路面风格一致。
+  // tint 乘色（贴图为灰阶）：默认原色，可传高亮/暗色调区分状态
+  return new THREE.MeshStandardMaterial({
+    map: makeAsphaltTexture(), color: tint, roughness: 0.94, metalness: 0.0,
+  });
 }
 export const matRiver = () => new THREE.MeshStandardMaterial({ color: 0x1d5f8f, transparent: true, opacity: 0.8, roughness: 0.25, metalness: 0.1 });
 export const matBuilding = () => new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.85 });
@@ -89,14 +111,14 @@ export function stripGeometry(ed, points, width, yBase = 0.05) {
   geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
   geo.setIndex(idx);
   geo.computeVertexNormals();
-  // 接头圆片（去掉 uv 以与带状几何属性一致，否则 mergeGeometries 返回 null）
+  planarUV(geo);
+  // 接头圆片（uv 一并按世界坐标写入，与带状几何属性一致，mergeGeometries 才不返回 null）
   const discs = [];
   for (const p of points) {
     const c = new THREE.CircleGeometry(hw, 12);
-    c.deleteAttribute("uv");
     c.rotateX(-Math.PI / 2);
     c.translate(p.x, yBase - ed._curveOffset(p.x, p.z), p.z);
-    discs.push(c);
+    discs.push(planarUV(c));
   }
   const discMerged = mergeGeometries(discs);
   return mergeGeometries([geo, discMerged]) || geo;
@@ -106,7 +128,7 @@ export function buildRoadMesh(ed, data) {
   if (data.closed && data.points.length >= 3) {
     // 取面道路：围合多边形整体填充为路面
     const shape = new THREE.Shape(data.points.map(([x, z]) => new THREE.Vector2(x, -z)));
-    const geo = bendGeometry(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2));
+    const geo = planarUV(bendGeometry(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2)));
     geo.translate(0, 0.05, 0);
     const mesh = new THREE.Mesh(geo, matRoad());
     mesh.receiveShadow = true;

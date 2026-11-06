@@ -28,6 +28,7 @@ export function layerDefs(ed) {
         { key: "area", label: "范围网格", hint: "地图范围底板 + 网格" },
         { key: "skeleton", label: "路网骨架", hint: "2D 数据：路网/地标/出生点" },
         { key: "road", label: "道路", hint: "描边/手工道路要素" },
+        { key: "roadTile", label: "拼接路块", hint: "路块拼接工具放置的路块" },
         { key: "river", label: "河流", hint: "描边河流要素" },
         { key: "object", label: "物件", hint: "树木 / 路灯 / 建筑" },
         { key: "origin", label: "锚点标记", hint: "金色立柱 = 范围中心" },
@@ -92,7 +93,7 @@ export function closeLayers(ed) {
 
 export function setLayerVis(ed, key, on) {
   ed._layerVis[key] = on;
-  try { localStorage.setItem("tr_e3_layers", JSON.stringify(ed._layerVis)); } catch { /* 忽略 */ }
+  try { localStorage.setItem("tr_e3_layers_v2", JSON.stringify(ed._layerVis)); } catch { /* 忽略 */ }
   try { ed._applyLayerVis(); } catch (e) { console.warn("[editor3d] 图层显隐应用失败：", e); }
 }
 

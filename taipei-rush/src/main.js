@@ -64,7 +64,20 @@ function updateMapButton() {
 async function buildWorld(mapData, mapId) {
   setProgress(0.2, "正在对齐街区坐标…");
   const city = new City(engine.scene, mapData);
-  await city.ready;
+  // 程序化城市分块生成期间把真实进度回填加载条（0.2 → 0.48）：
+  // 街廓多时加载条持续前进，不会停在 20% 像卡死
+  const progressTimer = setInterval(() => {
+    const p = city.buildProgress;
+    if (p > 0 && p < 1) setProgress(0.2 + p * 0.28, "正在生成街廓与建筑…");
+  }, 120);
+  try {
+    await city.ready;
+  } catch (e) {
+    console.error("[city] 世界构建失败：", e);
+    throw e;
+  } finally {
+    clearInterval(progressTimer);
+  }
   setProgress(0.5, "正在生成街廓与建筑…");
   await new Promise((r) => setTimeout(r, 30));
   setProgress(0.62, "正在布置店家招牌与街灯…");

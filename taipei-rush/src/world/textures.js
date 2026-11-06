@@ -355,29 +355,160 @@ export function makeSidewalkTexture() {
 // 两侧路面的颗粒尺度与接缝处的纹理才会对齐。
 export const ASPHALT_TILE = 16;
 
+// 沥青路面表面绘制 —— 拼接路块贴图与共享沥青贴图共用，保证编辑器 / 运行时
+// 各处路面风格一致：底色 #5b5d61 + 逐像素颗粒抖动 + 大尺度明暗斑 + 轮迹压痕。
+// pxm：横向米→像素；tracks：'v' 沿 V 轮迹（路块贴图 V=前进方向）/
+// 'both' 双向（世界对齐的共享贴图，横纵两向道路都呈现顺向磨损）；trackOff 轮迹偏移（米）；
+// endFadePx：V 两端淡出带（像素，0 = 不淡出）—— 拼接路块贴图专用：每块贴图
+// 独立随机生成，颗粒/明暗斑在拼接缝两侧突变出可辨的缝，向块端收敛到底色后
+// 相邻块在缝两侧过渡连续（路缘石/标线为轴向内容，不受影响）。
+function paintAsphaltSurface(ctx, W, H, pxm, tracks = "v", trackOff = 2.5, endFadePx = 0) {
+  ctx.fillStyle = "#5b5d61";
+  ctx.fillRect(0, 0, W, H);
+  const edgeRamp = (row) => {
+    if (endFadePx <= 0) return 1;
+    const t = Math.min(1, Math.min(row, H - 1 - row) / endFadePx);
+    return t * t * (3 - 2 * t); // smoothstep
+  };
+  // 细颗粒：ImageData 单次遍历灰度抖动（比逐个 fillRect 快一个量级且更均匀）；
+  // 淡出带内渐弱到 40%——保留质感，但接缝两侧颗粒统计一致看不出突变
+  const img = ctx.getImageData(0, 0, W, H);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (Math.random() - 0.5) * 44 * (endFadePx > 0 ? 0.4 + 0.6 * edgeRamp((i / (W * 4)) | 0) : 1);
+    d[i] += n; d[i + 1] += n; d[i + 2] += n;
+  }
+  ctx.putImageData(img, 0, 0);
+  // 大尺度明暗斑，避免死平。统一先画到临时画布；拼接路块贴图再用渐变把两端
+  // 抹到 0（destination-in）后合成 —— 明暗斑被块边界截断是接缝最明显的来源
+  const surf = makeCanvas(W, H);
+  const sctx = surf.getContext("2d");
+  for (let i = 0; i < 8; i++) {
+    const x = Math.random() * W, y = Math.random() * H, r = Math.min(W, H) * (0.25 + Math.random() * 0.5);
+    const g = sctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, i % 2 ? "rgba(0,0,0,0.05)" : "rgba(255,255,255,0.02)");
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    sctx.fillStyle = g;
+    sctx.fillRect(0, 0, W, H);
+  }
+  if (endFadePx > 0) {
+    const fe = Math.min(0.5, endFadePx / H);
+    const fg = sctx.createLinearGradient(0, 0, 0, H);
+    fg.addColorStop(0, "rgba(0,0,0,0)");
+    fg.addColorStop(fe, "rgba(0,0,0,1)");
+    fg.addColorStop(1 - fe, "rgba(0,0,0,1)");
+    fg.addColorStop(1, "rgba(0,0,0,0)");
+    sctx.globalCompositeOperation = "destination-in";
+    sctx.fillStyle = fg;
+    sctx.fillRect(0, 0, W, H);
+  }
+  ctx.drawImage(surf, 0, 0);
+  // 轮迹压痕：每方向车流一条略深纵带（0.4m 宽）
+  const tw = 0.4 * pxm, off = trackOff * pxm;
+  ctx.fillStyle = "rgba(0,0,0,0.05)";
+  if (tracks === "v" || tracks === "both") {
+    for (const s of [-1, 1]) ctx.fillRect(W / 2 + s * off - tw / 2, 0, tw, H);
+  }
+  if (tracks === "u" || tracks === "both") {
+    for (const s of [-1, 1]) ctx.fillRect(0, H / 2 + s * off - tw / 2, W, tw);
+  }
+}
+
+let asphaltTexCache = null;
 export function makeAsphaltTexture() {
-  const S = 1024;
+  if (asphaltTexCache) return asphaltTexCache; // 全局单例：编辑器 / 运行时多处引用同一张
+  const S = 1024; // 1024px / 16m = 64px/m，与路块贴图同一颗粒密度
   const c = makeCanvas(S, S);
   const ctx = c.getContext("2d");
-  // clean medium-grey asphalt (matches the original's smooth road)
-  ctx.fillStyle = "#5b5d61"; ctx.fillRect(0, 0, S, S);
-  // very fine, subtle grain only — no stains, cracks or heavy speckle
-  for (let i = 0; i < 24000; i++) {
-    const x = Math.random() * S, y = Math.random() * S;
-    const v = 64 + Math.random() * 88;
-    ctx.fillStyle = `rgba(${v},${v},${v + 3},${0.02 + Math.random() * 0.05})`;
-    const s = 1 + Math.random() * 1.6;
-    ctx.fillRect(x, y, s, s);
+  // 表面风格与「路块拼接」贴图同一绘制路径；双向轮迹（世界对齐贴图，横纵路两向顺向磨损）
+  paintAsphaltSurface(ctx, S, S, S / ASPHALT_TILE, "both", 2.5);
+  asphaltTexCache = canvasTexture(c);
+  return asphaltTexCache;
+}
+
+/* ---------------- 拼接式路块贴图 ---------------- */
+// 3D 编辑器「路块拼接」工具的整块路面贴图：一张图 = 一个路块单元（len×w 米）。
+// 内容：沥青底 + 细颗粒 + 轮迹压痕 + 两侧路缘石带 + 边缘白实线 + 中心标线。
+// 标线周期与块边界对齐（虚线居中、块间 gap 相接），逐块拼接后标线自然连续。
+// 按尺寸/样式缓存：编辑器幽灵预览、编辑器实体与运行时世界共用同一实例。
+const roadTileTexCache = new Map();
+
+export function makeRoadTileTexture(len, w, style = "dash", lanes = 1) {
+  const key = `${len}x${w}:${style}:${lanes}`;
+  let tex = roadTileTexCache.get(key);
+  if (tex) return tex;
+  // 像素预算固定：X/Y 两轴独立像素密度（内容均为轴向矩形，独立缩放不失真），
+  // 与物理尺寸解耦 —— 否则大块（20×10m @96px/m = 1920×960）生成一张贴图要数万次
+  // 噪点绘制，改尺寸/车道后首次预览（幽灵重建路径）会明显卡顿
+  const PXM = Math.min(48, Math.max(16, 512 / w));
+  const PYM = Math.min(48, Math.max(16, 768 / len));
+  const W = Math.max(64, Math.round(w * PXM));
+  const H = Math.max(64, Math.round(len * PYM));
+  const c = makeCanvas(W, H);
+  const ctx = c.getContext("2d");
+  const fx = (m) => m * PXM; // 宽度方向（米 → 像素）
+  const fy = (m) => m * PYM; // 长度方向（米 → 像素）
+  // 两端淡出带长度随块长伸缩（0.6~1.5m）：颗粒/明暗斑向块端收敛到底色，
+  // 拼接缝两侧过渡连续、融为一体
+  const fadePx = Math.min(H / 2, Math.max(1, fy(Math.min(1.5, Math.max(0.6, len * 0.1)))));
+  // 沥青表面（底色/颗粒/明暗斑/轮迹）与 makeAsphaltTexture 共用同一绘制路径
+  paintAsphaltSurface(ctx, W, H, PXM, "v", Math.max(0.35, w / 2 - 0.5), fadePx);
+  // 路缘石带：两侧长边 0.3m 浅灰 + 石缝 + 排水沟阴影
+  const curb = 0.3;
+  ctx.fillStyle = "#9aa0a6";
+  ctx.fillRect(0, 0, fx(curb), H);
+  ctx.fillRect(W - fx(curb), 0, fx(curb), H);
+  ctx.fillStyle = "rgba(0,0,0,0.12)";
+  ctx.fillRect(fx(curb), 0, fx(0.09), H);
+  ctx.fillRect(W - fx(curb) - fx(0.09), 0, fx(0.09), H);
+  ctx.strokeStyle = "rgba(0,0,0,0.15)";
+  ctx.lineWidth = 1;
+  for (let y = fy(0.9); y < H; y += fy(0.9)) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(fx(curb), y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(W - fx(curb), y); ctx.lineTo(W, y); ctx.stroke();
   }
-  // barely-visible large tonal variation so it isn't dead flat
-  for (let i = 0; i < 26; i++) {
-    const x = Math.random() * S, y = Math.random() * S, r = 90 + Math.random() * 220;
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, "rgba(255,255,255,0.012)");
-    g.addColorStop(1, "rgba(255,255,255,0)");
-    ctx.fillStyle = g; ctx.fillRect(0, 0, S, S);
+  // 边缘白实线（无标线样式不画，保留光板路）
+  if (style !== "plain") {
+    ctx.fillStyle = "rgba(232,232,226,0.9)";
+    ctx.fillRect(fx(curb + 0.1), 0, fx(0.12), H);
+    ctx.fillRect(W - fx(curb + 0.22), 0, fx(0.12), H);
   }
-  return canvasTexture(c);
+  // 中心标线：白虚线（0.55 块长，居中 → 块间 gap 相接）或双黄实线
+  const dashLen = len * 0.55;
+  const dashY0 = H / 2 - fy(dashLen) / 2;
+  if (style === "dash") {
+    ctx.fillStyle = "rgba(232,232,226,0.95)";
+    ctx.fillRect(W / 2 - fx(0.075), dashY0, fx(0.15), fy(dashLen));
+  } else if (style === "double") {
+    ctx.fillStyle = "rgba(216,165,36,0.95)";
+    ctx.fillRect(W / 2 - fx(0.17), 0, fx(0.1), H);
+    ctx.fillRect(W / 2 + fx(0.07), 0, fx(0.1), H);
+  }
+  // 同方向车道分隔白虚线（每方向 lanes 车道，≥2 时每方向画 lanes-1 条；
+  // 虚线周期与中心虚线一致，跨块连续。车道按剩余宽度均分，标准车道宽约 3.4m）
+  const laneN = Math.max(1, Math.round(lanes || 1));
+  const usableHalf = w / 2 - 0.6; // 每方向可用半宽（扣除路缘石+边线）
+  if (style !== "plain" && laneN >= 2 && usableHalf > laneN * 0.8) {
+    const laneW = usableHalf / laneN;
+    ctx.fillStyle = "rgba(232,232,226,0.85)";
+    for (const s of [-1, 1]) {
+      for (let k = 1; k < laneN; k++) {
+        const off = usableHalf - k * laneW;
+        ctx.fillRect(W / 2 + s * fx(off) - fx(0.05), dashY0, fx(0.1), fy(dashLen));
+      }
+    }
+  }
+  tex = canvasTexture(c, { repeat: false });
+  // LRU：参数探索会产生大量组合，限制张数防止显存累积（512×768 约 1.5MB/张）。
+  // 被引用中的纹理 dispose 是安全的：three 在下次渲染时自动重新上传
+  if (roadTileTexCache.size >= 24) {
+    const oldestKey = roadTileTexCache.keys().next().value;
+    const oldest = roadTileTexCache.get(oldestKey);
+    roadTileTexCache.delete(oldestKey);
+    oldest.dispose();
+  }
+  roadTileTexCache.set(key, tex);
+  return tex;
 }
 
 export function makeRoofTexture() {
