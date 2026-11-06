@@ -5,6 +5,7 @@ import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { mapBounds } from "../data/cityData.js";
 import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "./materials.js";
+import { assetInstance, assetWorldAABB } from "./assetMesh.js";
 import { ASPHALT_TILE, makeAsphaltTexture, makeRoadTileTexture } from "./textures.js";
 
 const wallMat = () => new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.85 });
@@ -1004,6 +1005,17 @@ export function buildCustomMap(data, colliders, junctions = []) {
         const box = footprintAABB(o);
         // top = 建筑高度（与 buildingGroup 的 extrude depth 一致），供相机遮挡判断
         if (box) colliders.add(box.minX, box.minZ, box.maxX, box.maxZ, (o.params && o.params.height) || 24);
+      }
+    } else if (o.type === "asset" && o.assetId) {
+      // 模型工坊资产：模板已在 city._init 预热（assetMesh 缓存），这里同步克隆。
+      // 只传 {id} 即可 —— 实例化只读 id；未预热/已删除的资产静默跳过
+      const ref = { id: o.assetId };
+      const inst = assetInstance(ref, { pos: o.pos, rot: o.rot, scale: o.scale });
+      if (inst) {
+        group.add(inst);
+        const aabb = assetWorldAABB(ref, { pos: o.pos, rot: o.rot, scale: o.scale });
+        // 碰撞顶点取模型实际最高点，供相机遮挡判断
+        if (aabb) colliders.add(aabb.minX, aabb.minZ, aabb.maxX, aabb.maxZ, aabb.maxY);
       }
     } else if (o.type === "tree") {
       group.add(treeMesh(o));

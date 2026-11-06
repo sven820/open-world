@@ -36,6 +36,8 @@ import {
 } from "./editor3d/roadTiles.js";
 import { rtMiters, RT_PAIR_TOL } from "../world/customMap.js";
 import { listMaterials } from "../world/materials.js";
+import { listAssets, getAsset, createAssetFromTraced } from "../data/assetStore.js";
+import { getAssetTemplateIfReady, warmAssetTemplate, assetInstance } from "../world/assetMesh.js";
 
 export class MapEditor3d {
   // opts: { map, onSave(data)=>bool, onPlay(), onClose() }
@@ -46,6 +48,8 @@ export class MapEditor3d {
     this.draft = null;        // { points: [{x,z}] } 绘制中的折线/多边形
     this.sel = null;          // { kind, data, root, meshes }
     this.undoStack = [];
+    this._assetCache = new Map();   // 模型资产记录缓存（assetId → record，放置/属性面板用）
+    this._assetFetchPending = new Set();
     this.redoStack = [];
     this._raf = 0;
     this._cesium = null;
@@ -798,6 +802,10 @@ export class MapEditor3d {
       const type = this.tool === "place-tree" ? "tree" : "lamp";
       this._addObject({ id: uid(), type, pos: [pt.x, pt.z], rot: 0, params: {} });
       this._pushUndo("放置" + (type === "tree" ? "树木" : "路灯"));
+    } else if (this.tool === "place-asset") {
+      if (!this._placingAsset) { this.status("请先在右侧「我的模型」中选择一个资产"); return; }
+      this._addObject({ id: uid(), type: "asset", assetId: this._placingAsset.id, pos: [pt.x, pt.z], rot: 0, scale: 1 });
+      this._pushUndo("放置模型资产");
     } else if (this.tool === "add-roadX" || this.tool === "add-roadZ") {
       const r = this.tool === "add-roadX"
         ? { id: uid(), zh: "新纵路", en: "New Rd", at: Math.round(pt.x), kind: "street", lanes: 1, median: 0, sidewalk: 3 }
@@ -1343,6 +1351,13 @@ export class MapEditor3d {
       this._makeWrapper("object", o, m);
     }
     this._rebuildSkeleton();
+    // 重建后旧 wrapper 已销毁：选中态接回同 id 的新 wrapper，
+    // 否则 TransformControls 还挂在已移出场景的对象上（每帧报错）
+    if (this.sel && this.sel.data && this.sel.data.id) {
+      const w = this._wrappers.get(this.sel.data.id);
+      if (w && w !== this.sel) { this.sel = w; this._three.tc.attach(w.root); }
+      else if (!w) this._select(null);
+    }
   }
 
   // 程序化城市骨架叠加（2D 编辑器管理的数据，与运行时世界一致）：
@@ -1506,7 +1521,61 @@ export class MapEditor3d {
 
   _rebuildObjects() { this._rebuildAll(); }
 
-  _buildObjectMesh(o) { return buildObjectMesh(this, o); }
+  _buildObjectMesh(o) {
+    if (o.type === "asset") return this._buildAssetMesh(o);
+    return buildObjectMesh(this, o);
+  }
+
+  // 资产实例（同步）：模板热 → 克隆；未热 → 线框占位盒 + 异步预热后重建。
+  // 资产记录缓存未命中 → 异步取一次再重建（编辑器打开时资产可能在工坊里刚保存）
+  _buildAssetMesh(o) {
+    const asset = this._assetCache.get(o.assetId);
+    if (!asset) {
+      if (!this._assetFetchPending) this._assetFetchPending = new Set();
+      if (!this._assetFetchPending.has(o.assetId)) {
+        this._assetFetchPending.add(o.assetId);
+        getAsset(o.assetId).then((a) => {
+          this._assetFetchPending.delete(o.assetId);
+          if (a) { this._assetCache.set(a.id, a); this._rebuildObjects(); }
+        });
+      }
+      return null;
+    }
+    const tpl = getAssetTemplateIfReady(asset.id);
+    if (tpl) return assetInstance(asset, { scale: o.scale });
+    warmAssetTemplate(asset).then((t) => { if (t) this._rebuildObjects(); });
+    const s = asset.unitSize || { x: 4, y: 4, z: 4 };
+    const ph = new THREE.Mesh(
+      new THREE.BoxGeometry(Math.max(1, s.x), Math.max(1, s.y), Math.max(1, s.z)),
+      new THREE.MeshBasicMaterial({ color: 0x3a72b0, wireframe: true }),
+    );
+    ph.position.y = Math.max(1, s.y) / 2;
+    return ph;
+  }
+
+  // 右侧「我的模型」选择面板（place-asset 工具的无选中状态）
+  async _renderAssetPicker(el) {
+    const list = await listAssets();
+    el.innerHTML = `
+      <h4>我的模型 <small>ASSETS</small></h4>
+      ${list.length ? list.map((a) => `
+        <div class="me-asset-item${this._placingAsset && this._placingAsset.id === a.id ? " active" : ""}" data-id="${a.id}">
+          <b>${escHtml(a.name || "未命名")}</b>
+          <small>${escHtml(a.category || "")} · ${a.unitSize ? `${a.unitSize.x}×${a.unitSize.y}×${a.unitSize.z}m` : "?"}</small>
+        </div>`).join("")
+      : `<p class="me-hint">资产库为空。去「模型工坊」导入 GLB 或新建模型。</p>`}
+      <p class="me-hint">选中后点击地图放置 · Gizmo 可移动/旋转 · Delete 删除 · E 键旋转朝向</p>`;
+    for (const item of el.querySelectorAll(".me-asset-item")) {
+      item.addEventListener("click", () => {
+        const a = list.find((x) => x.id === item.dataset.id);
+        if (!a) return;
+        this._placingAsset = a;
+        if (!this._assetCache.has(a.id)) this._assetCache.set(a.id, a);
+        this.status(`已选择「${a.name}」· 点击地图放置`);
+        this._renderAssetPicker(el);
+      });
+    }
+  }
 
   // 标准材料库 → 下拉框选项（按分类分组，含"默认"项 = 不指定材质）
   _materialOptions(categories, selected) {
@@ -1675,6 +1744,7 @@ export class MapEditor3d {
   _renderProps() {
     const el = document.getElementById("e3-props");
     if (!this.sel && this.tool === "place-road") { rtRenderPanel(this); return; } // 路块工具无选中：右侧显示拼接面板（含添加/编辑模式切换），而非地图统计
+    if (!this.sel && this.tool === "place-asset") { this._renderAssetPicker(el); return; } // 资产工具无选中：右侧显示「我的模型」选择面板
     if (!this.sel) {
       const f = this.map.features;
       const opT = Math.round((1 - (this.map.gridOpacity ?? GRID_OPACITY_DEFAULT)) * 100); // 网格透明度%（0=默认浓度，100=完全透出影像）
@@ -1979,6 +2049,17 @@ export class MapEditor3d {
         if (w) { this.sel = w; this._three.tc.attach(w.root); } // 同步 Gizmo，不重绘面板
       });
       el.querySelector("#ep-h").addEventListener("change", () => this._pushUndo("调整高度"));
+      // 转为模型资产：打包 footprint+height+材质绑定进资产库，随后可去工坊深度编辑
+      const toAsset = document.createElement("button");
+      toAsset.className = "me-btn";
+      toAsset.textContent = "转为模型资产";
+      toAsset.addEventListener("click", async () => {
+        const asset = await createAssetFromTraced(data, { name: data.name || "描边建筑" });
+        this._assetCache.set(asset.id, asset);
+        this.status(`已转为资产「${asset.name}」· 在「我的模型」工具中可放置，或在模型工坊中继续编辑`);
+        if (this.opts.onEditAsset) this.opts.onEditAsset(asset.id);
+      });
+      el.querySelector("#ep-del").before(toAsset);
       // 换材质：写 params（稳定 id 落地图 JSON），重建预览并接回 Gizmo
       const applyMat = (key, val) => {
         if (val) data.params[key] = val; else delete data.params[key];
@@ -1995,12 +2076,35 @@ export class MapEditor3d {
         this._pushUndo("更换屋顶材质");
       });
       el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
+    } else if (kind === "object" && data.type === "asset") {
+      const asset = this._assetCache.get(data.assetId);
+      el.innerHTML = `
+        <h4>模型资产 · 属性</h4>
+        <div class="me-pos">${asset ? escHtml(asset.name || "未命名") : data.assetId}</div>
+        <label>缩放<input id="ep-scale" type="number" min="0.1" max="50" step="0.1" value="${data.scale ?? 1}" /></label>
+        ${posEl(data.pos[0], data.pos[1])}
+        <button class="me-btn" id="ep-editasset">在模型工坊中编辑</button>
+        <button class="me-del" id="ep-del">删除</button>`;
+      el.querySelector("#ep-scale").addEventListener("change", (e) => {
+        data.scale = clamp(+e.target.value || 1, 0.1, 50);
+        this._rebuildObjects(); this._dirty = true;
+        const w = this._wrappers.get(data.id);
+        if (w) { this.sel = w; this._three.tc.attach(w.root); }
+        this._pushUndo("调整资产缩放");
+      });
+      el.querySelector("#ep-editasset").addEventListener("click", () => {
+        if (this.opts.onEditAsset) this.opts.onEditAsset(data.assetId);
+        else this.status("未配置模型工坊入口");
+      });
+      el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
     } else {
       const zh = { tree: "树木", lamp: "路灯" }[data.type] || data.type;
       el.innerHTML = `<h4>${zh} · 属性</h4>${posEl(data.pos[0], data.pos[1])}<button class="me-del" id="ep-del">删除</button>`;
       el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
     }
   }
+
+  /* ---------------- helpers ---------------- */
 
   /* ---------------- draft preview ---------------- */
   _updateDraftPreview() {
@@ -2230,6 +2334,7 @@ export class MapEditor3d {
       ["draw-building", "▲", "建筑描边"],
       ["place-tree", "♣", "放置树木"],
       ["place-lamp", "¶", "放置路灯"],
+      ["place-asset", "◆", "我的模型"],
     ];
     const bar = document.getElementById("e3-tools");
     bar.innerHTML = tools.map(([t, icon, label], i) =>
@@ -2286,6 +2391,7 @@ export class MapEditor3d {
           "draw-building": "建筑描边：点击多边形顶点（≥3 点自动闭合生成盒子）",
           "place-tree": "点击地面放置树木",
           "place-lamp": "点击地面放置路灯",
+          "place-asset": "在右侧「我的模型」中选择资产后，点击地图放置",
         }[t] || "");
       });
     });
@@ -2391,4 +2497,8 @@ export class MapEditor3d {
     this.status(ok ? `已保存 · ${new Date().toLocaleTimeString()}` : "保存失败");
     return ok;
   }
+}
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }

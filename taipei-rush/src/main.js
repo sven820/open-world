@@ -342,6 +342,11 @@ async function openEditor3d(map) {
       enterGame();
     },
     onClose: () => closeEditor3d(),
+    // 资产面板「在模型工坊中编辑」：关编辑器 → 开工坊；工坊返回后回地图选择
+    onEditAsset: (assetId) => {
+      closeEditor3d();
+      openStudio(assetId);
+    },
   });
   await editor3d.open();
 }
@@ -350,6 +355,26 @@ function closeEditor3d() {
   if (editor3d) { editor3d.close(); editor3d = null; }
   updateMapButton();
 }
+
+/* ---------------- 模型工坊（Model Studio） ---------------- */
+let studio = null;
+async function openStudio(assetId, onClose) {
+  closeStudio();
+  const { ModelStudio } = await import("./studio/studio.js");
+  studio = new ModelStudio({
+    initialAssetId: assetId,
+    onClose: onClose || (() => { closeStudio(); menuEl.classList.remove("hidden"); }),
+  });
+  menuEl.classList.add("hidden");
+  await studio.open();
+}
+function closeStudio() {
+  if (studio) { studio.close(); studio = null; }
+}
+document.getElementById("ms-studio").addEventListener("click", () => {
+  mapSelectEl().classList.add("hidden");
+  openStudio();
+});
 
 async function startGame() {
   if (!world || world.mapId !== getActiveMapId() || worldStale) {

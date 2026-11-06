@@ -212,6 +212,28 @@ src/
 
 ---
 
+## 9. 实施记录（已完成 M1–M5）
+
+- **M1** `src/data/assetStore.js`：IndexedDB（隐私模式内存降级）、GLB 导入解析、GLB/缩略图存取、导出。
+- **M2** `src/world/assetMesh.js`（模板缓存/实例克隆/世界 AABB）+ `customMap.js` asset 分支 + `city.js` 建城前预热并把资产 AABB 并入程序化建筑排除区 + 编辑器「我的模型」放置。
+- **M3** 建筑面板「转为模型资产」（`createAssetFromTraced`）、工坊编辑、`exportAssetGLB` 对 traced 资产运行时重建挤出体导出。
+- **M4** Studio 参数建模：盒/圆柱/球/薄板、移动旋转缩放、复制/删除、保存升级为 GLB 存储。
+- **M5** 阵列（3×3）+ 几何级镜像（翻绕序保材质共享）。**CSG 布尔未做**：`three-bvh-csg@0.0.18` 要求 three ≥ 0.179（项目 r169，强升风险大），待未来升级 three 后再接入。
+
+### 实测中发现并修复的坑（后续维护注意）
+
+1. **GLB 往返的绑定键**：GLTFExporter 会把 `Object3D.userData` 序列化为 glTF extras，
+   `bindingKey` 因此能随 GLB 往返 —— 材质绑定匹配键是 `userData.bindingKey`（优先），
+   原材质名只作为外部模型（Blender）的兜底。不要改成按材质名匹配。
+2. **共享库材质没有 name**：从工作台导出 GLB 必须用 `_exportRoot()`（材质克隆并改名
+   为绑定键），否则重导入后绑定丢失。
+3. **重建后 Gizmo 悬空**：`_rebuildAll` 会销毁旧 wrapper，选中态必须接回同 id 新
+   wrapper，否则 TransformControls 每帧报 "must be a part of the scene graph"。
+4. **同步建城 vs 异步 GLB**：运行时 `city._init` 先 `preloadAssetTemplatesFromMap`
+   预热，`buildCustomMap` 才能同步克隆；未预热/已删除的资产静默跳过。
+5. **绑定变更也要重导出**：`workspace.needsExport` 由换材质触发；纯几何不变仅换
+   绑定时 GLB 需要重写（材质名/绑定键落盘）。
+
 ## 8. 关键技术决策记录
 
 1. **几何存 GLB Blob 而非 JSON 化 geometry**：自包含、可导出给 Blender、GLTFExporter 现成；

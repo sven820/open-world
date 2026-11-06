@@ -1,0 +1,95 @@
+/* 模型工坊（Model Studio）覆盖层样式 —— 独立于编辑器，只服务本模块 */
+#model-studio {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  background: #171a1e;
+  color: #d8dce2;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  user-select: none;
+}
+#model-studio.hidden { display: none; }
+
+.ms3-canvas-wrap { position: relative; flex: 1; min-width: 0; }
+.ms3-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+.ms3-status {
+  position: absolute; left: 12px; bottom: 10px;
+  font-size: 12px; color: #9aa2ad;
+  background: rgba(20, 23, 27, 0.72); padding: 4px 10px; border-radius: 6px;
+  pointer-events: none; max-width: 70%;
+}
+.ms3-topbar {
+  position: absolute; top: 10px; left: 12px; display: flex; gap: 8px; align-items: center;
+}
+.ms3-topbar .ms3-title { font-weight: 700; letter-spacing: 1px; margin-right: 8px; }
+.ms3-btn {
+  background: #2a2f36; color: #d8dce2; border: 1px solid #3a4048;
+  border-radius: 6px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+}
+.ms3-btn:hover { background: #343b44; }
+.ms3-btn.primary { background: #2f6f4f; border-color: #3a8a62; }
+.ms3-btn.primary:hover { background: #37815c; }
+.ms3-btn.danger { color: #ff9b8f; }
+.ms3-btn.active { background: #2f5a8a; border-color: #3a72b0; }
+
+.ms3-side {
+  width: 300px; flex: none; display: flex; flex-direction: column;
+  background: #1f2328; border-left: 1px solid #2c323a; overflow: hidden;
+}
+.ms3-side.left { border-left: none; border-right: 1px solid #2c323a; }
+.ms3-side h4 {
+  margin: 0; padding: 10px 12px 8px; font-size: 13px; color: #8fa0b5;
+  border-bottom: 1px solid #2c323a; display: flex; justify-content: space-between; align-items: center;
+}
+.ms3-scroll { overflow-y: auto; padding: 10px; flex: 1; }
+.ms3-scroll::-webkit-scrollbar { width: 8px; }
+.ms3-scroll::-webkit-scrollbar-thumb { background: #343b44; border-radius: 4px; }
+
+/* 资产卡片 */
+.ms3-card {
+  display: flex; gap: 10px; padding: 8px; border-radius: 8px; cursor: pointer;
+  border: 1px solid transparent; margin-bottom: 6px;
+}
+.ms3-card:hover { background: #262c33; }
+.ms3-card.active { border-color: #3a72b0; background: #25303c; }
+.ms3-card img {
+  width: 64px; height: 64px; border-radius: 6px; background: #14171a; flex: none; object-fit: contain;
+}
+.ms3-card .ms3-card-info { min-width: 0; }
+.ms3-card b { display: block; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ms3-card small { color: #7d8794; font-size: 11px; display: block; margin-top: 3px; }
+
+/* 表单 */
+.ms3-field { margin-bottom: 10px; }
+.ms3-field label { display: block; font-size: 12px; color: #8fa0b5; margin-bottom: 4px; }
+.ms3-field input, .ms3-field select {
+  width: 100%; box-sizing: border-box; background: #14171a; color: #d8dce2;
+  border: 1px solid #343b44; border-radius: 6px; padding: 6px 8px; font-size: 13px;
+}
+.ms3-row { display: flex; gap: 8px; }
+.ms3-row > * { flex: 1; }
+.ms3-hint { font-size: 11px; color: #6c7683; margin: 6px 0; line-height: 1.5; }
+
+/* 场景树 */
+.ms3-tree-item {
+  padding: 5px 8px; border-radius: 5px; cursor: pointer; font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ms3-tree-item:hover { background: #262c33; }
+.ms3-tree-item.active { background: #2f5a8a; color: #fff; }
+.ms3-tree-item .mat-chip {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 8px;
+  font-size: 10px; background: #34404d; color: #9fc2e8;
+}
+.ms3-tree-item .mat-chip.unbound { background: #4a3426; color: #e8b39f; }
+
+.ms3-empty { color: #5d6672; font-size: 12px; text-align: center; padding: 24px 8px; line-height: 1.7; }
+.ms3-badge {
+  display: inline-block; padding: 1px 8px; border-radius: 8px; font-size: 11px;
+  background: #34404d; color: #9fc2e8; margin-left: 6px;
+}
+.ms3-warn {
+  background: #4a3426; color: #e8b39f; font-size: 12px; border-radius: 6px;
+  padding: 6px 10px; margin-bottom: 10px;
+}

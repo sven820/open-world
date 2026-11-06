@@ -13,6 +13,7 @@ import {
   ASPHALT_TILE,
 } from "./textures.js";
 import { getFacadeMaterials, getStorefrontMaterials, getSignMaterial } from "./materials.js";
+import { preloadAssetTemplatesFromMap, assetWorldAABB } from "./assetMesh.js";
 import { buildCustomMap, worldBounds, pointInPoly, footprintAABB } from "./customMap.js";
 import { getRenderSettings, onRenderSettingsChange } from "../config/renderSettings.js";
 import {
@@ -133,16 +134,10 @@ export class City {
     }
     this.spawnPoint = null;     // 出生点：编辑器设置的 spawn 优先，未设置时用描边内容包围盒中心
 
-    // 3D 描边建筑排除区：程序化建筑/绿植避让手绘建筑 footprint（含 2m 余量），
-    // 防止自动生成的楼直接穿进/盖住用户描边放置的建筑
+    // 3D 描边建筑/资产排除区：程序化建筑/绿植避让手绘内容（含 2m 余量），
+    // 防止自动生成的楼直接穿进/盖住用户放置的建筑与模型资产。
+    // asset 的 AABB 依赖模板缓存（异步预热），所以在 _init 里填（见下）
     this.traceBuildingRects = [];
-    for (const o of (data && data.objects) || []) {
-      if (o.type !== "building") continue;
-      const box = footprintAABB(o);
-      if (!box) continue;
-      const M = 2;
-      this.traceBuildingRects.push({ x0: box.minX - M, x1: box.maxX + M, z0: box.minZ - M, z1: box.maxZ + M });
-    }
 
     // ---- 分块渲染调度（按需渲染）----
     // 几何在建城时一次性烘焙到世界坐标并合并成"每 220m 一格 × 每材质一个 Mesh"，
@@ -182,6 +177,19 @@ export class City {
 
   async _init() {
     const yieldFrame = () => new Promise((r) => setTimeout(r, 0));
+    // 地图引用的模型资产：先预热模板缓存（GLB 解析），buildCustomMap 才能
+    // 同步克隆实例；排除区也需要资产的 AABB
+    await preloadAssetTemplatesFromMap(this.data);
+    for (const o of (this.data && this.data.objects) || []) {
+      let box = null;
+      if (o.type === "building") box = footprintAABB(o);
+      else if (o.type === "asset" && o.assetId) {
+        box = assetWorldAABB({ id: o.assetId }, { pos: o.pos, rot: o.rot, scale: o.scale });
+      }
+      if (!box) continue;
+      const M = 2;
+      this.traceBuildingRects.push({ x0: box.minX - M, x1: box.maxX + M, z0: box.minZ - M, z1: box.maxZ + M });
+    }
     this._buildGround();
     this._buildRoads();
     // 描边路 × 程序化横纵路的路口：斑马线必须赶在 _finalize 封批之前加进 markWhite
