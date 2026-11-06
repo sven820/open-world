@@ -9,6 +9,7 @@ import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { bendGeometry } from "../../config/curvature.js";
 import { makeAsphaltTexture, ASPHALT_TILE } from "../../world/textures.js";
+import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "../../world/materials.js";
 
 // 世界米制 planar UV（与运行时 customMap.planarUV 同式）：纹理按世界坐标对齐，
 // 交叠 / 相邻路面的颗粒、明暗斑与轮迹无缝衔接
@@ -152,14 +153,22 @@ export function buildBuildingMesh(obj) {
   if (fp.length < 3) return null;
   const h = obj.params.height || 24;
   const shape = new THREE.Shape(fp);
+  // 墙面/屋顶材质：params 指定标准材料库 id 就用库材质（与游戏世界同一实例，
+  // 预览即所得），否则回退默认素色
+  const wallM = (obj.params.wallMaterial && getMaterial(obj.params.wallMaterial)) || matBuilding();
+  const roofM = (obj.params.roofMaterial && getMaterial(obj.params.roofMaterial)) || matRoof();
   const geo = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false });
   geo.rotateX(-Math.PI / 2); // (x, y, 0..h) → (x, h..0?) 旋转后挤出方向变为 +Y
-  const walls = new THREE.Mesh(geo, matBuilding());
+  const wUV = uvScaleFor(obj.params.wallMaterial) || [FACADE_UV, FACADE_UV]; // 按材质贴图平铺尺度缩放
+  scaleUVs(geo, wUV[0], wUV[1]);
+  const walls = new THREE.Mesh(geo, wallM);
   walls.castShadow = true; walls.receiveShadow = true;
   const roofGeo = new THREE.ShapeGeometry(shape);
   roofGeo.rotateX(-Math.PI / 2);
   roofGeo.translate(0, h, 0);
-  const roof = new THREE.Mesh(roofGeo, matRoof());
+  const rUV = uvScaleFor(obj.params.roofMaterial) || [ROOF_UV, ROOF_UV];
+  scaleUVs(roofGeo, rUV[0], rUV[1]); // 屋顶贴图 4m 平铺
+  const roof = new THREE.Mesh(roofGeo, roofM);
   const group = new THREE.Group();
   group.add(walls, roof);
   return group;

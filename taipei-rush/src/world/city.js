@@ -8,11 +8,12 @@ import {
   Batch, ChunkedBatch, applyColor, scaleUV, boxAt, wallQuad, roofQuad, planeAt, signQuad, cylAt, icoAt,
 } from "./batch.js";
 import {
-  makeFacades, makeStorefronts, makeSignAtlas, signTileRect,
+  signTileRect,
   makeSidewalkTexture, makeAsphaltTexture, makeRoofTexture, makeTileStripTexture,
   ASPHALT_TILE,
 } from "./textures.js";
-import { buildCustomMap, worldBounds, pointInPoly } from "./customMap.js";
+import { getFacadeMaterials, getStorefrontMaterials, getSignMaterial } from "./materials.js";
+import { buildCustomMap, worldBounds, pointInPoly, footprintAABB } from "./customMap.js";
 import { getRenderSettings, onRenderSettingsChange } from "../config/renderSettings.js";
 import {
   computeTraceJunctions, buildTraceCrosswalks,
@@ -132,6 +133,17 @@ export class City {
     }
     this.spawnPoint = null;     // 出生点：编辑器设置的 spawn 优先，未设置时用描边内容包围盒中心
 
+    // 3D 描边建筑排除区：程序化建筑/绿植避让手绘建筑 footprint（含 2m 余量），
+    // 防止自动生成的楼直接穿进/盖住用户描边放置的建筑
+    this.traceBuildingRects = [];
+    for (const o of (data && data.objects) || []) {
+      if (o.type !== "building") continue;
+      const box = footprintAABB(o);
+      if (!box) continue;
+      const M = 2;
+      this.traceBuildingRects.push({ x0: box.minX - M, x1: box.maxX + M, z0: box.minZ - M, z1: box.maxZ + M });
+    }
+
     // ---- 分块渲染调度（按需渲染）----
     // 几何在建城时一次性烘焙到世界坐标并合并成"每 220m 一格 × 每材质一个 Mesh"，
     // 这里给每个 Mesh 记下世界包围球，运行期按玩家距离开关 visible：
@@ -149,9 +161,9 @@ export class City {
     });
 
     this.materials = {};
-    this.facades = makeFacades();
-    this.storefronts = makeStorefronts();
-    this.signAtlas = makeSignAtlas();
+    this.facades = getFacadeMaterials();       // 标准材料库的外墙材质（全局共享实例）
+    this.storefronts = getStorefrontMaterials(); // 店面材质（同库共享）
+    this.signMaterial = getSignMaterial();     // 招牌图集材质（同库共享）
 
     this.facadeBatches = this.facades.map(() => new ChunkedBatch(220));
     this.storefrontBatches = this.storefronts.map(() => new ChunkedBatch(220));
@@ -590,8 +602,15 @@ export class City {
   _inTraceCorridor(x, z) { return inTraceCorridor(this, x, z); }
 
   // 程序化绿植的描边路避让：手绘路穿过的街廓，建筑会被走廊避让跳过，
-  // 但楼间缝/中庭/公园的绿植若照常放置，会从沥青路面下穿出来 —— 走廊内一律不放
-  _corridorBlocked(x, z) { return this.traceCorridors.length > 0 && this._inTraceCorridor(x, z); }
+  // 但楼间缝/中庭/公园的绿植若照常放置，会从沥青路面下穿出来 —— 走廊内一律不放。
+  // 描边建筑 footprint 内同理（会种在别人楼里）
+  _corridorBlocked(x, z) {
+    if (this.traceCorridors.length && this._inTraceCorridor(x, z)) return true;
+    for (const r of this.traceBuildingRects) {
+      if (x > r.x0 && x < r.x1 && z > r.z0 && z < r.z1) return true;
+    }
+    return false;
+  }
 
   // 街区四缘的路灯/行道树/花坛（实现见 world/cityProps.js）
   _streetProps(px0, px1, pz0, pz1, rx0, rx1, rz0, rz1, bx0, bx1, bz0, bz1) {
@@ -954,6 +973,11 @@ export class City {
     for (const r of landRects) {
       if (x0 < r.x1 && x1 > r.x0 && z0 < r.z1 && z1 > r.z0) return;
     }
+    // 3D 描边建筑避让：程序化楼压进手绘建筑 footprint（含余量）则不放，
+    // 该地块留下的空档由后续逐栋检测自然跳过，周边建筑照常生成
+    for (const r of this.traceBuildingRects) {
+      if (x0 < r.x1 && x1 > r.x0 && z0 < r.z1 && z1 > r.z0) return;
+    }
     // 3D 描边道路走廊避让：建筑压住路面/人行道（含退让余量）则不放
     for (const c of this.traceCorridors) {
       if (this._rectHitsCorridor(x0, x1, z0, z1, c)) return;
@@ -1164,27 +1188,17 @@ export class City {
 
   /* ---------------- finalize ---------------- */
   _finalize() {
-    const facadeMats = this.facades.map((f) => new THREE.MeshStandardMaterial({
-      map: f.map,
-      emissiveMap: f.emissive,
-      emissive: new THREE.Color(0xffffff),
-      emissiveIntensity: 0.0,
-      roughness: 0.86,
-      metalness: 0.02,
-    }));
+    // 外墙材质来自标准材料库（与描边建筑/地标共享实例）；
+    // 夜间亮窗由 updateStream 直接改这批实例的 emissiveIntensity
+    const facadeMats = this.facades;
     this.facadeMaterials = facadeMats;
     this.facadeBatches.forEach((b, i) => {
       for (const mesh of b.build(facadeMats[i], { castShadow: true, receiveShadow: true })) this._addChunk(mesh);
     });
 
-    const sfMats = this.storefronts.map((s) => new THREE.MeshStandardMaterial({
-      map: s.map,
-      emissiveMap: s.emissive,
-      emissive: new THREE.Color(0xffffff),
-      emissiveIntensity: 0.2,
-      roughness: 0.55,
-      metalness: 0.05,
-    }));
+    // 店面材质来自标准材料库（与描边建筑共享实例）；夜间店堂灯光
+    // 由 updateStream 直接改这批实例的 emissiveIntensity
+    const sfMats = this.storefronts;
     this.storefrontMaterials = sfMats;
     this.storefrontBatches.forEach((b, i) => {
       for (const mesh of b.build(sfMats[i], { castShadow: false, receiveShadow: true })) this._addChunk(mesh);
@@ -1195,22 +1209,7 @@ export class City {
     this.materials.roof = roofMat;
     for (const roof of this.roofBatch.build(roofMat, { receiveShadow: true })) this._addChunk(roof);
 
-    const signMat = new THREE.MeshStandardMaterial({
-      map: this.signAtlas,
-      emissiveMap: this.signAtlas,
-      emissive: new THREE.Color(0xffffff),
-      emissiveIntensity: 0.5,
-      roughness: 0.6,
-      metalness: 0.0,
-      side: THREE.DoubleSide,
-      transparent: false,
-      // pull signs slightly toward the camera in depth so they never z-fight
-      // with the backing box or wall they sit on
-      polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
-    });
-    this.signMaterial = signMat;
+    const signMat = this.signMaterial; // 材料库共享实例（含防 z-fighting 参数）
     for (const signs of this.signBatch.build(signMat, { castShadow: false, receiveShadow: false })) this._addChunk(signs);
 
     const awnMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.0 });

@@ -39,7 +39,7 @@ function noise(ctx, w, h, amount = 10, alpha = 0.05) {
 
 /* ---------------- facade variants ---------------- */
 // Each tile = 2 bays x 2 floors. One bay 3.2m, one floor 3.2m.
-const FACADE_VARIANTS = [
+export const FACADE_VARIANTS = [
   { id: "old-tile",   base: "#cfc3ae", trim: "#b3a58f", glass: "#3a4652", grill: true,  balcony: false, ac: true,  floors: 2, bays: 2 },
   { id: "apt-grey",   base: "#b9b7b1", trim: "#9b9993", glass: "#42505e", grill: false, balcony: true,  ac: true,  floors: 2, bays: 2 },
   { id: "apt-cream",  base: "#e0d6c2", trim: "#c9bda5", glass: "#3d4b58", grill: true,  balcony: true,  ac: true,  floors: 2, bays: 2 },
@@ -167,7 +167,7 @@ export function makeFacades() {
 
 /* ---------------- storefronts ---------------- */
 // tile 256x256 = one bay (~6m wide, 4m tall)
-const STOREFRONT_STYLES = [
+export const STOREFRONT_STYLES = [
   { id: "convenience", glass: "#dfe9e4", light: "#eafff2", accent: "#2f9e5f", warm: 0.55 },
   { id: "cafe",        glass: "#3a2a22", light: "#ffca8a", accent: "#c98a4b", warm: 0.95 },
   { id: "fashion",     glass: "#2a2430", light: "#ffd0e6", accent: "#e04a8a", warm: 0.8 },

@@ -1,9 +1,10 @@
 // 3D 编辑器描边内容（features.roads/rivers + objects 建筑/树/路灯）→ 运行时世界网格。
 // 编辑器数据为局部平面米制坐标，运行时世界同为平面坐标，直接按坐标构建；
-// 与编辑器渲染语义保持一致：建筑 = footprint（绝对坐标）+ pos 平移 + rot 旋转。
+// 与编辑器渲染语义保持一致：建筑 = footprint（相对 pos 的局部坐标）+ pos 平移 + rot 旋转。
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { mapBounds } from "../data/cityData.js";
+import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "./materials.js";
 import { ASPHALT_TILE, makeAsphaltTexture, makeRoadTileTexture } from "./textures.js";
 
 const wallMat = () => new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.85 });
@@ -600,9 +601,18 @@ function buildingGroup(obj) {
   if (fp.length < 3) return null;
   const h = obj.params.height || 24;
   const shape = new THREE.Shape(fp.map(([x, z]) => new THREE.Vector2(x, -z)));
-  const walls = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }).rotateX(-Math.PI / 2), wallMat());
+  // 墙面/屋顶材质：params 指定了标准材料库 id 就用库材质（与编辑器预览一致，
+  // 选 facade 类还能吃到夜间窗光），否则回退默认素色
+  const wallM = (obj.params.wallMaterial && getMaterial(obj.params.wallMaterial)) || wallMat();
+  const roofM = (obj.params.roofMaterial && getMaterial(obj.params.roofMaterial)) || roofMat();
+  const walls = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }).rotateX(-Math.PI / 2), wallM);
+  // ExtrudeGeometry UV 单位是米，按材质贴图平铺尺度缩放（facade 6.4m / storefront 6×4m）
+  const wUV = uvScaleFor(obj.params.wallMaterial) || [FACADE_UV, FACADE_UV];
+  scaleUVs(walls.geometry, wUV[0], wUV[1]);
   walls.castShadow = true; walls.receiveShadow = true;
-  const roof = new THREE.Mesh(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2).translate(0, h, 0), roofMat());
+  const roof = new THREE.Mesh(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2).translate(0, h, 0), roofM);
+  const rUV = uvScaleFor(obj.params.roofMaterial) || [ROOF_UV, ROOF_UV];
+  scaleUVs(roof.geometry, rUV[0], rUV[1]); // 屋顶贴图 4m 平铺
   const g = new THREE.Group();
   g.add(walls, roof);
   g.position.set(obj.pos[0], 0, obj.pos[1]);
@@ -611,7 +621,7 @@ function buildingGroup(obj) {
 }
 
 // 建筑/树/路灯的碰撞盒（AABB，含编辑器同款 pos+rot 变换）
-function footprintAABB(obj) {
+export function footprintAABB(obj) {
   const fp = (obj.params && obj.params.footprint) || [];
   if (fp.length < 3) return null;
   const c = Math.cos(obj.rot || 0), s = Math.sin(obj.rot || 0);

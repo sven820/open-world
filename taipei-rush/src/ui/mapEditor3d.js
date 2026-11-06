@@ -35,6 +35,7 @@ import {
   rtRebuildOne, rtRebuildGroup, buildRoadTileMesh, TILE_STYLE_ZH, rtRoadGroupOf, tilePorts, rtSetMode,
 } from "./editor3d/roadTiles.js";
 import { rtMiters, RT_PAIR_TOL } from "../world/customMap.js";
+import { listMaterials } from "../world/materials.js";
 
 export class MapEditor3d {
   // opts: { map, onSave(data)=>bool, onPlay(), onClose() }
@@ -229,6 +230,16 @@ export class MapEditor3d {
     });
     tc.addEventListener("mouseUp", () => { this._syncGizmoToData(true); this._pushUndo("变换"); });
     scene.add(tc.getHelper()); // r169 起 TransformControls 不再是 Object3D，需加 helper
+    // Gizmo 永远画在最上层：锚点常落在建筑/道路内部，被自身体积挡住就没法拖
+    tc.getHelper().traverse((o) => {
+      if (o.material) { o.material.depthTest = false; o.material.transparent = true; }
+    });
+    // 选中高亮框：标出当前选中物件（建筑等）的包围盒，弥补 Gizmo 小、建筑大的识别问题
+    this._selHelper = new THREE.BoxHelper(undefined, 0xffc24d);
+    this._selHelper.material.depthTest = false;
+    this._selHelper.material.transparent = true;
+    this._selHelper.visible = false;
+    scene.add(this._selHelper);
 
     this._three = { renderer, scene, camera, canvas, raycaster, groundPlane, orbit, tc, areaGroup };
     this._initOriginMarkers();
@@ -273,6 +284,7 @@ export class MapEditor3d {
       const { orbit, camera, renderer, scene, tc } = this._three;
       orbit.update();
       if (tc.dragging) this._syncGizmoToData();
+      if (this._selHelper && this._selHelper.visible && this.sel) this._selHelper.setFromObject(this.sel.root); // 高亮框跟随选中物
       this._updateDraftPreview();
       this._updateRoadCenterlines();
       this._updateCompass();
@@ -870,7 +882,15 @@ export class MapEditor3d {
       this.status(`河流已生成（${smooth.length} 点，宽 ${w}m）`);
     } else if (this.tool === "draw-building") {
       if (pts.length < 3) { this.status("建筑需要至少 3 个点闭合"); return; }
-      const obj = { id: uid(), type: "building", pos: [pts[0][0], pts[0][1]], rot: 0, params: { height: 24, footprint: pts } };
+      // footprint 存相对 pos（质心）的局部坐标，与树/路灯同款语义：
+      // 渲染 = pos 平移 + 局部 footprint，Gizmo 锚点即建筑中心（旋转绕中心）
+      let cx = 0, cz = 0;
+      for (const [x, z] of pts) { cx += x; cz += z; }
+      cx /= pts.length; cz /= pts.length;
+      const obj = {
+        id: uid(), type: "building", pos: [cx, cz], rot: 0,
+        params: { height: 24, anchorCenter: true, footprint: pts.map(([x, z]) => [x - cx, z - cz]) },
+      };
       this.map.objects.push(obj);
       this._rebuildObjects();
       this._pushUndo("生成建筑");
@@ -1301,7 +1321,8 @@ export class MapEditor3d {
     for (const w of this._three.scene.children.slice()) {
       if (w.userData.entityRoot) {
         this._three.scene.remove(w);
-        w.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+        // 标准材料库共享材质（userData.shared）不随对象重建释放
+        w.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material && !(o.material.userData && o.material.userData.shared)) o.material.dispose(); });
       }
     }
     for (const r of this.map.features.roads) {
@@ -1487,6 +1508,23 @@ export class MapEditor3d {
 
   _buildObjectMesh(o) { return buildObjectMesh(this, o); }
 
+  // 标准材料库 → 下拉框选项（按分类分组，含"默认"项 = 不指定材质）
+  _materialOptions(categories, selected) {
+    const CAT_ZH = { facade: "外墙贴图", roof: "屋顶", surface: "通用材质", storefront: "店面贴图", sign: "招牌" };
+    const mats = listMaterials(categories);
+    let html = `<option value=""${!selected ? " selected" : ""}>默认（素色）</option>`;
+    for (const cat of categories) {
+      const group = mats.filter((m) => m.category === cat);
+      if (!group.length) continue;
+      html += `<optgroup label="${CAT_ZH[cat] || cat}">`;
+      for (const m of group) {
+        html += `<option value="${m.id}"${m.id === selected ? " selected" : ""}>${m.name}</option>`;
+      }
+      html += `</optgroup>`;
+    }
+    return html;
+  }
+
   _addObject(data) {
     this.map.objects.push(data);
     const m = this._buildObjectMesh(data);
@@ -1506,6 +1544,15 @@ export class MapEditor3d {
     } else {
       tc.detach();
       this._renderProps();
+    }
+    // 选中高亮框跟随：仅物件（建筑/树/路灯）显示，拖拽/重建后由 tick 循环保持同步
+    if (this._selHelper) {
+      if (w && w.kind === "object") {
+        this._selHelper.setFromObject(w.root);
+        this._selHelper.visible = true;
+      } else {
+        this._selHelper.visible = false;
+      }
     }
     // 道路（程序化/描边）选中/取消时刷新骨架高亮（金色 = 选中）
     if (wasRoad || (w && (w.kind === "roadX" || w.kind === "roadZ" || w.kind === "road"))) this._rebuildSkeleton();
@@ -1920,6 +1967,8 @@ export class MapEditor3d {
       el.innerHTML = `
         <h4>建筑 · 属性</h4>
         <label>高度(m)<input id="ep-h" type="number" min="4" max="240" value="${data.params.height}" /></label>
+        <label>墙面材质<select id="ep-wm">${this._materialOptions(["facade", "storefront", "sign", "surface"], data.params.wallMaterial)}</select></label>
+        <label>屋顶材质<select id="ep-rm">${this._materialOptions(["roof", "surface"], data.params.roofMaterial)}</select></label>
         ${posEl(data.pos[0], data.pos[1])}
         <div class="me-pos">边数 ${data.params.footprint.length}</div>
         <button class="me-del" id="ep-del">删除</button>`;
@@ -1930,6 +1979,21 @@ export class MapEditor3d {
         if (w) { this.sel = w; this._three.tc.attach(w.root); } // 同步 Gizmo，不重绘面板
       });
       el.querySelector("#ep-h").addEventListener("change", () => this._pushUndo("调整高度"));
+      // 换材质：写 params（稳定 id 落地图 JSON），重建预览并接回 Gizmo
+      const applyMat = (key, val) => {
+        if (val) data.params[key] = val; else delete data.params[key];
+        this._rebuildObjects(); this._dirty = true;
+        const w = this._wrappers.get(data.id);
+        if (w) { this.sel = w; this._three.tc.attach(w.root); }
+      };
+      el.querySelector("#ep-wm").addEventListener("change", (e) => {
+        applyMat("wallMaterial", e.target.value);
+        this._pushUndo("更换墙面材质");
+      });
+      el.querySelector("#ep-rm").addEventListener("change", (e) => {
+        applyMat("roofMaterial", e.target.value);
+        this._pushUndo("更换屋顶材质");
+      });
       el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
     } else {
       const zh = { tree: "树木", lamp: "路灯" }[data.type] || data.type;

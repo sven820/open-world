@@ -112,9 +112,12 @@ function disposeTree(root) {
   root.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
     if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+      // 标准材料库的共享实例（userData.shared）全局复用，不随世界释放；
+      // 其贴图同理跳过
+      if (m.userData && m.userData.shared) return;
       for (const k of Object.keys(m)) {
         const v = m[k];
-        if (v && v.isTexture) v.dispose();
+        if (v && v.isTexture && !(v.userData && v.userData.shared)) v.dispose();
       }
       m.dispose();
     });

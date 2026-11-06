@@ -65,6 +65,19 @@ export function migrate(map) {
   map.procedural = map.procedural === undefined ? false : !!map.procedural;
   // 网格层浓度（3D 编辑器显示偏好；0=完全透出影像，1=默认）
   map.gridOpacity = typeof map.gridOpacity === "number" ? Math.min(1, Math.max(0, map.gridOpacity)) : GRID_OPACITY_DEFAULT;
+  // 描边建筑 footprint 坐标迁移：旧版存绝对坐标 + pos=首顶点，渲染时 pos+fp
+  // 双重偏移（Gizmo 锚点因此远离建筑）。统一转为相对 pos（fp 质心）的局部坐标，
+  // 与树/路灯同款语义；anchorCenter 标记避免重复迁移（幂等）
+  for (const o of map.objects || []) {
+    if (o.type !== "building" || !o.params || !(o.params.footprint || []).length || o.params.anchorCenter) continue;
+    const fp = o.params.footprint;
+    let cx = 0, cz = 0;
+    for (const [x, z] of fp) { cx += x; cz += z; }
+    cx /= fp.length; cz /= fp.length;
+    o.pos = [cx + (o.pos ? o.pos[0] : 0), cz + (o.pos ? o.pos[1] : 0)];
+    o.params.footprint = fp.map(([x, z]) => [x - cx, z - cz]);
+    o.params.anchorCenter = true;
+  }
   // 程序化生成参数（旧地图无此字段 → 用默认值；非法值 clamp 到可调范围）
   const gen = genConfig(map);
   map.gapScale = gen.gapScale;

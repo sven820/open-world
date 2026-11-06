@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { activeLandmarks } from "../data/cityData.js";
+import { getMaterial } from "./materials.js";
 
 function box(w, h, d, x, y, z, mat) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
@@ -15,12 +16,23 @@ function cyl(rt, rb, h, x, y, z, seg, mat, rot = 0) {
   return m;
 }
 
-const glassMat = (c) => new THREE.MeshStandardMaterial({ color: c, metalness: 0.85, roughness: 0.2, emissive: new THREE.Color(c).multiplyScalar(0.06), emissiveIntensity: 1 });
-const concreteMat = () => new THREE.MeshStandardMaterial({ color: 0xd8d8d4, roughness: 0.92 });
-const redMat = () => new THREE.MeshStandardMaterial({ color: 0x9c2f2a, roughness: 0.85 });
-const whiteMat = () => new THREE.MeshStandardMaterial({ color: 0xf2efe8, roughness: 0.9 });
-const blueRoofMat = () => new THREE.MeshStandardMaterial({ color: 0x2f4f8a, roughness: 0.7, metalness: 0.1 });
-const goldMat = () => new THREE.MeshStandardMaterial({ color: 0xc9a23a, metalness: 0.7, roughness: 0.3, emissive: 0x332200, emissiveIntensity: 0.4 });
+// 材质统一取自标准材料库（全局共享实例，与描边建筑/程序化城市同一套材质槽）；
+// 各地标独有的特殊材质（窗、灯笼、立柱等）仍在构建函数内就地创建
+const GLASS_BY_HEX = {
+  0x8a9aa6: "surface:glass-blue",
+  0x7d93a6: "surface:glass-steel",
+  0x9fb2c2: "surface:glass-pale",
+  0xb8c2cc: "surface:glass-light",
+  0x6f9bc4: "surface:glass-sky",
+  0x3a4a58: "surface:glass-dark",
+  0xc9a23a: "surface:gold",
+};
+const glassMat = (c) => getMaterial(GLASS_BY_HEX[c] || "surface:glass-steel");
+const concreteMat = () => getMaterial("surface:concrete");
+const redMat = () => getMaterial("surface:red");
+const whiteMat = () => getMaterial("surface:plaster-white");
+const blueRoofMat = () => getMaterial("surface:blue-roof");
+const goldMat = () => getMaterial("surface:gold");
 
 function addCollider(city, x0, z0, x1, z1, top) { city.colliders.add(x0, z0, x1, z1, top); }
 
@@ -123,7 +135,7 @@ function buildRedHouse(g) {
   // base
   g.add(box(r * 2 + 2, 1.2, r * 2 + 2, 0, 0.6, 0, whiteMat()));
   // windows (emissive)
-  const wm = new THREE.MeshStandardMaterial({ color: 0x16242e, emissive: 0x224, emissiveIntensity: 1 });
+  const wm = getMaterial("surface:win-dark");
   for (let i = 0; i < 8; i++) {
     const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
     g.add(box(2.4, 2.2, 0.4, Math.cos(a) * r * 0.78, 5, Math.sin(a) * r * 0.78, wm));
@@ -134,7 +146,7 @@ function buildTemple(g) {
   // main hall
   g.add(box(28, 12, 18, 0, 6, 0, redMat()));
   // columns
-  const colMat = new THREE.MeshStandardMaterial({ color: 0xc9a23a, roughness: 0.6 });
+  const colMat = getMaterial("surface:brass");
   for (const sx of [-12, 12]) for (const sz of [-8, 8]) g.add(cyl(0.6, 0.6, 12, sx, 6, sz, 8, colMat));
   // swooping roof
   const roof1 = box(34, 1.5, 24, 0, 13, 0, blueRoofMat());
@@ -147,7 +159,7 @@ function buildTemple(g) {
   // steps
   g.add(box(30, 1, 22, 0, 0.5, 0, whiteMat()));
   // lanterns
-  const lantern = new THREE.MeshStandardMaterial({ color: 0xd11f1f, emissive: 0xd11f1f, emissiveIntensity: 1 });
+  const lantern = getMaterial("surface:lantern");
   for (const sx of [-10, 10]) g.add(cyl(1.2, 1.2, 2, sx, 11, 10, 10, lantern));
 }
 
@@ -164,7 +176,7 @@ function buildCKS(g) {
   // entrance arch
   const gate = box(20, 16, 4, 0, 8, -22, whiteMat());
   g.add(gate);
-  g.add(box(8, 8, 5, 0, 8, -22, new THREE.MeshStandardMaterial({ color: 0x2f4f8a, roughness: 0.6 })));
+  g.add(box(8, 8, 5, 0, 8, -22, getMaterial("surface:blue-paint")));
 }
 
 function buildStation(g) {
@@ -182,10 +194,10 @@ function buildStation(g) {
 function buildMRT(g) {
   // round glass entrance kiosk
   g.add(cyl(4, 4, 5, 0, 2.5, 0, 12, glassMat(0x6f9bc4)));
-  const top = cyl(4.4, 4, 0.6, 0, 5.2, 0, 12, new THREE.MeshStandardMaterial({ color: 0xc62828, roughness: 0.6 }));
+  const top = cyl(4.4, 4, 0.6, 0, 5.2, 0, 12, getMaterial("surface:mrt-red"));
   g.add(top);
   // sign
-  const sign = box(6, 1.4, 0.3, 0, 4, 4.2, new THREE.MeshStandardMaterial({ color: 0xc62828, emissive: 0x600, emissiveIntensity: 0.6 }));
+  const sign = box(6, 1.4, 0.3, 0, 4, 4.2, getMaterial("surface:sign-red"));
   g.add(sign);
 }
 
