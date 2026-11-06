@@ -152,9 +152,19 @@ export async function exportAssetGLB(id) {
   if (!asset) return null;
   if (asset.glb) return asset.glb;
   if (asset.traced) {
-    // 描边资产：按同一挤出公式现场重建再导出，保证外观一致
+    // 描边资产：按同一挤出公式现场重建再导出，保证外观一致。
+    // 库共享材质没有 name，Blender 里会显示 Material.001 —— 克隆副本
+    // 按 bindingKey（wall/roof）命名，导入外部软件后可直接辨认
     const { buildTracedAssetObject } = await import("../studio/tracedAsset.js");
     const obj = buildTracedAssetObject(asset);
+    obj.traverse((o) => {
+      if (!o.isMesh) return;
+      const key = o.userData.bindingKey || (o.geometry && o.geometry.type === "ShapeGeometry" ? "roof" : "wall");
+      const m = o.material.clone();
+      m.name = key;
+      delete m.userData.shared; // 导出副本不再标记共享
+      o.material = m;
+    });
     return exportObjectGLB(obj);
   }
   return null;
