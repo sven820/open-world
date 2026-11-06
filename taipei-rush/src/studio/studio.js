@@ -40,6 +40,7 @@ export class ModelStudio {
   }
 
   close() {
+    if (this._disposed) return; // onClose 可能再调 closeStudio()→close()，防重入死循环
     this._disposed = true;
     cancelAnimationFrame(this._raf);
     if (this._tc) this._tc.dispose();
@@ -47,6 +48,9 @@ export class ModelStudio {
     if (this._renderer) this._renderer.dispose();
     for (const u of Object.values(this._thumbUrls || {})) URL.revokeObjectURL(u);
     if (this._el) this._el.remove();
+    // 关键：通知宿主恢复入口 UI（主菜单）。不回调的话菜单停留在 hidden，
+    // 用户关掉工坊后只剩底层游戏世界
+    if (this.opts.onClose) this.opts.onClose();
   }
 
   _buildDOM() {
