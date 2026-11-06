@@ -7,8 +7,11 @@
 //  · 相邻块转角处端头自动对接（圆弧转角 / miter 斜切，见 world/customMap.rtMiters）：
 //    弯道外缘连续、内缘不重叠，路缘石/边线沿转角曲线连续转向
 //  · 贴图为程序化 Canvas（world/textures.makeRoadTileTexture），编辑器与运行时共用
-// 数据存 map.features.roadTiles: [{id, x, z, rot, len, w, style}]，rot 为弧度
+// 数据存 map.features.roadTiles: [{id, x, z, rot, len, w, style, lanes, zh, en,
+// kind, sidewalk, median}]，rot 为弧度
 // （rotation.y=θ 时前进方向 = (sinθ, cosθ)，与物件 rot 语义一致）。
+// zh/en/kind/sidewalk/median 为整条拼接路的组级公共属性：随块存储（组是端口拓扑
+// 的派生分组），组面板批量写入组内所有块，新块端口连通时自动继承。
 // 全部以编辑器实例（ed）为第一参数（mixin 风格，同 measure.js）。
 
 import * as THREE from "three";
@@ -17,6 +20,11 @@ import { makeRoadTileTexture } from "../../world/textures.js";
 import { rtPortPairs, rtMiters, rtTileQuadGeometry, rtEndKey } from "../../world/customMap.js";
 
 export const TILE_STYLE_ZH = { dash: "白虚线", double: "双黄线", plain: "无标线" };
+
+// 整条拼接路的组级公共属性（右侧组面板批量编辑，随块存储 —— 组是端口拓扑的
+// 派生分组不落数据，属性只能落在块上）。新块放置时若端口与旧块连通则自动继承，
+// 保证同一条路的属性一致。lanes 不在此列：它由放置参数决定且直接影响贴图车道线
+const RT_GROUP_PROPS = ["zh", "en", "kind", "sidewalk", "median"];
 
 // 端口占用判定半径（米）：两端口接近到此距离内视为已互连。
 // 放置坐标 round 到 0.1m，取 0.35 覆盖舍入误差，避免同点重复吸附。
@@ -355,12 +363,20 @@ export function rtPlace(ed, pt, shiftKey) {
     style: ed._rtStyle,
     lanes: ed._rtLanes || 1,
   };
+  // 链条为空 = 本次操作的新起点（首块 / 断链后再放 / 磁吸到其他空闲端口重开）：
+  // 之前的操作记录作废（那些块从此归为「之前加的路」，一键清空不再触碰）
+  if (!ed._rtChain || !ed._rtOpIds) ed._rtOpIds = [];
+  ed._rtOpIds.push(t.id); // 记入本次操作：一键清空只移除这些块
   ed.map.features.roadTiles.push(t);
   // 端头斜切是新块与相邻块互相影响的：一次算好，重建新块与其端口相接的旧块
   const miters = rtMiters(ed.map.features.roadTiles);
   ed._makeWrapper("roadTile", t, buildRoadTileMesh(ed, t, false, miters));
   for (const [a, b] of rtPortPairs(ed.map.features.roadTiles)) {
     if (a !== t && b !== t) continue;
+    const other = a === t ? b : a; // 与新块端口连通的旧块
+    // 公共属性继承：端口连通 = 并入同一条拼接路，名称/英文/类型/人行道/分隔带
+    // 从旧块继承（组面板批量编辑随块存的公共属性，同组保持一致）
+    for (const k of RT_GROUP_PROPS) if (t[k] === undefined && other[k] !== undefined) t[k] = other[k];
     rtRebuildTile(ed, a === t ? b : a, miters);
   }
   rtMarkDirty(ed);
@@ -381,6 +397,8 @@ export function rtPlace(ed, pt, shiftKey) {
     const n = el.querySelector("#ep-rt-count"), c = el.querySelector("#ep-rt-chain"); // 轻量刷新统计（不整页重绘，避免打断输入）
     if (n) n.textContent = (ed.map.features.roadTiles || []).length;
     if (c) c.textContent = "延续中";
+    const clr = el.querySelector("#ep-rt-clear");
+    if (clr) { clr.disabled = false; clr.textContent = `一键清空本次操作（${ed._rtOpIds.length} 块）`; }
   }
 }
 
@@ -404,19 +422,72 @@ export function rtRebuildOne(ed, t) {
   if (w) { ed.sel = w; ed._three.tc.attach(w.root); }
 }
 
+// 重建一组路块的网格（组面板批量改车道数等影响贴图的属性后调用）：
+// 不走全量 _rebuildAll（地图大时卡顿），也不改变当前组选择 / 组 Gizmo
+export function rtRebuildGroup(ed, tiles) {
+  const miters = rtMiters(ed.map.features.roadTiles || []);
+  for (const t of tiles) rtRebuildTile(ed, t, miters);
+}
+
 export function rtStart(ed) {
   ed._discardDraft();
   ed._select(null);
   ed._setTool("place-road");
   ed._rtPin = null;
+  ed._rtMode = "place"; // 进入工具默认添加模式（编辑模式不跨会话保留）
+  ed._rtOpIds = []; // 进入工具 = 新会话：之前的操作不可再一键清空（可用 Ctrl+Z）
   rtRenderPanel(ed);
   ed.status("路块拼接：单击落点、瞄准后再击放置 · 靠近空闲端口磁吸单击直放 · Esc 取消落点/断链/退出");
+}
+
+// 模式切换：place = 添加路块（幽灵跟随、单击放置）；edit = 编辑已放路块 / 整条路
+// （无幽灵、单击不放置，改为拾取选中 + Gizmo 移动/旋转，Del 删除，Esc 逐级退回）。
+export function rtSetMode(ed, mode) {
+  if (ed._rtMode === mode) return;
+  ed._rtMode = mode;
+  ed._rtChain = null; // 切模式挂起链条：编辑打断链端，回添加后重新落点 / 磁吸
+  ed._rtPin = null;
+  ed._rtGhostState = null;
+  rtUpdateGhost(ed); // edit 藏幽灵；place 状态空同样无害
+  ed._select(null); // 面板经 _renderProps 拦截切到对应模式（place-road 无选中 → rtRenderPanel）
+  if (mode === "edit") {
+    ed.status("编辑模式：单击路块 / 整条路选中 · Gizmo 移动，W/E 切移动 / 旋转 · Del 删除 · Ctrl+Z 撤销 · Esc 返回添加");
+  } else {
+    ed.status("添加模式：单击落点、瞄准后再击放置 · 靠近空闲端口磁吸单击直放 · Esc 取消落点/断链/退出");
+  }
+}
+
+// 一键清空本次操作：只移除本次链条操作（自上次链条起点）放置的路块，
+// 之前加的路（更早的链条 / 其他路网 / 吸附到的旧路）不受影响。Ctrl+Z 可整体恢复。
+export function rtClearCurrent(ed) {
+  const set = new Set(ed._rtOpIds || []);
+  if (!set.size) return;
+  const tiles = ed.map.features.roadTiles || [];
+  const removed = tiles.filter((t) => set.has(t.id)).length; // 撤销过的块不在数据里，按实际命中数报
+  if (!removed) { ed._rtOpIds = []; rtRenderPanel(ed); return; }
+  ed.map.features.roadTiles = tiles.filter((t) => !set.has(t.id));
+  if (ed.sel && ed.sel.data && set.has(ed.sel.data.id)) { // 选中块被清时兜底取消选择
+    ed._three.tc.detach();
+    ed.sel = null;
+    ed._clearGroupVisuals();
+  }
+  ed._rtChain = null; // 链端随块一起消失
+  ed._rtPin = null;
+  ed._rtOpIds = [];
+  ed._rtGhostState = null;
+  rtUpdateGhost(ed); // 状态已清：藏幽灵，下次移动按无链状态重算
+  ed._rebuildAll(); // 剩余相邻块端头斜切按新拓扑重算（内含 rtMarkDirty）
+  ed._pushUndo("清空本次操作");
+  rtRenderPanel(ed);
+  ed.status(`已清空本次操作（${removed} 块）· 之前加的路未受影响 · Ctrl+Z 可恢复`);
 }
 
 /* ---------------- 右侧参数面板 ---------------- */
 
 export function rtRenderPanel(ed) {
   const el = document.getElementById("e3-props");
+  const editMode = ed._rtMode === "edit";
+  const modeBtn = (m, z) => `<button class="trace-seg${ed._rtMode === m ? " active" : ""}" data-rtmode="${m}">${z}</button>`;
   const styleBtn = ([k, z]) => `<button class="trace-seg${ed._rtStyle === k ? " active" : ""}" data-style="${k}">${z}</button>`;
   const numRow = (id, val, presets, attr, title) => `
     <div class="trace-wrow">
@@ -425,6 +496,10 @@ export function rtRenderPanel(ed) {
     </div>`;
   el.innerHTML = `
     <h4>路块拼接</h4>
+    <div class="trace-row">${modeBtn("place", "添加路块")}${modeBtn("edit", "编辑 / 删除")}</div>
+    ${editMode ? `
+    <div class="me-stat">已放置路块 <b id="ep-rt-count">${(ed.map.features.roadTiles || []).length}</b></div>
+    <p class="me-hint">编辑模式：不放置新路块。单击路块 = 单块编辑；端口连通的整条路单击 = 整条选中，可整体移动 / 旋转 / 删除，再点组内某块回到单块。Gizmo 拖动调整（W 移动 / E 旋转），单块松手自动吸附邻近端口。Del 删除选中 · Ctrl+Z 撤销 · 点空白处取消选择 · Esc 返回添加模式。</p>` : `
     <div class="trace-row">${Object.entries(TILE_STYLE_ZH).map(styleBtn).join("")}</div>
     <div class="me-stat">路块宽度（米，最小 6）</div>
     ${numRow("ep-rt-w", "_rtW", [6, 8, 10, 12], "w", "路块宽度（米，最小 6）")}
@@ -440,7 +515,13 @@ export function rtRenderPanel(ed) {
     </div>
     <div class="me-stat">已放置路块 <b id="ep-rt-count">${(ed.map.features.roadTiles || []).length}</b> · 链条 <b id="ep-rt-chain">${ed._rtChain ? "延续中" : "未开始"}</b></div>
     <button class="me-btn" id="ep-rt-break" ${ed._rtChain ? "" : "disabled"}>断开链条（Esc / Enter）</button>
-    <p class="me-hint">自由放置两段式：单击钉住落点（绿环）→ 移动鼠标瞄准（方向 = 落点 → 光标，状态栏回显角度）→ 再击放置；Esc 取消落点。靠近空闲端口（短边中点）或链条延续时单击直放，方向 = 端口指向光标。方向按角度步进量化，自由模式 Shift 临时 15°；未落点时 Q / E 也可旋转。放置后从出口继续成链，Ctrl+Z 撤销上一块。端口连通的路块自动视为一条路：选择工具下单击整条选中，可整体移动 / 旋转 / 删除。</p>`;
+    <button class="me-btn" id="ep-rt-clear" ${(ed._rtOpIds || []).length ? "" : "disabled"}>一键清空本次操作${(ed._rtOpIds || []).length ? `（${ed._rtOpIds.length} 块）` : ""}</button>
+    <p class="me-hint">自由放置两段式：单击钉住落点（绿环）→ 移动鼠标瞄准（方向 = 落点 → 光标，状态栏回显角度）→ 再击放置；Esc 取消落点。靠近空闲端口（短边中点）或链条延续时单击直放，方向 = 端口指向光标。方向按角度步进量化，自由模式 Shift 临时 15°；未落点时 Q / E 也可旋转。放置后从出口继续成链，Ctrl+Z 撤销上一块。「一键清空」只移除本次链条操作放置的路块，之前加的路不受影响，Ctrl+Z 可整体恢复。要编辑 / 删除已放路块，切到上方「编辑 / 删除」模式。</p>`}`;
+  el.querySelectorAll("[data-rtmode]").forEach((b) => b.addEventListener("click", (e) => {
+    e.currentTarget.blur();
+    rtSetMode(ed, b.dataset.rtmode);
+  }));
+  if (editMode) return; // 编辑模式面板无其他交互元素
   const refreshGhost = () => {
     if (ed._rtGhostState) rtUpdateGhost(ed);
   };
@@ -456,5 +537,9 @@ export function rtRenderPanel(ed) {
     ed._rtChain = null;
     ed.status("已断开链条：下一次单击将重新开始（靠近空闲端口仍会磁吸）");
     rtRenderPanel(ed);
+  });
+  el.querySelector("#ep-rt-clear").addEventListener("click", (e) => {
+    e.currentTarget.blur();
+    rtClearCurrent(ed);
   });
 }

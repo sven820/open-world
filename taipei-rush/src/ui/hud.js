@@ -1,6 +1,6 @@
-import { districtAt } from "../data/cityData.js";
+import { activeDistricts, activeLandmarks, activeRoadsX, activeRoadsZ, activeSpawn, districtAt } from "../data/cityData.js";
 import { getRenderSettings } from "../config/renderSettings.js";
-import { polyCenterLine } from "../world/customMap.js";
+import { drawMap2d, editorGrid } from "./mapView2d.js";
 
 export class Hud {
   constructor(city, player, environment) {
@@ -27,6 +27,17 @@ export class Hud {
     this.bigPosEl = document.getElementById("bm-pos");
     this.fpsEl = document.getElementById("fps");
 
+    // 大地图内容复用 2D 地图编辑器的绘制（只读预览）：取当前激活地图数据。
+    // 默认台北没有存储的地图对象，用 cityData 的激活数据拼一个同构结构
+    //（extRoads 与 city.js 的默认行为一致：无自定义地图时延伸街道开启）
+    this.mapData = city.data || {
+      roadsX: activeRoadsX(), roadsZ: activeRoadsZ(),
+      districts: activeDistricts(), landmarks: activeLandmarks(),
+      spawn: activeSpawn(), extRoads: true,
+      features: null, objects: [], area: null,
+    };
+    this._mapGrid = editorGrid(this.mapData); // 延伸路网派生只算一次（30Hz 重绘共用）
+
     // big map mouse interaction state
     this._bigRot = 0;       // map view rotation (radians), like open-world game maps
     this._bmDrag = null;    // { x, y, btn } while dragging on the big map
@@ -47,109 +58,13 @@ export class Hud {
   _buildStatic() {
     const c = document.createElement("canvas");
     c.width = this.MM; c.height = this.MM;
-    const x = c.getContext("2d");
-    x.fillStyle = "#0c1218"; x.fillRect(0, 0, this.MM, this.MM);
-    for (const bl of this.city.blocks) {
-      const x0 = this._wx(bl.x0), x1 = this._wx(bl.x1);
-      const z0 = this._wz(bl.z0), z1 = this._wz(bl.z1);
-      x.fillStyle = "#1a222c";
-      x.fillRect(x0, z0, x1 - x0, z1 - z0);
-    }
-    x.strokeStyle = "#3a4654";
-    x.lineWidth = 2;
-    for (const r of this.city.roadsX) { x.beginPath(); x.moveTo(this._wx(r.at), 0); x.lineTo(this._wx(r.at), this.MM); x.stroke(); }
-    for (const r of this.city.roadsZ) { x.beginPath(); x.moveTo(0, this._wz(r.at)); x.lineTo(this.MM, this._wz(r.at)); x.stroke(); }
-    x.strokeStyle = "#566375";
-    x.lineWidth = 3.4;
-    for (const r of this.city.roadsX) if (r.kind !== "street") { x.beginPath(); x.moveTo(this._wx(r.at), 0); x.lineTo(this._wx(r.at), this.MM); x.stroke(); }
-    for (const r of this.city.roadsZ) if (r.kind !== "street") { x.beginPath(); x.moveTo(0, this._wz(r.at)); x.lineTo(this.MM, this._wz(r.at)); x.stroke(); }
-    x.fillStyle = "#d94a4a";
-    for (const l of this.city.landmarks) { x.beginPath(); x.arc(this._wx(l.x), this._wz(l.z), 3, 0, 7); x.fill(); }
-    this._drawCustom(x, (v) => this._wx(v), (v) => this._wz(v), this.scale, false);
+    // 静态底图与大地图共用同一套 2D 编辑器渲染（mapView2d，只读预览）：
+    // 街廓/道路/描边道路/河流/拼接路块/建筑/树木/地标显示全部一致；
+    // 小地图视野小，hideLabels 隐藏文字标注只留图形
+    drawMap2d(c.getContext("2d"), this.MM, this.MM, this.mapData,
+      { x: this.cx, z: this.cz, scale: this.scale },
+      { grid: this._mapGrid, showLegend: false, showCompass: false, hideLabels: true });
     this.staticMap = c;
-  }
-
-  // 3D 描边内容叠加：道路/河流折线、建筑轮廓、树木、（大地图）范围描边
-  _drawCustom(ctx, wx, wz, sc, showArea) {
-    const cu = this.city.custom;
-    if (!cu) return;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = "#3d7ba6";
-    for (const r of cu.rivers) {
-      ctx.lineWidth = Math.max(1.5, (r.width || 26) * sc);
-      ctx.beginPath();
-      r.points.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
-      ctx.stroke();
-    }
-    // 描边道路与 2D 地图编辑器同一套显示样式：开路 = 按路宽填充的条带，
-    // 取面路 = 整体填充多边形。不再沿边界描边 —— 旧画法把取面路画成空心轮廓，
-    // 边线宽度随路宽与缩放放大，和横纵路的细线风格不一致。放大后叠加中心虚线。
-    for (const r of cu.roads) {
-      if (!r.points || r.points.length < 2) continue;
-      if (r.closed && r.points.length >= 3) {
-        ctx.fillStyle = "#2c3947";
-        ctx.beginPath();
-        r.points.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
-        ctx.closePath();
-        ctx.fill();
-        if (sc > 0.18) {
-          const cl = polyCenterLine(r.points, 80);
-          if (cl) this._dashLine(ctx, wx, wz, [cl[0], cl[1]]);
-        }
-        continue;
-      }
-      ctx.strokeStyle = "#9aa8b8";
-      ctx.lineWidth = Math.max(2, (r.width || 12) * sc);
-      ctx.beginPath();
-      r.points.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
-      ctx.stroke();
-      if (sc > 0.18) this._dashLine(ctx, wx, wz, r.points);
-    }
-    ctx.fillStyle = "#2c3947";
-    ctx.strokeStyle = "#4b5b6e";
-    ctx.lineWidth = 1;
-    for (const b of cu.buildings) {
-      const fp = (b.params && b.params.footprint) || [];
-      if (fp.length < 3) continue;
-      const c0 = Math.cos(b.rot || 0), s0 = Math.sin(b.rot || 0);
-      ctx.beginPath();
-      fp.forEach(([x, z], i) => {
-        const px = b.pos[0] + x * c0 + z * s0;
-        const pz = b.pos[1] + -x * s0 + z * c0;
-        if (i) ctx.lineTo(wx(px), wz(pz)); else ctx.moveTo(wx(px), wz(pz));
-      });
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    }
-    ctx.fillStyle = "#4d8a5c";
-    for (const t of cu.trees) {
-      ctx.beginPath();
-      ctx.arc(wx(t.pos[0]), wz(t.pos[1]), Math.max(1.5, 2.2 * sc), 0, 7);
-      ctx.fill();
-    }
-    if (showArea && cu.area && cu.area.pts) {
-      ctx.strokeStyle = "#f2c14e";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      cu.area.pts.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
-      ctx.closePath();
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-  }
-
-  // 中心虚线（与 2D 编辑器同款：1px 白色 28%，8/10 虚线段）
-  _dashLine(ctx, wx, wz, pts) {
-    ctx.strokeStyle = "rgba(255,255,255,0.28)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([8, 10]);
-    ctx.beginPath();
-    pts.forEach(([x, z], i) => (i ? ctx.lineTo(wx(x), wz(z)) : ctx.moveTo(wx(x), wz(z))));
-    ctx.stroke();
-    ctx.setLineDash([]);
   }
 
   showNotify(text, ms = 2400) {
@@ -332,25 +247,18 @@ export class Hud {
     const W = cv.width, H = cv.height;
     if (!this._bigScale) { this._bigScale = Math.min(W, H) / Math.max(this.b.maxX - this.b.minX, this.b.maxZ - this.b.minZ) * 0.92; this._bigCx = (this.b.minX + this.b.maxX) / 2; this._bigCz = (this.b.minZ + this.b.maxZ) / 2; }
     const sc = this._bigScale * (this._bigZoom || 1);
-    const wx = (x) => W / 2 + (x - this._bigCx) * sc;
-    const wz = (z) => H / 2 + (z - this._bigCz) * sc;
     ctx.save();
-    ctx.fillStyle = "#070b10"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#0b1014"; ctx.fillRect(0, 0, W, H);
     // rotate the whole map around the screen center
     ctx.translate(W / 2, H / 2);
     ctx.rotate(this._bigRot);
     ctx.translate(-W / 2, -H / 2);
-    for (const bl of this.city.blocks) {
-      ctx.fillStyle = "#171f29";
-      ctx.fillRect(wx(bl.x0), wz(bl.z0), (bl.x1 - bl.x0) * sc, (bl.z1 - bl.z0) * sc);
-    }
-    ctx.strokeStyle = "#454f5e"; ctx.lineWidth = 1.4;
-    for (const r of this.city.roadsX) { ctx.beginPath(); ctx.moveTo(wx(r.at), 0); ctx.lineTo(wx(r.at), H); ctx.stroke(); }
-    for (const r of this.city.roadsZ) { ctx.beginPath(); ctx.moveTo(0, wz(r.at)); ctx.lineTo(W, wz(r.at)); ctx.stroke(); }
-    ctx.fillStyle = "#d94a4a";
-    for (const l of this.city.landmarks) { ctx.beginPath(); ctx.arc(wx(l.x), wz(l.z), 4, 0, 7); ctx.fill(); }
-    this._drawCustom(ctx, wx, wz, sc, true);
-    const px = wx(this.player.pos.x), pz = wz(this.player.pos.z);
+    // 地图内容直接复用 2D 地图编辑器的绘制（只读预览：不传 selected，
+    // 关闭图例/罗盘，不可点选编辑）；玩家位置与指北针仍由 HUD 叠加
+    drawMap2d(ctx, W, H, this.mapData, { x: this._bigCx, z: this._bigCz, scale: sc },
+      { grid: this._mapGrid, showLegend: false, showCompass: false });
+    const px = W / 2 + (this.player.pos.x - this._bigCx) * sc;
+    const pz = H / 2 + (this.player.pos.z - this._bigCz) * sc;
     ctx.fillStyle = "#a8ffb0";
     ctx.beginPath(); ctx.arc(px, pz, 5, 0, 7); ctx.fill();
     ctx.restore();

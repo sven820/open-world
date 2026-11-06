@@ -32,7 +32,7 @@ import {
 } from "./editor3d/meshes.js";
 import {
   rtGhostState, rtUpdateGhost, rtPlace, rtStart, rtLeave, rtMarkDirty, rtDisposeGhost, rtRenderPanel,
-  rtRebuildOne, buildRoadTileMesh, TILE_STYLE_ZH, rtRoadGroupOf, tilePorts,
+  rtRebuildOne, rtRebuildGroup, buildRoadTileMesh, TILE_STYLE_ZH, rtRoadGroupOf, tilePorts, rtSetMode,
 } from "./editor3d/roadTiles.js";
 import { rtMiters, RT_PAIR_TOL } from "../world/customMap.js";
 
@@ -61,6 +61,7 @@ export class MapEditor3d {
     this._rtStyle = "dash";   // 贴图样式
     this._rtLanes = 1;        // 每方向车道数（影响贴图车道分隔线）
     this._rtChain = null;     // 链条粘滞端口 { x, z }（放置后 = 新块出口）
+    this._rtMode = "place";   // 路块工具子模式：place = 添加（幽灵放置），edit = 编辑已放路块/整条路
     this._rtPin = null;       // 自由放置落钉点 { x, z }（两段式：落点 → 瞄准 → 放置）
     this._rtGhostState = null; // 幽灵路块状态
     this._rtYaw = 0;          // 自由放置时的上次方向
@@ -68,6 +69,7 @@ export class MapEditor3d {
     this._rtFreePorts = null;
     this._rtLastRef = null;    // 自由放置时的方向参考点（上次块中心）
     this._rtLastMovePt = null; // 上次光标世界坐标（判定光标是否真正移动）
+    this._rtOpIds = [];        // 本次链条操作放置的路块 id（一键清空只删这些，不影响之前加的路）
     this._measureResult = null; // 上次测距结果 { points: [{x,z}], length }
     this._cesiumOn = localStorage.getItem("tr_e3_basemap") !== "0"; // 记住上次选择
     // 图层显隐状态（图层控制面板）：默认全开；持久化用 v2 键，
@@ -635,11 +637,12 @@ export class MapEditor3d {
     if (t !== "place-road") rtLeave(this); // 离开路块工具：清链条 + 藏幽灵（工具间来回切保留链不做，简单一致）
   }
 
-  // 左侧「道路」按钮显示当前子模式（道路 / 地图描边 / 添加纵路 / 添加横路），子菜单高亮当前项
+  // 左侧「道路」按钮显示当前子模式（道路 / 地图描边 / 添加纵路 / 添加横路 / 路块拼接），子菜单高亮当前项
   _syncRoadToolUI() {
     const btn = document.querySelector('#e3-tools [data-tool="draw-road"]');
     const span = btn && btn.querySelector("span");
-    if (span) span.textContent = { "draw-road": "地图描边", "add-roadX": "添加纵路", "add-roadZ": "添加横路" }[this.tool] || "道路";
+    if (span) span.textContent = { "draw-road": "地图描边", "add-roadX": "添加纵路", "add-roadZ": "添加横路", "place-road": "路块拼接" }[this.tool] || "道路";
+    if (btn) btn.classList.toggle("active", ["draw-road", "add-roadX", "add-roadZ", "place-road"].includes(this.tool)); // 任一子模式激活时高亮「道路」按钮
     if (this._roadSub) this._roadSub.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.tool === this.tool));
   }
 
@@ -777,6 +780,7 @@ export class MapEditor3d {
       this._updateDraftPreview();
       this._renderAreaDraftPanel();
     } else if (this.tool === "place-road") {
+      if (this._rtMode === "edit") { this._pickSelectAt(e, pt); return; } // 编辑模式：单击拾取路块 / 整条路
       this._roadTilePlace(e); // 放置/延续路块链（磁吸与方向已在幽灵状态里算好）
     } else if (this.tool === "place-tree" || this.tool === "place-lamp") {
       const type = this.tool === "place-tree" ? "tree" : "lamp";
@@ -797,25 +801,33 @@ export class MapEditor3d {
     } else if (this.tool === "measure" && this.draft && this.draft.measure) {
       this._measureAddPoint(pt, e);
     } else if (this.tool === "select") {
-      const picked = this._pickObject(e);
-      if (picked && picked.wrapper.kind === "roadTile") {
-        // 拼接路两级选择：端口连通的整条路优先（单击 = 选整条）；组已选中时
-        // 再点组内某块 = 回到单块编辑；孤立的散块（组内仅 1 块）直接单选
-        const grp = rtRoadGroupOf(this.map.features.roadTiles || [], picked.wrapper.data);
-        const inSelGroup = this.sel && this.sel.kind === "roadGroup" && grp.includes(picked.wrapper.data);
-        if (grp.length > 1 && !inSelGroup) this._selectRoadGroup(grp, picked.wrapper);
-        else this._select(picked.wrapper);
-      } else if (picked) this._select(picked.wrapper);
-      else {
-        const road = this._pickRoad(pt);
-        if (road) this._selectRoad(road);
-        else this._select(null);
-      }
+      this._pickSelectAt(e, pt);
+    }
+  }
+
+  // 选择拾取（select 工具与路块工具编辑模式共用）：拼接路两级选择 —— 端口连通的
+  // 整条路优先（单击 = 选整条）；组已选中时再点组内某块 = 回到单块编辑；孤立的
+  // 散块（组内仅 1 块）直接单选；空点 = 选描边道路 / 取消选择
+  _pickSelectAt(e, pt) {
+    const picked = this._pickObject(e);
+    if (picked && picked.wrapper.kind === "roadTile") {
+      const grp = rtRoadGroupOf(this.map.features.roadTiles || [], picked.wrapper.data);
+      const inSelGroup = this.sel && this.sel.kind === "roadGroup" && grp.includes(picked.wrapper.data);
+      if (grp.length > 1 && !inSelGroup) this._selectRoadGroup(grp, picked.wrapper);
+      else this._select(picked.wrapper);
+    } else if (picked) this._select(picked.wrapper);
+    else {
+      const road = this._pickRoad(pt);
+      if (road) this._selectRoad(road);
+      else this._select(null);
     }
   }
 
   _onMove(e) {
-    if (this.tool === "place-road") { this._roadTileMove(e); return; } // 幽灵路块跟随（无需草稿）
+    if (this.tool === "place-road") {
+      if (this._rtMode === "edit") return; // 编辑模式：无幽灵跟随，Gizmo 拖拽由 TransformControls 自理
+      this._roadTileMove(e); return; // 幽灵路块跟随（无需草稿）
+    }
     const d = this.draft;
     if (!d || !(this.tool.startsWith("draw") || d.area || d.measure)) return;
     let pt = this._groundPoint(e);
@@ -1609,11 +1621,13 @@ export class MapEditor3d {
     this._clearGroupVisuals();
     this._rebuildAll();
     this._pushUndo("删除");
+    this._renderProps(); // 删除后右侧面板回无选中态（路块编辑模式 = 拼接面板）
     this.status(kind === "roadGroup" ? `已删除整条拼接路（${data.length} 块）` : "已删除");
   }
 
   _renderProps() {
     const el = document.getElementById("e3-props");
+    if (!this.sel && this.tool === "place-road") { rtRenderPanel(this); return; } // 路块工具无选中：右侧显示拼接面板（含添加/编辑模式切换），而非地图统计
     if (!this.sel) {
       const f = this.map.features;
       const opT = Math.round((1 - (this.map.gridOpacity ?? GRID_OPACITY_DEFAULT)) * 100); // 网格透明度%（0=默认浓度，100=完全透出影像）
@@ -1816,13 +1830,40 @@ export class MapEditor3d {
     if (kind === "roadGroup") {
       const tiles = data;
       const total = tiles.reduce((s, t) => s + (t.len || 3), 0);
+      // 组级公共属性随块存储（组是端口拓扑的派生分组，不落数据）：显示取组内
+      // 第一个有值的块，编辑批量写入组内所有块；新块放置时从连通旧块自动继承
+      const prop = (k, d) => { for (const t of tiles) if (t[k] !== undefined) return t[k]; return d; };
+      const zh = prop("zh", ""), en = prop("en", ""), rkind = prop("kind", "street");
+      const lanes = prop("lanes", 1), sw = prop("sidewalk", 3), md = prop("median", 0);
       el.innerHTML = `
         <h4>拼接路 · 整条</h4>
         <div class="me-stat">路块 <b>${tiles.length}</b> · 总长约 <b>${Math.round(total)}m</b></div>
+        <label>名称<input id="ep-r-zh" value="${zh}" maxlength="10" /></label>
+        <label>英文名<input id="ep-r-en" value="${en}" maxlength="24" /></label>
+        <label>类型<select id="ep-r-kind">${ROAD_KINDS.map((k) => `<option value="${k}" ${k === rkind ? "selected" : ""}>${ROAD_KIND_ZH[k]}</option>`).join("")}</select></label>
+        <label>车道（每方向）<select id="ep-r-lanes">${[1, 2, 3, 4].map((n) => `<option ${n === lanes ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+        <label>人行道宽（m）<input id="ep-r-sw" type="number" min="0" max="12" value="${sw}" /></label>
+        <label>分隔带宽（m）<input id="ep-r-md" type="number" min="0" max="14" value="${md}" /></label>
         <div class="me-pos">按端口连通自动分组：整条移动/旋转时块间贴合关系保持</div>
         <button class="me-btn" id="ep-rg-one">单独编辑一块</button>
         <button class="me-del" id="ep-del">删除整条路</button>
-        <p class="me-hint">Gizmo 平移整条路；E 键切旋转 = 绕组质心整体旋转。「单独编辑」后再点组内任一路块可单块调整；拼接工具下从路两端可继续延长，新块自动并入这条路；Ctrl+Z 撤销。</p>`;
+        <p class="me-hint">公共属性（名称/类型/车道/人行道/分隔带）与横纵路同套，批量写入组内所有路块；链条延续或磁吸并入的新块自动继承。车道数会同步刷新路块贴图。Gizmo 平移整条路；E 键切旋转 = 绕组质心整体旋转。「单独编辑」后再点组内任一路块可单块调整；Ctrl+Z 撤销。</p>`;
+      // 公共属性批量写组内所有块；名称同横纵路逐键实时写（change 需失焦），change 时入撤销栈
+      const writeAll = (fn) => { for (const t of tiles) fn(t); this._dirty = true; };
+      const editAll = (fn, label) => { writeAll(fn); this._pushUndo(label); };
+      const live = (fn) => (e) => writeAll((t) => fn(t, e));
+      el.querySelector("#ep-r-zh").addEventListener("input", live((t, e) => { t.zh = e.target.value; }));
+      el.querySelector("#ep-r-en").addEventListener("input", live((t, e) => { t.en = e.target.value; }));
+      el.querySelector("#ep-r-zh").addEventListener("change", () => editAll(() => {}, "编辑拼接路名称"));
+      el.querySelector("#ep-r-en").addEventListener("change", () => editAll(() => {}, "编辑拼接路英文名"));
+      el.querySelector("#ep-r-kind").addEventListener("change", (e) => editAll((t) => { t.kind = e.target.value; }, "编辑拼接路类型"));
+      el.querySelector("#ep-r-lanes").addEventListener("change", (e) => {
+        editAll((t) => { t.lanes = +e.target.value || 1; }, "编辑拼接路车道数");
+        rtRebuildGroup(this, tiles); // 车道数影响路块贴图车道线：组内网格重建（组选择 / Gizmo 不动）
+        this.status("已更新整条路车道数 · 路块贴图已刷新");
+      });
+      el.querySelector("#ep-r-sw").addEventListener("change", (e) => editAll((t) => { t.sidewalk = clamp(+e.target.value || 0, 0, 12); }, "编辑拼接路人行道"));
+      el.querySelector("#ep-r-md").addEventListener("change", (e) => editAll((t) => { t.median = clamp(+e.target.value || 0, 0, 14); }, "编辑拼接路分隔带"));
       el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
       el.querySelector("#ep-rg-one").addEventListener("click", () => {
         if (this._rtGroupFocus && this._wrappers.get(this._rtGroupFocus.data.id)) this._select(this._rtGroupFocus);
@@ -2121,7 +2162,6 @@ export class MapEditor3d {
       ["select", "◇", "选择/移动"],
       ["area", "▢", "地图范围"],
       ["draw-road", "║", "道路"],
-      ["place-road", "▦", "路块拼接"],
       ["draw-river", "≈", "河流描边"],
       ["draw-building", "▲", "建筑描边"],
       ["place-tree", "♣", "放置树木"],
@@ -2131,7 +2171,7 @@ export class MapEditor3d {
     bar.innerHTML = tools.map(([t, icon, label], i) =>
       `<button class="e3-tool${i === 0 ? " active" : ""}" data-tool="${t}">${icon}<span>${label}</span></button>`).join("");
 
-    // 「道路」子菜单：点击向右弹出（添加纵路 / 添加横路 / 地图描边，取代原独立按钮）
+    // 「道路」子菜单：点击向右弹出（添加纵路 / 添加横路 / 地图描边 / 路块拼接，取代原独立按钮）
     const roadBtn = bar.querySelector('[data-tool="draw-road"]');
     roadBtn.classList.add("has-sub");
     const roadSub = document.createElement("div");
@@ -2139,7 +2179,8 @@ export class MapEditor3d {
     roadSub.innerHTML =
       `<button data-tool="add-roadX">‖<span>添加纵路</span></button>` +
       `<button data-tool="add-roadZ">═<span>添加横路</span></button>` +
-      `<button data-tool="draw-road">║<span>地图描边</span></button>`;
+      `<button data-tool="draw-road">║<span>地图描边</span></button>` +
+      `<button data-tool="place-road">▦<span>路块拼接</span></button>`;
     bar.appendChild(roadSub);
     this._roadSub = roadSub; // 供 _syncRoadToolUI 高亮当前子模式
     const closeRoadSub = () => roadSub.classList.add("hidden");
@@ -2148,14 +2189,17 @@ export class MapEditor3d {
         const t = b.dataset.tool;
         closeRoadSub();
         if (t === "draw-road") { this._startRoadTrace(); return; }
+        if (t === "place-road") { this._rtPin = null; this._rtGhostState = null; } // 重置落点/幽灵状态
         this._discardDraft();
         this.tool = t;
-        bar.querySelectorAll(".e3-tool").forEach((x) => x.classList.toggle("active", x === roadBtn));
-        this._syncRoadToolUI();
+        this._syncRoadToolUI(); // 文案 + 子菜单高亮 + 「道路」按钮激活
         this._select(null);
-        this.status(t === "add-roadX"
-          ? "添加纵向路（南北向）：点击地图放置，放置后可拖动/编辑属性"
-          : "添加横向路（东西向）：点击地图放置，放置后可拖动/编辑属性");
+        if (t === "place-road") rtRenderPanel(this); // 路块工具右侧参数面板（替代默认地图内容面板）
+        this.status({
+          "add-roadX": "添加纵向路（南北向）：点击地图放置，放置后可拖动/编辑属性",
+          "add-roadZ": "添加横向路（东西向）：点击地图放置，放置后可拖动/编辑属性",
+          "place-road": "路块拼接：单击落点、瞄准后再击放置 · 靠近空闲端口磁吸单击直放 · Esc 取消落点/断链/退出",
+        }[t] || "");
       });
     });
 
@@ -2173,15 +2217,9 @@ export class MapEditor3d {
           this.status("地图范围：Gizmo 拖拽移动 · 右侧可数值编辑 / 描边绘制多边形");
           return;
         }
-        if (t === "place-road") {
-          this._rtPin = null;
-          this._rtGhostState = null;
-          rtRenderPanel(this); // 路块工具右侧参数面板（替代默认地图内容面板）
-        }
         this.status({
           "draw-river": "河流描边：点击加点，双击结束（宽度默认 26m）",
           "draw-building": "建筑描边：点击多边形顶点（≥3 点自动闭合生成盒子）",
-          "place-road": "路块拼接：单击落点、瞄准后再击放置 · 靠近空闲端口磁吸单击直放 · Esc 取消落点/断链/退出",
           "place-tree": "点击地面放置树木",
           "place-lamp": "点击地面放置路灯",
         }[t] || "");
@@ -2211,6 +2249,11 @@ export class MapEditor3d {
         closeRoadSub();
         if (this.tool === "set-origin") { this._setTool("select"); this.status("已取消锚点拾取"); return; }
         if (this.tool === "place-road") {
+          if (this._rtMode === "edit") {
+            if (this.sel) { this._select(null); this.status("已取消选择 · Esc 再次返回添加模式"); } // 分级退回：先取消选择
+            else rtSetMode(this, "place");
+            return;
+          }
           if (this._rtPin) {
             this._rtPin = null; // 分阶段取消：先取消落点，再断链，最后退出工具
             this._rtGhostState = null;
@@ -2245,7 +2288,7 @@ export class MapEditor3d {
       }
       else if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); this._undo(); }
       else if ((e.ctrlKey || e.metaKey) && e.key === "y") { e.preventDefault(); this._redo(); }
-      else if (this.tool === "place-road" && (e.key === "q" || e.key === "Q" || e.key === "e" || e.key === "E")) {
+      else if (this.tool === "place-road" && this._rtMode !== "edit" && (e.key === "q" || e.key === "Q" || e.key === "e" || e.key === "E")) {
         // 路块工具下 Q/E 旋转幽灵（自由放置态；吸附态方向由端口→光标决定，会被移动刷新覆盖）
         const st = this._rtGhostState;
         if (st && !st.anchor) {
