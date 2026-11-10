@@ -37,7 +37,7 @@ import {
 import { rtMiters, RT_PAIR_TOL } from "../world/customMap.js";
 import { listMaterials } from "../world/materials.js";
 import { listAssets, getAsset, createAssetFromTraced } from "../data/assetStore.js";
-import { getAssetTemplateIfReady, warmAssetTemplate, assetInstance } from "../world/assetMesh.js";
+import { getAssetTemplateIfReady, warmAssetTemplate, assetInstance, updateAssetAnimations } from "../world/assetMesh.js";
 
 export class MapEditor3d {
   // opts: { map, onSave(data)=>bool, onPlay(), onClose() }
@@ -130,6 +130,12 @@ export class MapEditor3d {
       this._labelTex.clear();
     }
     rtDisposeGhost(this); // 路块幽灵网格（非 entityRoot，不在 _rebuildAll 清理范围）
+    if (this._assetGhost) { // 模型幽灵盒（同上）
+      if (this._three) this._three.scene.remove(this._assetGhost);
+      this._assetGhost.geometry.dispose();
+      this._assetGhost.material.dispose();
+      this._assetGhost = null;
+    }
     window.removeEventListener("resize", this._onResize);
     window.removeEventListener("keydown", this._onKey);
     if (this._compassEl) {
@@ -232,7 +238,12 @@ export class MapEditor3d {
       if (this.sel && this.sel.kind === "area") this._syncAreaFromGroup(); // 拖拽中实时重烘焙曲率
       this._dirty = true;
     });
-    tc.addEventListener("mouseUp", () => { this._syncGizmoToData(true); this._pushUndo("变换"); });
+    tc.addEventListener("mouseUp", () => {
+      this._syncGizmoToData(true);
+      this._pushUndo("变换");
+      // Gizmo 旋转/缩放后同步属性面板数值（旋转角度等）
+      if (this.sel && this.sel.kind === "object" && this.sel.data && this.sel.data.type === "asset") this._renderProps();
+    });
     scene.add(tc.getHelper()); // r169 起 TransformControls 不再是 Object3D，需加 helper
     // Gizmo 永远画在最上层：锚点常落在建筑/道路内部，被自身体积挡住就没法拖
     tc.getHelper().traverse((o) => {
@@ -289,6 +300,8 @@ export class MapEditor3d {
       orbit.update();
       if (tc.dragging) this._syncGizmoToData();
       if (this._selHelper && this._selHelper.visible && this.sel) this._selHelper.setFromObject(this.sel.root); // 高亮框跟随选中物
+      this._clock = this._clock || new THREE.Clock();
+      updateAssetAnimations(this._clock.getDelta()); // 资产内建动画（如小火车）
       this._updateDraftPreview();
       this._updateRoadCenterlines();
       this._updateCompass();
@@ -651,6 +664,7 @@ export class MapEditor3d {
     document.querySelectorAll("#e3-tools .e3-tool").forEach((b) => b.classList.toggle("active", b.dataset.tool === t));
     this._syncRoadToolUI();
     if (t !== "place-road") rtLeave(this); // 离开路块工具：清链条 + 藏幽灵（工具间来回切保留链不做，简单一致）
+    if (t !== "place-asset") this._hideAssetGhost();
   }
 
   // 左侧「道路」按钮显示当前子模式（道路 / 地图描边 / 添加纵路 / 添加横路 / 路块拼接），子菜单高亮当前项
@@ -804,8 +818,17 @@ export class MapEditor3d {
       this._pushUndo("放置" + (type === "tree" ? "树木" : "路灯"));
     } else if (this.tool === "place-asset") {
       if (!this._placingAsset) { this.status("请先在右侧「我的模型」中选择一个资产"); return; }
-      this._addObject({ id: uid(), type: "asset", assetId: this._placingAsset.id, pos: [pt.x, pt.z], rot: 0, scale: 1 });
+      const a = this._placingAsset;
+      // 自动适配比例：GLB 建模单位不统一（同一栋楼可能是 5m 也可能是 552m），
+      // 按用户设定的"目标尺寸"（最大边，默认 30m）换算缩放，避免放置即巨物/蚁物
+      const s = a.unitSize || { x: 4, y: 4, z: 4 };
+      const maxDim = Math.max(s.x, s.y, s.z) || 1;
+      const target = this._assetTargetSize || 30;
+      const scale = clamp(+(target / maxDim).toFixed(4), 0.001, 1000);
+      const sp = this._assetSnapPoint(pt); // 与幽灵预览同一吸附逻辑：所见即所得
+      this._addObject({ id: uid(), type: "asset", assetId: a.id, pos: sp.pos, rot: 0, scale });
       this._pushUndo("放置模型资产");
+      this.status(`已放置「${a.name}」· 最大边适配为 ${target}m · ${sp.onRoad ? "吸附路缘" : "网格吸附"}`);
     } else if (this.tool === "add-roadX" || this.tool === "add-roadZ") {
       const r = this.tool === "add-roadX"
         ? { id: uid(), zh: "新纵路", en: "New Rd", at: Math.round(pt.x), kind: "street", lanes: 1, median: 0, sidewalk: 3 }
@@ -847,6 +870,9 @@ export class MapEditor3d {
     if (this.tool === "place-road") {
       if (this._rtMode === "edit") return; // 编辑模式：无幽灵跟随，Gizmo 拖拽由 TransformControls 自理
       this._roadTileMove(e); return; // 幽灵路块跟随（无需草稿）
+    }
+    if (this.tool === "place-asset") {
+      this._assetGhostMove(e); return; // 模型幽灵跟随 + 吸附预览
     }
     const d = this.draft;
     if (!d || !(this.tool.startsWith("draw") || d.area || d.measure)) return;
@@ -1329,8 +1355,11 @@ export class MapEditor3d {
     for (const w of this._three.scene.children.slice()) {
       if (w.userData.entityRoot) {
         this._three.scene.remove(w);
-        // 标准材料库共享材质（userData.shared）不随对象重建释放
-        w.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material && !(o.material.userData && o.material.userData.shared)) o.material.dispose(); });
+        // 资产实例（sharedTpl）的几何/材质与模板缓存共享，dispose 会把 GPU 缓冲
+        // 一并释放，下次渲染重新上传 —— 资产多时每次重建都是卡顿尖峰，故跳过；
+        // 标准材料库共享材质（userData.shared）同样不随对象重建释放
+        const shared = w.children[0] && w.children[0].userData && w.children[0].userData.sharedTpl;
+        if (!shared) w.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material && !(o.material.userData && o.material.userData.shared)) o.material.dispose(); });
       }
     }
     for (const r of this.map.features.roads) {
@@ -1545,26 +1574,100 @@ export class MapEditor3d {
     if (tpl) return assetInstance(asset, { scale: o.scale });
     warmAssetTemplate(asset).then((t) => { if (t) this._rebuildObjects(); });
     const s = asset.unitSize || { x: 4, y: 4, z: 4 };
+    const k = o.scale == null ? 1 : o.scale;
     const ph = new THREE.Mesh(
-      new THREE.BoxGeometry(Math.max(1, s.x), Math.max(1, s.y), Math.max(1, s.z)),
+      new THREE.BoxGeometry(Math.max(0.1, s.x * k), Math.max(0.1, s.y * k), Math.max(0.1, s.z * k)),
       new THREE.MeshBasicMaterial({ color: 0x3a72b0, wireframe: true }),
     );
-    ph.position.y = Math.max(1, s.y) / 2;
+    ph.position.y = Math.max(0.1, s.y * k) / 2;
     return ph;
+  }
+
+  /* ---------------- 放置幽灵 + 吸附（place-asset） ---------------- */
+  // 幽灵是单个半透明盒（不克隆多 mesh 模板），且只在 pointermove 时更新位置
+  // —— 无每帧成本，任何规模地图上都不产生性能负担
+  _ensureAssetGhost() {
+    if (this._assetGhost) return;
+    this._assetGhost = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.32, depthWrite: false }),
+    );
+    this._assetGhost.visible = false;
+    this._three.scene.add(this._assetGhost);
+  }
+
+  _hideAssetGhost() {
+    if (this._assetGhost) this._assetGhost.visible = false;
+  }
+
+  _assetGhostMove(e) {
+    if (!this._placingAsset) { this._hideAssetGhost(); return; }
+    const pt = this._groundPoint(e);
+    if (!pt) { this._hideAssetGhost(); return; }
+    const sp = this._assetSnapPoint(pt);
+    const us = this._placingAsset.unitSize || { x: 4, y: 4, z: 4 };
+    const target = this._assetTargetSize || 30;
+    const k = target / (Math.max(us.x, us.y, us.z) || 1);
+    this._ensureAssetGhost();
+    const g = this._assetGhost;
+    g.scale.set(Math.max(0.5, us.x * k), Math.max(0.5, us.y * k), Math.max(0.5, us.z * k));
+    g.position.set(sp.pos[0], Math.max(0.5, us.y * k) / 2, sp.pos[1]); // 底面贴地
+    g.material.color.setHex(sp.onRoad ? 0xffc24d : 0x3a72b0); // 金色 = 吸附路缘，蓝色 = 网格吸附
+    g.visible = true;
+  }
+
+  // 吸附落点：优先路缘（12m 内最近路块，投影到路缘线、沿路向限制在块内），
+  // 否则按编辑器网格步长（_snap，默认 5m）取整。放置与幽灵共用，保证所见即所得
+  _assetSnapPoint(pt) {
+    const snap = this._snap || 5;
+    const grid = { pos: [Math.round(pt.x / snap) * snap, Math.round(pt.z / snap) * snap], onRoad: false };
+    const tiles = this.map.features.roadTiles || [];
+    if (!tiles.length) return grid;
+    const R2 = 12 * 12;
+    let best = null;
+    for (let i = 0; i < tiles.length; i++) {
+      const t = tiles[i];
+      const dx = pt.x - t.x, dz = pt.z - t.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > R2 || (best && d2 >= best.d2)) continue;
+      const rot = t.rot || 0, c = Math.cos(rot), s = Math.sin(rot);
+      // 世界 → 路块局部（旋转变换约定同 assetWorldAABB）
+      const lx = dx * c - dz * s, lz = dx * s + dz * c;
+      const halfL = (t.len || 20) / 2, halfW = (t.w || 10) / 2;
+      if (Math.abs(lx) > halfL + 2 || Math.abs(lz) > halfW + 6) continue; // 只吸块附近
+      best = { d2, t, lx: clamp(lx, -halfL, halfL), lz: lz >= 0 ? halfW : -halfW };
+    }
+    if (!best) return grid;
+    const t = best.t, rot = t.rot || 0, c = Math.cos(rot), s = Math.sin(rot);
+    const wx = t.x + best.lx * c + best.lz * s;
+    const wz = t.z - best.lx * s + best.lz * c;
+    return { pos: [Math.round(wx * 10) / 10, Math.round(wz * 10) / 10], onRoad: true };
   }
 
   // 右侧「我的模型」选择面板（place-asset 工具的无选中状态）
   async _renderAssetPicker(el) {
     const list = await listAssets();
+    if (this._pickerThumbUrls) for (const u of Object.values(this._pickerThumbUrls)) URL.revokeObjectURL(u);
+    this._pickerThumbUrls = {};
     el.innerHTML = `
       <h4>我的模型 <small>ASSETS</small></h4>
       ${list.length ? list.map((a) => `
         <div class="me-asset-item${this._placingAsset && this._placingAsset.id === a.id ? " active" : ""}" data-id="${a.id}">
-          <b>${escHtml(a.name || "未命名")}</b>
-          <small>${escHtml(a.category || "")} · ${a.unitSize ? `${a.unitSize.x}×${a.unitSize.y}×${a.unitSize.z}m` : "?"}</small>
+          ${a.thumb ? `<img src="${this._pickerThumbUrls[a.id] = URL.createObjectURL(a.thumb)}" alt="" />` : `<span class="me-asset-thumb-empty"></span>`}
+          <div class="me-asset-info">
+            <b>${escHtml(a.name || "未命名")}</b>
+            <small>${escHtml(a.category || "")} · ${a.unitSize ? `${a.unitSize.x}×${a.unitSize.y}×${a.unitSize.z}m` : "?"}</small>
+          </div>
         </div>`).join("")
       : `<p class="me-hint">资产库为空。去「模型工坊」导入 GLB 或新建模型。</p>`}
-      <p class="me-hint">选中后点击地图放置 · Gizmo 可移动/旋转 · Delete 删除 · E 键旋转朝向</p>`;
+      <label class="me-asset-target">放置目标尺寸（米 · 按模型最大边适配）
+        <input id="me-asset-target" type="number" min="1" max="2000" step="1" value="${this._assetTargetSize || 30}" />
+      </label>
+      <p class="me-hint">选中后移动鼠标预览位置：靠近道路自动吸附路缘（金框），空白处按网格吸附（蓝框）· 单击放置 · Gizmo 可移动/旋转 · Delete 删除 · E 键旋转朝向</p>`;
+    el.querySelector("#me-asset-target").addEventListener("change", (e) => {
+      this._assetTargetSize = clamp(+e.target.value || 30, 1, 2000);
+      e.target.value = this._assetTargetSize;
+    });
     for (const item of el.querySelectorAll(".me-asset-item")) {
       item.addEventListener("click", () => {
         const a = list.find((x) => x.id === item.dataset.id);
@@ -2078,19 +2181,50 @@ export class MapEditor3d {
       el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
     } else if (kind === "object" && data.type === "asset") {
       const asset = this._assetCache.get(data.assetId);
+      // 尺寸信息与按尺寸调整：unitSize 是模型本地的包围盒（米），乘缩放 = 放置后的实际尺寸
+      const us = (asset && asset.unitSize) || null;
+      const k = data.scale ?? 1;
+      const fmt = (v) => (Math.round(v * 10) / 10).toFixed(1);
+      const cur = us ? { x: us.x * k, y: us.y * k, z: us.z * k } : null;
+      const maxDim = us ? Math.max(us.x, us.y, us.z) || 1 : 1;
       el.innerHTML = `
         <h4>模型资产 · 属性</h4>
         <div class="me-pos">${asset ? escHtml(asset.name || "未命名") : data.assetId}</div>
-        <label>缩放<input id="ep-scale" type="number" min="0.1" max="50" step="0.1" value="${data.scale ?? 1}" /></label>
+        ${us ? `
+        <div class="me-stat">原始尺寸<b>${fmt(us.x)} × ${fmt(us.y)} × ${fmt(us.z)} m</b></div>
+        <div class="me-stat">当前尺寸<b id="ep-cursize">${fmt(cur.x)} × ${fmt(cur.y)} × ${fmt(cur.z)} m</b></div>
+        <label class="me-row">按最大边调整<input id="ep-fitmax" class="me-input-wide" type="number" min="0.1" max="5000" step="1" value="${fmt(Math.max(cur.x, cur.y, cur.z))}" /></label>
+        <label class="me-row">缩放<input id="ep-scale" class="me-input-wide" type="number" min="0.001" max="1000" step="0.001" value="${k}" /></label>
+        ` : `<label class="me-row">缩放<input id="ep-scale" class="me-input-wide" type="number" min="0.001" max="1000" step="0.001" value="${k}" /></label>`}
+        <label class="me-row">旋转(°)<input id="ep-rot" class="me-input-wide" type="number" min="0" max="360" step="5" value="${Math.round(((data.rot || 0) * 180 / Math.PI % 360 + 360) % 360)}" /></label>
         ${posEl(data.pos[0], data.pos[1])}
         <button class="me-btn" id="ep-editasset">在模型工坊中编辑</button>
         <button class="me-del" id="ep-del">删除</button>`;
-      el.querySelector("#ep-scale").addEventListener("change", (e) => {
-        data.scale = clamp(+e.target.value || 1, 0.1, 50);
+      const applyScale = (s, undoLabel) => {
+        data.scale = clamp(+(+s).toFixed(4), 0.001, 1000);
         this._rebuildObjects(); this._dirty = true;
         const w = this._wrappers.get(data.id);
         if (w) { this.sel = w; this._three.tc.attach(w.root); }
-        this._pushUndo("调整资产缩放");
+        this._renderProps(); // 刷新当前尺寸 / 最大边输入框显示
+        this._pushUndo(undoLabel);
+      };
+      const scaleInput = el.querySelector("#ep-scale");
+      scaleInput.addEventListener("change", (e) => applyScale(+e.target.value || 1, "调整资产缩放"));
+      // 旋转（度→弧度）：与 Gizmo 的 E 旋转模式写同一 data.rot，互相同步
+      el.querySelector("#ep-rot").addEventListener("change", (e) => {
+        let deg = +e.target.value || 0;
+        deg = ((deg % 360) + 360) % 360;
+        data.rot = Math.round(deg * Math.PI / 180 * 100) / 100;
+        e.target.value = deg;
+        this._rebuildObjects(); this._dirty = true;
+        const w = this._wrappers.get(data.id);
+        if (w) { this.sel = w; this._three.tc.attach(w.root); }
+        this._pushUndo("旋转资产");
+      });
+      const fitInput = el.querySelector("#ep-fitmax");
+      if (fitInput) fitInput.addEventListener("change", (e) => {
+        const target = clamp(+e.target.value || maxDim, 0.1, 5000);
+        applyScale(target / maxDim, "按尺寸调整资产");
       });
       el.querySelector("#ep-editasset").addEventListener("click", () => {
         if (this.opts.onEditAsset) this.opts.onEditAsset(data.assetId);
@@ -2363,6 +2497,7 @@ export class MapEditor3d {
         this.tool = t;
         this._syncRoadToolUI(); // 文案 + 子菜单高亮 + 「道路」按钮激活
         this._select(null);
+        if (t !== "place-asset") this._hideAssetGhost();
         if (t === "place-road") rtRenderPanel(this); // 路块工具右侧参数面板（替代默认地图内容面板）
         this.status({
           "add-roadX": "添加纵向路（南北向）：点击地图放置，放置后可拖动/编辑属性",

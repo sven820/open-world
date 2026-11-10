@@ -13,16 +13,83 @@
 
 .ms3-canvas-wrap { position: relative; flex: 1; min-width: 0; }
 .ms3-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+/* 视口光照工具条：顶栏右侧文件操作组最前的单按钮下拉（默认收起） */
+.ms3-lightbar { position: relative; margin-right: 4px; }
+.ms3-light-toggle {
+  padding: 3px 9px; border-radius: 6px; border: 1px solid #2c323a;
+  background: rgba(15, 18, 23, 0.72); color: #9aa2ad;
+  font-size: 11px; line-height: 1.4; cursor: pointer; user-select: none; white-space: nowrap;
+}
+.ms3-light-toggle:hover { color: #d8dce2; border-color: #3a4048; }
+.ms3-light-toggle.active { color: #cfe3f7; border-color: #3a72b0; background: rgba(58,114,176,.28); }
+.ms3-lightbar-panel {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 20;
+  min-width: 148px; display: flex; flex-direction: column; gap: 2px;
+  padding: 6px; border-radius: 8px;
+  background: rgba(15, 18, 23, 0.92); border: 1px solid #2c323a;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.ms3-lightbar-panel[hidden] { display: none; }
+/* 环境面板顶部的昼/夜分段切换（与顶栏「夜景」按钮同源） */
+.ms3-lb-mode { display: flex; gap: 4px; }
+.ms3-lb-mode-btn {
+  flex: 1; padding: 4px 8px; border-radius: 5px;
+  border: 1px solid #2c323a; background: transparent; color: #9aa2ad;
+  font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.ms3-lb-mode-btn:hover { color: #d8dce2; border-color: #3a4048; }
+.ms3-lb-mode-btn.active { background: #2f5a8a; border-color: #3a72b0; color: #fff; }
+.ms3-lb-sep { height: 1px; background: #2c323a; margin: 5px 0; }
+.ms3-lb-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px; border-radius: 4px; cursor: pointer;
+  font-size: 12px; color: #b8c0ca; white-space: nowrap; user-select: none;
+}
+.ms3-lb-row:hover { background: rgba(255, 255, 255, 0.06); color: #d8dce2; }
+.ms3-lb-row input { accent-color: #3a72b0; margin: 0; cursor: pointer; }
 .ms3-status {
   position: absolute; left: 12px; bottom: 10px;
   font-size: 12px; color: #9aa2ad;
   background: rgba(20, 23, 27, 0.72); padding: 4px 10px; border-radius: 6px;
   pointer-events: none; max-width: 70%;
 }
+/* 顶栏：一条完整的工具栏（标题 | 变换工具组 | 弹性空间 | 文件操作组），
+   参考 Blender/Unity 的顶栏分组习惯 */
 .ms3-topbar {
-  position: absolute; top: 10px; left: 12px; display: flex; gap: 8px; align-items: center;
+  position: absolute; top: 10px; left: 12px; right: 12px;
+  display: flex; gap: 8px; align-items: center;
+  padding: 5px 10px; box-sizing: border-box;
+  background: rgba(23, 26, 30, 0.88);
+  border: 1px solid #2c323a; border-radius: 10px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
 }
-.ms3-topbar .ms3-title { font-weight: 700; letter-spacing: 1px; margin-right: 8px; }
+.ms3-topbar .ms3-title { font-weight: 700; letter-spacing: 1px; white-space: nowrap; }
+.ms3-topbar .ms3-title small { color: #7d8794; font-weight: 400; letter-spacing: 2px; }
+.ms3-tb-sep { width: 1px; height: 18px; background: #343b44; flex: none; }
+.ms3-tb-group { display: flex; gap: 2px; align-items: center; }
+.ms3-tb-spacer { flex: 1; }
+/* 变换工具分段按钮：图标 + 名称 + 快捷键徽标 */
+.ms3-tbtn {
+  display: flex; align-items: center; gap: 6px;
+  background: transparent; color: #aab2bd;
+  border: 1px solid transparent; border-radius: 7px;
+  padding: 4px 9px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+}
+.ms3-tbtn:hover { background: #2a2f36; color: #d8dce2; }
+.ms3-tbtn.active { background: #2f5a8a; border-color: #3a72b0; color: #fff; }
+.ms3-tbtn svg {
+  width: 14px; height: 14px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.4;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.ms3-tbtn kbd {
+  font-family: inherit; font-size: 10px; line-height: 1;
+  padding: 2px 4px; border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08); color: #8fa0b5;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.ms3-tbtn.active kbd { background: rgba(255, 255, 255, 0.2); color: #e6eef7; border-color: transparent; }
 .ms3-btn {
   background: #2a2f36; color: #d8dce2; border: 1px solid #3a4048;
   border-radius: 6px; padding: 5px 12px; font-size: 13px; cursor: pointer;
@@ -56,9 +123,16 @@
 .ms3-card img {
   width: 64px; height: 64px; border-radius: 6px; background: #14171a; flex: none; object-fit: contain;
 }
-.ms3-card .ms3-card-info { min-width: 0; }
+.ms3-card .ms3-card-info { min-width: 0; flex: 1; }
 .ms3-card b { display: block; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ms3-card small { color: #7d8794; font-size: 11px; display: block; margin-top: 3px; }
+.ms3-card-del {
+  align-self: center; flex: none; width: 22px; height: 22px; line-height: 20px;
+  padding: 0; border-radius: 6px; border: 1px solid #343b44; background: #14171a;
+  color: #7d8794; font-size: 14px; cursor: pointer; opacity: 0; transition: opacity .15s;
+}
+.ms3-card:hover .ms3-card-del { opacity: 1; }
+.ms3-card-del:hover { background: #5a2626; border-color: #8a4040; color: #ff9d9d; }
 
 /* 表单 */
 .ms3-field { margin-bottom: 10px; }
@@ -67,6 +141,14 @@
   width: 100%; box-sizing: border-box; background: #14171a; color: #d8dce2;
   border: 1px solid #343b44; border-radius: 6px; padding: 6px 8px; font-size: 13px;
 }
+/* 动画片段勾选行 */
+label.ms3-check {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; margin-bottom: 4px;
+  border: 1px solid #2c323a; border-radius: 6px; cursor: pointer; font-size: 12px; color: #d8dce2;
+}
+label.ms3-check:hover { background: #262c33; }
+label.ms3-check input { accent-color: #3a72b0; cursor: pointer; }
+label.ms3-check small { font-size: 11px; }
 .ms3-row { display: flex; gap: 8px; }
 .ms3-row > * { flex: 1; }
 .ms3-hint { font-size: 11px; color: #6c7683; margin: 6px 0; line-height: 1.5; }
@@ -83,6 +165,13 @@
   font-size: 10px; background: #34404d; color: #9fc2e8;
 }
 .ms3-tree-item .mat-chip.unbound { background: #4a3426; color: #e8b39f; }
+/* 树展开/收起箭头与叶子圆点 */
+.ms3-tree-item .ms3-tree-toggle {
+  display: inline-block; width: 14px; color: #7d8794; cursor: pointer;
+  user-select: none; text-align: center; font-size: 10px;
+}
+.ms3-tree-item .ms3-tree-toggle:hover { color: #d8dce2; }
+.ms3-tree-item .ms3-tree-dot { display: inline-block; width: 14px; text-align: center; color: #4a5361; }
 
 .ms3-empty { color: #5d6672; font-size: 12px; text-align: center; padding: 24px 8px; line-height: 1.7; }
 .ms3-badge {

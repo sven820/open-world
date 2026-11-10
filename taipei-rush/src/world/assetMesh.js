@@ -12,12 +12,16 @@
 //   （调用方跳过该物件），编辑器侧则 warm 后触发重建。
 
 import * as THREE from "three";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "./materials.js";
+import { parseGLB } from "../data/assetStore.js"; // 含 DRACOLoader（Draco 压缩 GLB）
 
 const _templates = new Map(); // id → THREE.Group（已绑库材质、已对齐 base-center）
 const _boxes = new Map();     // id → THREE.Box3（模板局部包围盒）
 const _loading = new Map();   // id → Promise（去重并发预热）
+const _clips = new Map();     // id → AnimationClip[]（GLB 内建动画，如 LittlestTokyo 的小火车）
+const _animCfg = new Map();   // id → 资产记录的播放配置 { enabled:[名字], speed }（构建时快照）
+const _mixers = new Set();    // 活跃的 AnimationMixer（实例销毁时自动清理）
+const _nightMats = new Set(); // 资产自发光材质（夜市效果：夜间把漫反射贴图亮部点亮）
 
 /* ---------------- 对外 API ---------------- */
 
@@ -84,15 +88,57 @@ export function warmAssetTemplate(asset) {
 }
 
 // 放置实例：克隆模板（同步；未预热返回 null）。placement: { pos, rot, scale }
+// 注意：模板根节点的 position 上写着 base-center 贴地偏移（alignBaseCenter，
+// 单位 = 模型本地单位）。position 是父空间量，不受节点自身 scale 缩放 ——
+// 所以缩放必须加在外层 Group 上；若加在内层，缩小模型时贴地偏移保持原值，
+// 模型会飞到天上（本地 211 单位的偏移 × 0.05 缩放场景 = 200m 高空）。
 export function assetInstance(asset, { pos, rot = 0, scale = 1 } = {}) {
   const tpl = _templates.get(asset.id);
   if (!tpl) return null;
-  const inst = tpl.clone();
-  inst.position.set(pos ? pos[0] : 0, 0, pos ? pos[1] : 0);
-  inst.rotation.y = rot || 0;
+  const inst = tpl.clone(); // 内层：保留贴地偏移，恒为单位缩放
+  inst.userData.sharedTpl = true; // 标记：几何/材质与模板缓存共享，宿主重建时不得 dispose
+  const root = new THREE.Group(); // 外层：承载放置位姿（pos/rot/scale 绕底面中心）
+  root.add(inst);
   const s = scale == null ? 1 : scale;
-  inst.scale.set(s, s, s);
-  return inst;
+  root.scale.set(s, s, s);
+  root.rotation.y = rot || 0;
+  root.position.set(pos ? pos[0] : 0, 0, pos ? pos[1] : 0);
+  // 内建动画：每个实例一个 mixer 自动循环播放（AnimationMixer 按名字在克隆体
+  // 内解析轨道，clone 不破坏节点动画；剔除时机见 updateAssetAnimations）。
+  // 运行时以最小 ref {id} 实例化 → 配置取构建时的快照；传完整记录则用记录里的
+  playAssetClips(asset.id, root, asset.animation || _animCfg.get(asset.id));
+  return root;
+}
+
+// 资产包含的动画片段清单（工坊右侧面板展示用）
+export function getAssetClipNames(assetId) {
+  const clips = _clips.get(assetId);
+  return clips ? clips.map((c) => ({ name: c.name, duration: +c.duration.toFixed(2) })) : [];
+}
+
+// 在 root 上播放资产的内建动画片段（assetInstance 与 Studio 工作台共用）。
+// cfg: { enabled: [片段名]，缺省/null = 全部播放；speed: 倍速，默认 1 }。
+// 返回 mixer（调用方可 stop 后重建实现实时改配置），无可用片段返回 null
+export function playAssetClips(assetId, root, cfg) {
+  const clips = _clips.get(assetId);
+  if (!clips || !clips.length) return null;
+  const enabled = cfg && Array.isArray(cfg.enabled) ? cfg.enabled : null;
+  const mixer = new THREE.AnimationMixer(root);
+  for (const c of clips) {
+    if (enabled && !enabled.includes(c.name)) continue;
+    mixer.clipAction(c).play();
+  }
+  mixer.timeScale = (cfg && cfg.speed) || 1;
+  _mixers.add(mixer);
+  return mixer;
+}
+
+// 停掉某个 mixer 并从注册表移除（工坊实时改配置时旧 mixer 必须显式停掉，
+// 否则与新建 mixer 叠加 double 速度）
+export function stopAssetMixer(mixer) {
+  if (!mixer) return;
+  mixer.stopAllAction();
+  _mixers.delete(mixer);
 }
 
 // 放置后的世界 AABB（碰撞注册 / 程序化建筑避让）。placement 同上。
@@ -121,14 +167,15 @@ export function invalidateAssetTemplate(id) {
   _templates.delete(id);
   _boxes.delete(id);
   _loading.delete(id);
+  _clips.delete(id);
+  _animCfg.delete(id);
 }
 
 /* ---------------- GLB 资产构建 ---------------- */
 
 async function buildGLBObject(asset) {
   const buf = await asset.glb.arrayBuffer();
-  const gltf = await new Promise((resolve, reject) =>
-    new GLTFLoader().parse(buf, "", resolve, reject));
+  const gltf = await parseGLB(buf);
   const root = gltf.scene;
   applyMaterialBindings(root, asset.materialBindings || {});
   // 有名材质 → 绑定键 = 材质名；无名（旧版导出）留给 Studio 按序迁移
@@ -137,7 +184,79 @@ async function buildGLBObject(asset) {
   });
   alignBaseCenter(root);
   enableShadows(root);
+  // 动画：GLB 内建片段（如 LittlestTokyo 的火车环线）随模板缓存，实例化时播放；
+  // 播放配置（启用哪些片段/速度）在构建时从资产记录快照，运行时以最小 ref 实例化也能拿到
+  _clips.set(asset.id, gltf.animations || []);
+  _animCfg.set(asset.id, asset.animation || null);
+  // 色彩：游戏渲染器用 ACES tone mapping（压暗、去饱和），GLB 卡通资产的原始
+  // 材质跳过 tone mapping 还原官方 demo 的鲜艳观感；库共享材质（city 大面积
+  // 使用）不动，避免影响全局氛围
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+      if (!m || (m.userData && m.userData.shared)) continue;
+      m.toneMapped = false;
+      // 夜市自发光：把漫反射贴图复用为自发光贴图（共享同一张 GPU 纹理，零额外
+      // 显存），白天 emissiveIntensity=0 完全无感；夜里由 city.update 按夜色
+      // 系数点亮——贴图里的窗户/灯笼/灯牌亮部自发光，配合夜景 bloom 出霓虹感。
+      // 亮度/开关来自资产记录（工坊「夜景」面板可调，默认 0.7）
+      if (m.map || m.emissiveMap) {
+        if (!m.emissiveMap) {
+          m.emissiveMap = m.map;
+          if (!m.emissive || m.emissive.getHex() === 0) m.emissive.setHex(0xffffff);
+        }
+        // 重导入的 GLB 可能已带 emissiveMap（工坊导出写回的）：直接按记录配置接管强度
+        applyGlowCfg(m, asset.nightGlow);
+        _nightMats.add(m);
+      }
+    }
+  });
+  // 部件级夜景覆盖：nightGlow.parts[绑定键] 存在的部件克隆独立材质单独调亮度
+  // （克隆共享 emissiveMap 纹理，仅多一份材质参数，无额外纹理显存）
+  const partCfgs = asset.nightGlow && asset.nightGlow.parts;
+  if (partCfgs) {
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      const key = o.userData.bindingKey || (o.material && o.material.name);
+      const pc = key && partCfgs[key];
+      const m = o.material;
+      if (!pc || !m || !m.emissiveMap || (m.userData && m.userData.shared)) return;
+      const c = m.clone();
+      applyGlowCfg(c, { on: pc.on, strength: pc.strength });
+      c.userData.partGlowKey = key;
+      o.material = c;
+      _nightMats.add(c);
+    });
+  }
   return root;
+}
+
+// 把夜景配置落到材质上（构建时用；工坊实时预览另有直接赋值逻辑）
+function applyGlowCfg(m, cfg) {
+  cfg = cfg || {};
+  m.userData.glowOn = cfg.on !== false;
+  m.userData.glowStrength = cfg.strength != null ? cfg.strength : 0.7;
+  m.emissiveIntensity = 0;
+}
+
+// 夜色系数（0=白昼 1=深夜）驱动资产自发光强度；city.update 在夜色变化超阈值时调用。
+// 强度 = 夜色渐变系数 × 资产各自的 glowStrength（工坊可调），关闭的资产恒为 0
+export function updateAssetNightGlow(night) {
+  const k = Math.max(0, (night - 0.15) / 0.85); // 0.15 后起步，黄昏渐亮
+  for (const m of _nightMats) {
+    m.emissiveIntensity = m.userData.glowOn ? k * (m.userData.glowStrength ?? 0.7) : 0;
+  }
+}
+
+// 驱动所有在场的资产实例动画（每帧由宿主渲染循环调用，dt 秒）。
+// 实例被移出场景（parent 链断开）后自动从注册表剔除，重建产生的新实例重新注册
+export function updateAssetAnimations(dt) {
+  if (!_mixers.size || !dt) return;
+  for (const mixer of _mixers) {
+    const root = mixer.getRoot();
+    if (!root || !root.parent) { _mixers.delete(mixer); continue; }
+    mixer.update(dt);
+  }
 }
 
 // 绑定键 → 标准材料库实例。键的来源（按优先级）：

@@ -341,6 +341,11 @@ kbd {
 .me-props label input, .me-props label select { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px; background: rgba(20,22,30,.9); color: var(--text); font: 500 12px/1 var(--sans); outline: none; }
 .me-props label input:focus, .me-props label select:focus { border-color: rgba(255,255,255,.4); }
 .me-props input[type="number"] { width: 60px; flex: none !important; }
+/* 加宽数字输入框（缩放 / 尺寸等长数值），覆盖 60px 默认宽 */
+.me-props label.me-row { justify-content: space-between; }
+.me-props label.me-row input.me-input-wide { width: 118px; flex: none !important; font-variant-numeric: tabular-nums; }
+.me-props label.me-row input.me-input-wide::-webkit-outer-spin-button,
+.me-props label.me-row input.me-input-wide::-webkit-inner-spin-button { opacity: 1; }
 .me-stat { font: 500 12px/1.9 var(--sans); color: var(--muted); letter-spacing: .06em; }
 .me-stat b { color: var(--text); margin-left: 6px; }
 .me-tiprow { position: relative; }
@@ -363,6 +368,24 @@ kbd {
 .me-slider input[type="range"]:disabled { opacity: .35; cursor: not-allowed; }
 .me-pos { margin: 10px 0; font: 600 12px/1 var(--cond); letter-spacing: .1em; color: rgba(244,242,238,.7); }
 .me-hint { margin: 12px 0 0; font: 500 10.5px/1.7 var(--sans); color: rgba(244,242,238,.4); }
+/* 「我的模型」资产卡片（带缩略图） */
+.me-asset-item {
+  display: flex; gap: 9px; align-items: center; padding: 7px; margin: 0 0 6px;
+  border: 1px solid rgba(255,255,255,.08); border-radius: 4px; cursor: pointer; transition: .15s;
+}
+.me-asset-item:hover { background: rgba(255,255,255,.06); border-color: rgba(242,193,78,.4); }
+.me-asset-item.active { border-color: var(--gold); background: rgba(242,193,78,.12); }
+.me-asset-item img, .me-asset-thumb-empty {
+  width: 48px; height: 48px; flex: none; object-fit: contain;
+  border-radius: 3px; background: rgba(0,0,0,.35);
+}
+.me-asset-thumb-empty { display: inline-block; opacity: .25; }
+.me-asset-info { min-width: 0; }
+.me-asset-info b { display: block; font: 600 12px/1.3 var(--sans); color: rgba(244,242,238,.92); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.me-asset-info small { display: block; margin-top: 3px; font: 500 10.5px/1.4 var(--sans); color: rgba(244,242,238,.45); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.me-asset-target { display: block; margin: 10px 0 2px; font: 600 10.5px/1.5 var(--sans); letter-spacing: .05em; color: rgba(244,242,238,.6); }
+.me-asset-target input { width: 100%; box-sizing: border-box; margin-top: 5px; padding: 6px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 3px; background: rgba(0,0,0,.3); color: rgba(244,242,238,.9); font: 600 12px/1 var(--sans); outline: none; }
+.me-asset-target input:focus { border-color: var(--gold); }
 .me-del { width: 100%; margin-top: 12px; padding: 9px; border: 1px solid rgba(224,35,30,.55); border-radius: 3px; background: rgba(224,35,30,.16); color: #ff8a85; font: 600 12px/1 var(--sans); letter-spacing: .12em; cursor: pointer; }
 .me-del:hover { background: rgba(224,35,30,.35); }
 .me-btn { display: block; width: 100%; margin-top: 10px; padding: 9px; border: 1px solid var(--gold); border-radius: 3px; background: rgba(242,193,78,.1); color: var(--gold); font: 600 12px/1 var(--sans); letter-spacing: .12em; cursor: pointer; transition: .15s; }

@@ -9,6 +9,7 @@
 
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 
 const DB_NAME = "tr_model_studio";
@@ -121,9 +122,19 @@ export async function importAssetFromGLB(file, { name, category = "custom" } = {
   });
 }
 
-function parseGLB(buffer) {
+// 共享 DRACOLoader：Draco 压缩的 GLB（如 three.js 官方示例 LittlestTokyo.glb）
+// 没有 DRACOLoader 会直接解析失败，表现为"导入没反应"
+let _draco = null;
+function dracoLoader() {
+  if (!_draco) {
+    _draco = new DRACOLoader().setDecoderPath("/draco/");
+  }
+  return _draco;
+}
+
+export function parseGLB(buffer) {
   return new Promise((resolve, reject) => {
-    new GLTFLoader().parse(buffer, "", resolve, reject);
+    new GLTFLoader().setDRACOLoader(dracoLoader()).parse(buffer, "", resolve, reject);
   });
 }
 

@@ -13,7 +13,7 @@ import {
   ASPHALT_TILE,
 } from "./textures.js";
 import { getFacadeMaterials, getStorefrontMaterials, getSignMaterial } from "./materials.js";
-import { preloadAssetTemplatesFromMap, assetWorldAABB } from "./assetMesh.js";
+import { preloadAssetTemplatesFromMap, assetWorldAABB, updateAssetAnimations, updateAssetNightGlow } from "./assetMesh.js";
 import { buildCustomMap, worldBounds, pointInPoly, footprintAABB } from "./customMap.js";
 import { getRenderSettings, onRenderSettingsChange } from "../config/renderSettings.js";
 import {
@@ -1271,6 +1271,9 @@ export class City {
     // 按需渲染：只让玩家附近的分块参与绘制（含阴影 pass）
     this.updateStream(focus);
 
+    // 模型资产内建动画（如 LittlestTokyo 的小火车）；实例移出场景后自动剔除
+    updateAssetAnimations(dt);
+
     // emissive windows：night 是连续插值，只有变化超过阈值才重写材质
     if (Math.abs(night - this._nightApplied) > 0.01) {
       this._nightApplied = night;
@@ -1284,6 +1287,8 @@ export class City {
         this._lampOn = lampOn;
         if (this.lampMat) this.lampMat.color.setHex(lampOn ? 0xfff0c8 : 0x6a6458);
       }
+      // 模型资产夜市自发光（如 LittlestTokyo 的灯笼/灯牌/窗光）
+      updateAssetNightGlow(night);
     }
 
     // traffic lights: 16s cycle, NS green then EW green
