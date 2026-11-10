@@ -153,3 +153,6 @@ vite.config.ts.timestamp-*
 menu.yaml
 
 long-wind-main/
+
+# 第三方仓库（非本项目源码）
+rea/sakura-crossing-main/
