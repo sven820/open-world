@@ -10,7 +10,7 @@ openworld/
 │     ├─ site_index.html # 原版站点入口 HTML
 │     └─ recon_*.png     # 原版实机侦察截图（8 张）
 ├─ tr_*.png             # 本项目构建/验证截图（多张）
-├─ taipei-rush/          # 本项目（见正文各章节）
+├─ walkstreet/           # 本项目（见正文各章节）
 ```
 
 ### A.1 `rea/taibei-gta/target_assets/`（原版构建产物，27 文件 = 26 `.js` + 1 `.css`）
@@ -42,11 +42,11 @@ Vite/Rolldown 打包产物（文件名带 hash，如 `three-DoD3b_mB.js`）。�
 - `rea/taibei-gta/recon_*.png`（8 张：`recon_1`/`recon_2`、`recon_game1`~`recon_game4`、`recon_map`、`recon_night1`）—— **原版**实机侦察画面（游戏/HUD/地图/夜景），用于对照片观感与功能。
 - `tr_*.png`（多张：`tr_day_spawn`、`tr_final_default`、`tr_game1`、`tr_load`、`tr_menu`、`tr_orig_close*`、`tr_orig2`、`tr_player_glb`、`tr_road*`、`tr_sign_fix`、`tr_top`、`tr_wall`）—— **本项目**的构建验证截图（出生点、菜单、路面、招牌修复、墙体、角色 GLB、与原版对比等）。
 
-### A.7 `taipei-rush`
+### A.7 `walkstreet`
 本项目的目录结构。
 
 ```
-taipei-rush/
+walkstreet/
 ├─ index.html              # 入口 HTML：加载字体/样式/主模块；定义 loader、HUD、菜单、大地图、点击提示等 DOM
 ├─ package.json            # 依赖 three + vite；scripts: dev / build / preview
 ├─ package-lock.json
@@ -66,7 +66,7 @@ taipei-rush/
    │  └─ input.js          # 键鼠输入（e.code + e.key 双识别、指针锁定）
    ├─ world/
    │  ├─ city.js           # 城市生成主逻辑（地面/路/建筑/招牌/合批）
-   │  ├─ landmarks.js      # 程序化地标（101 / 车站 / 龙山寺 / 红楼 / 牌楼 / 信义高楼）
+   │  ├─ landmarks.js      # 程序化地标（云际塔 / 车站 / 古庙 / 红砖楼 / 大会堂 / 牌楼 / 高楼群）
    │  ├─ textures.js       # 运行时 Canvas 程序化贴图（沥青/人行道/楼面/店面/招牌/屋顶）
    │  └─ batch.js          # 几何合批工具（mergeGeometries + 顶点色）
    ├─ entities/
@@ -87,8 +87,8 @@ taipei-rush/
 - **`core/environment.js`** — 自定义 GLSL 天空穹顶（`SkyVert/SkyFrag`：日月光晕、太阳圆盘、地平线渐变）；day/dawn/dusk/night 预设与色温插值；sun/moon/hemi/ambient 灯光随时间 `setHour()/update()` 循环，驱动昼夜。
 - **`core/input.js`** — `window` 级 `keydown/keyup` 收集按键；**同时按 `e.code` 与 `e.key` 识别**（兼容非 QWERTY 布局 / 输入法）；指针锁定与鼠标位移转视角。
 - **`world/city.js`** — 城市生成核心：大沥青地面（`PlaneGeometry` + Canvas 沥青纹理）、车道线/斑马线/双黄线（薄平面片 batch）、按区块切分并 `_addBuilding`（四面墙 + 屋顶 + 女儿墙 + 屋顶水箱/空调杂物，按楼层随机高度）、临街店面 + 雨棚 + 招牌（含 z-fighting 修复）、`_finalize()` 按 220m 空间格 × 材质 `mergeGeometries`（压 draw call 且保留视锥剔除）；运行期 `updateStream()` 再按玩家"渲染距离"开关分块（超距分块既不绘制也不进阴影 pass），地标/编辑器内容一并登记；同时生成碰撞体。
-- **`data/cityData.js`** — 数据驱动：路网 `ROADS_X/ROADS_Z`（忠孝东路、中华路、环河南路…）、`DISTRICTS`（西门町/台北车站/万华/信义…及副标题）、店名词库与招牌词、地标清单。
-- **`world/landmarks.js`** — 程序化地标：台北 101（竹节分段 + 尖顶）、台北车站、龙山寺、红楼、牌楼/城门、信义高楼群，全用 `Box/Cylinder/Torus` + 玻璃/混凝土/红/金材质。
+- **`data/cityData.js`** — 数据驱动：路网 `ROADS_X/ROADS_Z`（中央大道、中兴大道、滨河路…均为虚构通用街名）、`DISTRICTS`（潮汇坊/中央车站/老城/云际…及副标题）、店名词库与招牌词、地标清单。
+- **`world/landmarks.js`** — 程序化地标：云际塔（分段塔身 + 尖顶）、中央车站、古庙、红砖楼、大会堂、牌楼/城门、高楼群，全用 `Box/Cylinder/Torus` + 玻璃/混凝土/红/金材质。
 - **`world/textures.js`** — 运行时用 2D `<canvas>` 画出所有贴图（沥青、人行道瓷砖、楼面窗格变体、店面、招牌图集中文店名、屋顶），输出 `CanvasTexture`（含 mipmap / 各向异性），**零外部图片**。
 - **`world/batch.js`** — `Batch` 类：收集多个 `BufferGeometry` 后 `mergeGeometries` 合成为单 Mesh，并支持顶点色；`wallQuad/roofQuad/boxAt/planeAt/signQuad/cylAt` 等构造 helper。
 - **`entities/player.js`** — 玩家：默认用程序化骨骼 rig 兜底；`GLTFLoader` + `KTX2Loader` + `MeshoptDecoder` 异步加载 `/avatars/jie.glb`，自动归一化身高与朝向（源模型朝 -Z，rig 朝 +Z，旋转 π 修正）；管理步行/驾驶、上下车、跳跃、动画姿态。

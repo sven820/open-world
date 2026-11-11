@@ -156,3 +156,5 @@ long-wind-main/
 
 # 第三方仓库（非本项目源码）
 rea/sakura-crossing-main/
+# Admin runtime state (auto-generated on first start)
+admin/data/state.json

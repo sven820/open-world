@@ -1,0 +1,10 @@
+{
+  "name": "walkstreet-admin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "WalkStreet 广告大屏内容管理后台（零依赖，node server.js 即可运行）",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
