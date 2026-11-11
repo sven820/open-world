@@ -14,7 +14,9 @@ function screenMaterial() {
     // 白色纯亮度会吃满夜景 Bloom（main.js 夜间 strength≈0.92）导致近景过曝
     color: 0xc4c4c4,
     toneMapped: false,
-    side: THREE.DoubleSide,
+    // 只渲染面片正面：独立广告牌/转角屏各有朝外的面片，
+    // 立面屏贴墙单面，背面不显示内容（放反时也不会露出镜像文字）
+    side: THREE.FrontSide,
     map: null,
   });
   m.userData.fadeShader = null;

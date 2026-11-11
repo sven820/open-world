@@ -34,8 +34,8 @@ function mesh(geo, mat, x, y, z) {
   return m;
 }
 
-/* 四边中空边框（替代实心背板）：屏面双面渲染时，背面透过边框直接
- * 看到屏面内容，不再出现"夜间整块纯黑矩形"。返回的 Group 以中心定位。 */
+/* 四边中空边框（替代实心背板）：双面屏由前后两块各自朝外的面片组成，
+ * 背面透出的是背侧那块屏面，不再出现"夜间整块纯黑矩形"。返回的 Group 以中心定位。 */
 function frame(w, h, depth, mat) {
   const g = new THREE.Group();
   const t = 0.35; // 边框条宽
@@ -87,25 +87,30 @@ export const MOUNTS = {
     build(spec, screenMat) {
       const w = spec.w, h = spec.h, y = spec.y;
       const group = new THREE.Group();
-      // 中空安装边框（贴墙面）：边框四条接触墙面
-      const frameG = frame(w + 0.7, h + 0.7, 0.3, housingMat());
-      frameG.position.set(0, y, 0.15);
-      group.add(frameG);
       // 屏面悬挑在墙外 STANDOFF 处（躲开建筑凸窗/雨棚/空调外机等墙面凸出物，
-      // 否则凸出物会把屏面切开 —— 表现为"内容只能看到一部分"），支撑连杆固定
+      // 否则凸出物会把屏面切开 —— 表现为"内容只能看到一部分"）。
       const screenZ = 0.3 + FACADE_STANDOFF;
+      // 墙侧只留小安装座 + 细悬臂，不再放贴墙大框：侧面看不会像"第二块屏"
+      const armZ = screenZ - 0.28;
       for (const sy of [y + h / 2 - 0.35, y - h / 2 + 0.35]) {
-        group.add(mesh(new THREE.BoxGeometry(0.14, 0.14, FACADE_STANDOFF), housingMat(), 0, sy, 0.3 + FACADE_STANDOFF / 2));
+        group.add(mesh(new THREE.BoxGeometry(0.5, 0.5, 0.12), housingMat(), 0, sy, 0.06));
+        group.add(mesh(new THREE.BoxGeometry(0.14, 0.14, armZ), housingMat(), 0, sy, armZ / 2));
       }
-      // 屏面：前后两块共享同一材质。贴墙放正时背面屏贴墙隐藏；
-      // 方向放反时露出的也是正向内容，不再是深色背板"黑屏"
+      // 外框与屏面同层，一起构成"一整块屏"；框内沿正好贴住屏面边缘，不重叠
+      const frameG = frame(w + 0.7, h + 0.7, 0.3, housingMat());
+      frameG.position.set(0, y, screenZ - 0.13);
+      group.add(frameG);
+      // 不透明背板：屏面是 FrontSide，背面不显示内容；这块壳体同时挡住视线，
+      // 从背面看到的是实体深灰板，而不是中空框透出后面的街景
+      const backPlate = mesh(new THREE.BoxGeometry(w, h, 0.08), housingMat(), 0, y, screenZ - 0.06);
+      backPlate.userData.billboardBack = true; // 放置幽灵保留不透明，便于分辨正反
+      backPlate.castShadow = false;
+      group.add(backPlate);
+      // 单张朝外面片：材质为 FrontSide，背面不渲染内容（贴墙屏背面本来朝墙）
       const front = mesh(new THREE.PlaneGeometry(w, h), screenMat, 0, y, screenZ);
       front.castShadow = false;
-      const back = mesh(new THREE.PlaneGeometry(w, h), screenMat, 0, y, -SCREEN_OFFSET);
-      back.rotation.y = Math.PI;
-      back.castShadow = false;
-      group.add(front, back);
-      const collider = { x0: -w / 2 - 0.35, z0: -0.35, x1: w / 2 + 0.35, z1: screenZ + 0.1, top: y + h / 2 };
+      group.add(front);
+      const collider = { x0: -w / 2 - 0.35, z0: -0.1, x1: w / 2 + 0.35, z1: screenZ + 0.1, top: y + h / 2 };
       return { group, screenMats: [screenMat], collider };
     },
   },
@@ -152,6 +157,61 @@ export function normalizeSpec(params = {}) {
   };
 }
 
+/* ---------------- 放置边界 / 避让（编辑器预览与运行时共用） ---------------- */
+
+/** 屏体水平占地半尺寸（含外框、悬挑与塔体），用于放置边界与建筑/道路避让 */
+export function billboardFootprint(spec) {
+  if (spec.mount === "corner") {
+    const half = (spec.w + 1.4) / 2 + 0.1;          // 塔体宽 = w + 1.4
+    return { halfW: half, halfD: half };
+  }
+  if (spec.mount === "facade") {
+    return { halfW: spec.w / 2 + 0.35, halfD: 0.3 + FACADE_STANDOFF + 0.1 };
+  }
+  return { halfW: spec.w / 2 + 0.5, halfD: 0.8 };    // 独立广告牌：外框 + 前后屏面
+}
+
+/** 屏体占地四角与外接矩形（世界坐标；rot 变换约定同 buildBillboardGroup） */
+export function billboardOutline(pos, spec, rot = 0) {
+  const { halfW, halfD } = billboardFootprint(spec);
+  const cs = Math.cos(rot), sn = Math.sin(rot);
+  const corners = [[-halfW, -halfD], [halfW, -halfD], [halfW, halfD], [-halfW, halfD]]
+    .map(([lx, lz]) => [pos[0] + lx * cs + lz * sn, pos[1] - lx * sn + lz * cs]);
+  const xs = corners.map((c) => c[0]), zs = corners.map((c) => c[1]);
+  return { corners, aabb: [Math.min(...xs), Math.min(...zs), Math.max(...xs), Math.max(...zs)] };
+}
+
+/** 把落点沿最浅分离轴推出所有占用矩形 [x0,z0,x1,z1]；每轮处理重叠面积最大的一个。
+ *  只返回新落点，朝向 / 尺寸 / ID / 内容都不变。 */
+export function pushOutBoxes(pos, spec, rot, boxes, gap = 0.6, maxPass = 8) {
+  let px = pos[0], pz = pos[1];
+  for (let pass = 0; pass < maxPass; pass++) {
+    const [x0, z0, x1, z1] = billboardOutline([px, pz], spec, rot).aabb;
+    let hit = null, bestArea = 0;
+    for (const b of boxes) {
+      const ow = Math.min(x1, b[2]) - Math.max(x0, b[0]);
+      const oh = Math.min(z1, b[3]) - Math.max(z0, b[1]);
+      if (ow <= 0 || oh <= 0) continue;
+      const area = ow * oh;
+      if (area > bestArea) { bestArea = area; hit = b; }
+    }
+    if (!hit) break;
+    const moves = [
+      [hit[0] - gap - x1, 0], [hit[2] + gap - x0, 0],
+      [0, hit[1] - gap - z1], [0, hit[3] + gap - z0],
+    ];
+    moves.sort((a, c) => Math.abs(a[0] + a[1]) - Math.abs(c[0] + c[1]));
+    px += moves[0][0]; pz += moves[0][1];
+  }
+  return [Math.round(px * 10) / 10, Math.round(pz * 10) / 10];
+}
+
+/** 最终落点是否仍与任一占用矩形相交（编辑器红色冲突提示用） */
+export function boxesOverlap(pos, spec, rot, boxes) {
+  const [x0, z0, x1, z1] = billboardOutline(pos, spec, rot).aabb;
+  return boxes.some((b) => x0 < b[2] && x1 > b[0] && z0 < b[3] && z1 > b[1]);
+}
+
 /**
  * 构建一块大屏（编辑器预览与运行时共用同一套几何）。
  * @param {{pos:[number,number], rot:number, params:object}} item 地图 objects 记录
@@ -185,7 +245,7 @@ export function editorScreenMaterial() {
   ctx.fillStyle = "rgba(255,255,255,0.65)";
   ctx.fillText("AD SCREEN", 256, 190);
   _previewMat = new THREE.MeshBasicMaterial({
-    color: 0xc4c4c4, toneMapped: false, side: THREE.DoubleSide, // 与运行时屏面一致：背面也显示内容
+    color: 0xc4c4c4, toneMapped: false, side: THREE.FrontSide, // 与运行时一致：立面屏背面不显示
   });
   _previewMat.map = new THREE.CanvasTexture(c);
   _previewMat.map.colorSpace = THREE.SRGBColorSpace;
@@ -193,11 +253,12 @@ export function editorScreenMaterial() {
   return _previewMat;
 }
 
-// 放置幽灵：半透明蓝色整体（不区分细节，只看落点/朝向）
+// 放置幽灵：高对比亮青半透明，避免与卫星底图/蓝色网格糊在一起
 export function editorGhostMaterial() {
   if (_ghostMat) return _ghostMat;
   _ghostMat = new THREE.MeshBasicMaterial({
-    color: 0x3a72b0, transparent: true, opacity: 0.35, depthWrite: false, toneMapped: false,
+    color: 0x8be9ff, transparent: true, opacity: 0.45, depthWrite: false,
+    toneMapped: false, side: THREE.DoubleSide,
   });
   _ghostMat.userData.shared = true;
   return _ghostMat;

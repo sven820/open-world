@@ -6,7 +6,11 @@
 // - 注意：天地图对高频瓦片请求会封 IP，内置 token 建议仅开发/低频场景使用，
 //   生产环境请配置专属 key（.env.local: VITE_TIANDITU_KEY）。
 
+// 设计院token
 const BUILTIN_TOKEN = "21372393c1e0828a116962c4362ff898";
+// 18154210240
+// const BUILTIN_TOKEN = "ce5b0108097dafd969be13b1d046d54e"
+
 
 // 实际生效的 tk：优先 .env.local 配置的专属 key
 export const tiandituKey = (import.meta.env.VITE_TIANDITU_KEY || "").trim() || BUILTIN_TOKEN;

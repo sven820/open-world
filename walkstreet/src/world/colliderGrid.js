@@ -95,6 +95,26 @@ export class ColliderGrid {
     return best;
   }
 
+  // 与给定矩形相交、且顶面高度 ≥ minTop 的碰撞体（广告大屏等物件的建筑避让用）。
+  // minTop 传屏体底部高度即可过滤树/路灯等矮物；返回去重后的 [x0,z0,x1,z1,top] 数组。
+  overlaps(x0, z0, x1, z1, minTop = 0) {
+    const c = this.cell;
+    const i0 = Math.floor(x0 / c), i1 = Math.floor(x1 / c);
+    const j0 = Math.floor(z0 / c), j1 = Math.floor(z1 / c);
+    const seen = new Set(), out = [];
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const arr = this.map.get(this.key(i, j));
+      if (!arr) continue;
+      for (const b of arr) {
+        if (seen.has(b)) continue;
+        seen.add(b);
+        if (b[4] < minTop) continue;
+        if (b[0] < x1 && b[2] > x0 && b[1] < z1 && b[3] > z0) out.push(b);
+      }
+    }
+    return out;
+  }
+
   // point-vs-building test (used for third-person camera collision)
   // y：查询点高度。高于该碰撞体顶面时不算遮挡（相机从楼顶上方掠过）。
   blocked(x, z, r, y = -Infinity) {
