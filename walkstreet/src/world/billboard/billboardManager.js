@@ -1,39 +1,15 @@
 import * as THREE from "three";
 import { createContentPool, disposeContentPool } from "./contentSource.js";
 import { buildPlacedBillboard, phaseFor } from "./billboard.js";
-import { normalizeSpec, billboardOutline, pushOutBoxes } from "./mounts.js";
-import { corridorHalf } from "../../data/cityData.js";
+import { normalizeSpec } from "./mounts.js";
 import { defaultContent, normalizeContent, contentKey, scheduleFrom } from "./contentConfig.js";
-
-/** 道路走廊转成不可占用矩形：程序化横/纵路 + 3D 描边道路采样段。
- *  只返回与查询范围相交的部分，避免每次遍历全城。 */
-function roadBoxesFor(city, [x0, z0, x1, z1]) {
-  const out = [];
-  const B = city.bounds || { minX: -2000, maxX: 2000, minZ: -2000, maxZ: 2000 };
-  for (const r of city.roadsX || []) {
-    const h = corridorHalf(r) + 2;
-    if (r.at + h > x0 && r.at - h < x1) out.push([r.at - h, B.minZ, r.at + h, B.maxZ]);
-  }
-  for (const r of city.roadsZ || []) {
-    const h = corridorHalf(r) + 2;
-    if (r.at + h > z0 && r.at - h < z1) out.push([B.minX, r.at - h, B.maxX, r.at + h]);
-  }
-  for (const c of city.traceCorridors || []) {
-    const h = (c.keepHalf || 12) + 0.5;
-    for (const s of c.samples || []) {
-      if (s.x + h > x0 && s.x - h < x1 && s.z + h > z0 && s.z - h < z1) {
-        out.push([s.x - h, s.z - h, s.x + h, s.z + h]);
-      }
-    }
-  }
-  return out;
-}
 
 /* ---------------- 广告大屏管理器 ----------------
  * 唯一来源：编辑器手动放置（map.objects 里 type==="billboard"）。
  * 默认街区 / 空白地图不会自动生成任何广告屏；没放屏时 screens 为空。
  * 承载形式、尺寸、朝向、内容都由地图记录决定。
- * 独立广告牌/转角塔体落点若插进建筑，构建时会自动推开（不改 ID / 朝向 / 内容）。
+ * 独立广告牌/转角塔体落点由 City 在建城阶段按路网/范围纠偏并预留建筑空地
+ * （见 city.js billboardPlacements），这里只按 ID 取用，不改 ID / 朝向 / 内容。
  *
  * 性能调度：
  *  - 内容池按 (屏比, 配置哈希) 缓存，相同配置的屏共享同一视频元素与纹理；
@@ -109,38 +85,61 @@ export class BillboardManager {
     return { ...item, pos: [px, pz], rot };
   }
 
-  /** 独立广告牌 / 转角塔体：屏体占地若压到建筑或道路，沿最浅方向推出并留 0.6m 间隙。
-   *  只改落点，不改 ID / 内容 / 朝向；立面屏本来就是贴墙的，不参与。
-   *  在批量阶段执行：此时尚未注册任何大屏碰撞体，查到的都是建筑等实体。 */
+  /** 兜底（仅当 City 未提供 billboardPlacements，例如非 City 调用 / 老数据）：
+   *  屏体水平包络若插进建筑，沿最浅方向推出并留 0.6m 间隙。
+   *  正常链路已在建城阶段把屏体占位登记为建筑排除区，不会走到这里。 */
   _avoidBuildings(item, spec) {
     if (spec.mount === "facade") return item;
     const grid = this.city.colliders;
     if (!grid || !grid.overlaps) return item;
-    const rot = item.rot || 0;
+    const corner = spec.mount === "corner";
+    const halfW = corner ? (spec.w + 1.4) / 2 + 0.1 : spec.w / 2 + 0.5;
+    const halfD = corner ? halfW : 0.8;
     // 屏底以下的矮碰撞体（树 5m / 路灯 6m）不会插到屏面；塔体落地按 7m 过滤
-    const minTop = spec.mount === "corner" ? 7 : Math.max(7, spec.y - spec.h / 2 - 0.5);
+    const minTop = corner ? 7 : Math.max(7, spec.y - spec.h / 2 - 0.5);
+    const rot = item.rot || 0, cs = Math.cos(rot), sn = Math.sin(rot);
+    const GAP = 0.6;
     let px = item.pos[0], pz = item.pos[1];
-    for (let pass = 0; pass < 8; pass++) {
-      const aabb = billboardOutline([px, pz], spec, rot).aabb;
-      const boxes = grid.overlaps(aabb[0], aabb[1], aabb[2], aabb[3], minTop)
-        .map((b) => [b[0], b[1], b[2], b[3]]);
-      boxes.push(...roadBoxesFor(this.city, aabb));
-      const [nx, nz] = pushOutBoxes([px, pz], spec, rot, boxes, 0.6, 4);
-      if (nx === px && nz === pz) break;
-      px = nx; pz = nz;
+    for (let pass = 0; pass < 6; pass++) {
+      let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+      for (const [lx, lz] of [[-halfW, -halfD], [halfW, -halfD], [halfW, halfD], [-halfW, halfD]]) {
+        const wx = px + lx * cs + lz * sn, wz = pz - lx * sn + lz * cs;
+        if (wx < x0) x0 = wx; if (wx > x1) x1 = wx;
+        if (wz < z0) z0 = wz; if (wz > z1) z1 = wz;
+      }
+      const hits = grid.overlaps(x0, z0, x1, z1, minTop);
+      if (!hits.length) break;
+      // 先处理重叠面积最大的那栋，一轮推一次，下一轮再处理其余
+      let b = hits[0], best = 0;
+      for (const r of hits) {
+        const area = (Math.min(x1, r[2]) - Math.max(x0, r[0])) * (Math.min(z1, r[3]) - Math.max(z0, r[1]));
+        if (area > best) { best = area; b = r; }
+      }
+      const moves = [
+        [b[0] - GAP - x1, 0],  // 推到建筑 -X 侧
+        [b[2] + GAP - x0, 0],  // 推到建筑 +X 侧
+        [0, b[1] - GAP - z1],  // 推到建筑 -Z 侧
+        [0, b[3] + GAP - z0],  // 推到建筑 +Z 侧
+      ];
+      moves.sort((a, c) => Math.abs(a[0] + a[1]) - Math.abs(c[0] + c[1]));
+      px += moves[0][0]; pz += moves[0][1];
     }
     if (px === item.pos[0] && pz === item.pos[1]) return item;
-    return { ...item, pos: [px, pz] };
+    return { ...item, pos: [Math.round(px * 10) / 10, Math.round(pz * 10) / 10] };
   }
 
   _build(city) {
     // 只认地图里手动放置的记录；没有就一块都不建（默认街区亦然）
     const placed = ((city.data && city.data.objects) || []).filter((o) => o && o.type === "billboard");
     if (!placed.length) return;
-    // 先批量算贴墙 / 建筑避让（此时未注册大屏碰撞体，避免屏与屏互相吸附）
+    // 立面屏贴墙；落地屏用建城阶段算好的路缘落点（建筑空地已预留）。
+    // placements 缺失时（老地图 / 非 City 调用）退回旧的「撞楼推开」兜底。
+    const placements = city.billboardPlacements || null;
     const items = placed.map((item) => {
       const spec = normalizeSpec(item.params);
-      return spec.mount === "facade" ? this._snapFacade(item, spec) : this._avoidBuildings(item, spec);
+      if (spec.mount === "facade") return this._snapFacade(item, spec);
+      const pos = placements && placements.get(item.id);
+      return pos ? { ...item, pos } : this._avoidBuildings(item, spec);
     });
     items.forEach((item, i) => {
       const spec = normalizeSpec(item.params);

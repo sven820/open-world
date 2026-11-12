@@ -15,7 +15,8 @@ function screenMaterial() {
     color: 0xc4c4c4,
     toneMapped: false,
     // 只渲染面片正面：独立广告牌/转角屏各有朝外的面片，
-    // 立面屏贴墙单面，背面不显示内容（放反时也不会露出镜像文字）
+    // 立面屏贴墙单面，背面不显示内容（放反时也不会露出镜像文字），
+    // 背面由 mounts.js 的实心机箱挡住，不会出现"看穿整块屏"
     side: THREE.FrontSide,
     map: null,
   });

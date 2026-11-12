@@ -35,7 +35,14 @@ import {
   rtRebuildOne, rtRebuildGroup, buildRoadTileMesh, TILE_STYLE_ZH, rtRoadGroupOf, tilePorts, rtSetMode,
 } from "./editor3d/roadTiles.js";
 import { rtMiters, RT_PAIR_TOL } from "../world/customMap.js";
-import { MOUNTS, normalizeSpec, buildBillboardGroup, editorGhostMaterial, billboardFootprint, billboardOutline, pushOutBoxes, boxesOverlap } from "../world/billboard/mounts.js";
+import { MOUNTS, normalizeSpec, buildBillboardGroup, editorGhostMaterial } from "../world/billboard/mounts.js";
+import {
+  collectConstraints, footprintOf, snapPlacement, validatePlacement,
+  resolvePlacement, reasonText,
+} from "../world/billboard/placement.js";
+import {
+  BB_COLORS, createFootprintBoundary, updateFootprintBoundary, disposeFootprintBoundary,
+} from "./editor3d/billboardBoundary.js";
 import { openBillboardContent } from "./editor3d/billboardContent.js";
 import { listMaterials } from "../world/materials.js";
 import { listAssets, getAsset, createAssetFromTraced } from "../data/assetStore.js";
@@ -60,11 +67,15 @@ export class MapEditor3d {
     this._v2 = new THREE.Vector3();
     this._q = new THREE.Quaternion();
     this._snap = 5;
-    // 广告大屏「待放置参数」：幽灵边界与最终放置都用它，保证所见即所得
-    this._bbPlace = { mount: "standalone", ...MOUNTS.standalone.defaults, rot: 0 };
-    this._bbGhostPos = null;
-    this._bbGhostLines = null;
     this._dirty = false;
+    // 广告大屏放置：待放参数 / 路缘吸附开关 / 约束缓存 / 幽灵与边界
+    this._bbDraft = { mount: "standalone", ...MOUNTS.standalone.defaults, autoSnap: true };
+    this._bbSnapOn = true;
+    this._bbConstraints = null;
+    this._bbGhostKey = "";
+    this._bbLastPlace = null;
+    this._bbLastStatus = "";
+    this._bbLastEvent = null;
     // 路块拼接工具状态（实现见 ui/editor3d/roadTiles.js）
     this._rtLen = 20;         // 路块长度（米）= 链式放置时每步前进的距离
     this._rtW = 10;           // 路块宽度（米，最小 6）
@@ -142,7 +153,9 @@ export class MapEditor3d {
       this._assetGhost.material.dispose();
       this._assetGhost = null;
     }
-    this._disposeBBGhost(); // 广告大屏幽灵（含占地边界线框）
+    this._disposeBBGhost();
+    disposeFootprintBoundary(this._bbBoundary);
+    this._bbBoundary = null;
     window.removeEventListener("resize", this._onResize);
     window.removeEventListener("keydown", this._onKey);
     if (this._compassEl) {
@@ -745,7 +758,7 @@ export class MapEditor3d {
       -((e.clientY - rect.top) / rect.height) * 2 + 1,
     );
   }
-  _groundPoint(e) {
+  _groundPoint(e, noSnap = false) {
     this._three.raycaster.setFromCamera(this._ndc(e), this._three.camera);
     const ray = this._three.raycaster.ray;
     const hit = new THREE.Vector3();
@@ -759,7 +772,7 @@ export class MapEditor3d {
     }
     // 描边绘制中（草稿激活）绕过网格吸附：吸附会把弯路量化成锯齿台阶，严重走形；
     // 路块拼接同样绕过：位置由端口磁吸决定，网格量化会破坏端口对齐
-    const snap = !this.draft && this.tool !== "place-road" && this._snap > 1 ? this._snap : 0;
+    const snap = !noSnap && !this.draft && this.tool !== "place-road" && this._snap > 0 ? this._snap : 0;
     return snap ? { x: Math.round(hit.x / snap) * snap, z: Math.round(hit.z / snap) * snap } : { x: hit.x, z: hit.z };
   }
   _pickObject(e) {
@@ -825,16 +838,23 @@ export class MapEditor3d {
       this._addObject({ id: uid(), type, pos: [pt.x, pt.z], rot: 0, params: {} });
       this._pushUndo("放置" + (type === "tree" ? "树木" : "路灯"));
     } else if (this.tool === "place-billboard") {
-      // 与幽灵同一套落点求解：网格/路缘吸附 + 建筑道路避让，所见即所得
-      const sp = this._bbSnapPoint(pt);
-      const p = this._bbPlace;
+      const raw = this._groundPoint(e, true); // 原始光标点，先做路缘吸附再按网格取整
+      if (!raw) return;
+      const ctx = this._bbGetConstraints();
+      const draft = this._bbDraftItem([raw.x, raw.z]);
+      const sp = snapPlacement(raw, draft, ctx, { snapStep: this._snap, roadSnap: this._bbSnapOn });
+      const v = validatePlacement(draft, ctx, sp.pos);
+      if (!v.ok) {
+        this.status(`无法放置：占位压到${reasonText(v.reasons)}，请移到青/金色边界内（红框为冲突）`);
+        return;
+      }
       this._addObject({
-        id: uid(), type: "billboard", pos: sp.pos, rot: p.rot,
-        params: { mount: p.mount, w: p.w, h: p.h, y: p.y },
+        id: uid(), type: "billboard", pos: sp.pos, rot: 0,
+        params: { ...this._bbDraft },
       });
+      this._bbConstraints = null; // 新屏也是后续放置的障碍
       this._pushUndo("放置广告大屏");
-      const tip = sp.state === "blocked" ? "· 仍与建筑/道路冲突，请挪开" : sp.state === "road" ? "· 已贴路缘并避开建筑/路面" : "· 网格吸附";
-      this.status(`已放置广告大屏 ${tip} · 选中后可调尺寸/朝向 · Delete 删除`);
+      this.status(`已放置${MOUNTS[this._bbDraft.mount].label} · ${sp.onRoad ? "吸附路缘" : "网格吸附"} · 选中后可见真实占位边界 · Delete 删除`);
     } else if (this.tool === "place-asset") {
       if (!this._placingAsset) { this.status("请先在右侧「我的模型」中选择一个资产"); return; }
       const a = this._placingAsset;
@@ -894,7 +914,8 @@ export class MapEditor3d {
       this._assetGhostMove(e); return; // 模型幽灵跟随 + 吸附预览
     }
     if (this.tool === "place-billboard") {
-      this._bbGhostMove(e); return; // 大屏幽灵跟随（默认承载形式）
+      this._bbLastEvent = e;
+      this._bbGhostMove(e); return; // 大屏幽灵 + 真实占位边界跟随
     }
     const d = this.draft;
     if (!d || !(this.tool.startsWith("draw") || d.area || d.measure)) return;
@@ -1363,8 +1384,12 @@ export class MapEditor3d {
     else if (kind === "roadTile") root.position.set(data.x, -this._curveOffset(data.x, data.z), data.z), root.rotation.y = data.rot || 0;
     root.add(object3d);
     const pickMeshes = [];
-    object3d.traverse((o) => { if (o.isMesh) { o.userData.entityId = data.id; pickMeshes.push(o); } });
-    const w = { kind, data, root, pickMeshes };
+    let bbEmbedded = null;
+    object3d.traverse((o) => {
+      if (o.userData.bbEmbedded) bbEmbedded = o;
+      if (o.isMesh) { o.userData.entityId = data.id; pickMeshes.push(o); }
+    });
+    const w = { kind, data, root, pickMeshes, bbEmbedded };
     this._wrappers.set(data.id, w);
     for (const m of pickMeshes) this._byPick.set(m, w);
     this._three.scene.add(root);
@@ -1374,6 +1399,7 @@ export class MapEditor3d {
   _rebuildAll() {
     this._wrappers = new Map();
     this._byPick = new Map();
+    this._bbConstraints = null; // 路网/描边路/手绘建筑变了，摆放约束需重算
     for (const w of this._three.scene.children.slice()) {
       if (w.userData.entityRoot) {
         this._three.scene.remove(w);
@@ -1415,6 +1441,7 @@ export class MapEditor3d {
       if (w && w !== this.sel) { this.sel = w; this._three.tc.attach(w.root); }
       else if (!w) this._select(null);
     }
+    this._updateBBSelection(); // 重建后边界跟随新 wrapper
   }
 
   // 程序化城市骨架叠加（2D 编辑器管理的数据，与运行时世界一致）：
@@ -1580,7 +1607,18 @@ export class MapEditor3d {
 
   _buildObjectMesh(o) {
     if (o.type === "asset") return this._buildAssetMesh(o);
-    return buildObjectMesh(this, o);
+    const base = buildObjectMesh(this, o);
+    if (o.type === "billboard" && base) {
+      // 已放置的大屏常驻一条高亮占位边界：深色塔体与深蓝网格几乎同色，
+      // 没有这条边框在编辑器里根本看不出它到底占了多大、有没有压到路
+      const g = new THREE.Group();
+      const bd = createFootprintBoundary();
+      bd.userData.bbEmbedded = true;
+      updateFootprintBoundary(bd, o, BB_COLORS.idle);
+      g.add(base, bd);
+      return g;
+    }
+    return base;
   }
 
   // 资产实例（同步）：模板热 → 克隆；未热 → 线框占位盒 + 异步预热后重建。
@@ -1647,8 +1685,9 @@ export class MapEditor3d {
   // 吸附落点：优先路缘（12m 内最近路块，投影到路缘线、沿路向限制在块内），
   // 否则按编辑器网格步长（_snap，默认 5m）取整。放置与幽灵共用，保证所见即所得
   _assetSnapPoint(pt) {
-    const snap = this._snap || 5;
-    const grid = { pos: [Math.round(pt.x / snap) * snap, Math.round(pt.z / snap) * snap], onRoad: false };
+    const snap = this._snap > 0 ? this._snap : 0;
+    const grid = { pos: snap ? [Math.round(pt.x / snap) * snap, Math.round(pt.z / snap) * snap] : [pt.x, pt.z], onRoad: false };
+    if (!this._bbSnapOn) return grid; // 顶栏「路缘吸附」关闭：只按网格（或自由落点）
     const tiles = this.map.features.roadTiles || [];
     if (!tiles.length) return grid;
     const R2 = 12 * 12;
@@ -1672,186 +1711,18 @@ export class MapEditor3d {
     return { pos: [Math.round(wx * 10) / 10, Math.round(wz * 10) / 10], onRoad: true };
   }
 
-  /* ---------------- 放置广告大屏（place-billboard） ----------------
-   * 放置前先在右侧选承载形式/尺寸/朝向，幽灵按同一套参数构建并显示真实占地边界；
-   * 落点吸附网格或路缘，并自动避开描边建筑与各类道路，所见即所得。
+  /* ---------------- 放置幽灵 + 真实占位边界（place-billboard） ----------------
+   * 幽灵按右侧「待放参数」构建（可在放置前就选好转角包柱屏），随鼠标只改位置；
+   * 边界组画的是与运行时完全一致的旋转后占位包络（含屏体高度），
+   * 青=网格吸附合法 / 金=吸附路缘 / 红=压到建筑、道路或地图范围外。
    */
-
-  // 无选中时的「待放置参数」面板（切换工具时 _select(null) 会刷新右侧）
-  _renderBBPlacePanel(el) {
-    const p = this._bbPlace;
-    const opts = Object.entries(MOUNTS)
-      .map(([id, m]) => `<option value="${id}"${id === p.mount ? " selected" : ""}>${m.label}</option>`).join("");
-    const fp = billboardFootprint(normalizeSpec(p));
-    el.innerHTML = `
-      <h4>放置广告大屏 <small>PLACE</small></h4>
-      <label class="me-row">承载形式<select id="ep-bbp-mount" class="me-input-wide">${opts}</select></label>
-      <label class="me-row">屏宽(m)<input id="ep-bbp-w" class="me-input-wide" type="number" min="4" max="40" step="1" value="${p.w}" /></label>
-      <label class="me-row">屏高(m)<input id="ep-bbp-h" class="me-input-wide" type="number" min="2" max="30" step="1" value="${p.h}" /></label>
-      <label class="me-row">屏心高度(m)<input id="ep-bbp-y" class="me-input-wide" type="number" min="3" max="120" step="1" value="${p.y}" /></label>
-      <label class="me-row">旋转(°)<input id="ep-bbp-rot" class="me-input-wide" type="number" min="0" max="360" step="15" value="${Math.round((p.rot || 0) * 180 / Math.PI)}" /></label>
-      <div class="me-hint">亮色宽边框 + 半透明底色 = 真实占地边界 ${(fp.halfW * 2).toFixed(1)} × ${(fp.halfD * 2).toFixed(1)} m（含外框/塔体，随旋转变化）。深色衬底保证卫星底图/网格上都看得清，四角标柱提示这是有高度的实体；切换承载形式后边界立即更新。</div>
-      <div class="me-hint">网格吸附 ${this._snap || 5}m（青）· 靠近道路贴到路缘外（黄）· 与建筑/路面重叠时自动推开，仍冲突显示红色。</div>`;
-    const changed = () => {
-      this._disposeBBGhost();
-      this._renderProps();
-      if (this._bbLastMove) this._bbGhostMove(this._bbLastMove); // 参数一改，边界立即跟着更新
-    };
-    el.querySelector("#ep-bbp-mount").addEventListener("change", (e) => {
-      this._bbPlace = { ...this._bbPlace, mount: e.target.value, ...MOUNTS[e.target.value].defaults };
-      changed();
-    });
-    const bind = (id, key, min, max) => el.querySelector(id).addEventListener("change", (e) => {
-      this._bbPlace[key] = clamp(+e.target.value || this._bbPlace[key], min, max);
-      changed();
-    });
-    bind("#ep-bbp-w", "w", 4, 40);
-    bind("#ep-bbp-h", "h", 2, 30);
-    bind("#ep-bbp-y", "y", 3, 120);
-    el.querySelector("#ep-bbp-rot").addEventListener("change", (e) => {
-      const d = ((+e.target.value || 0) % 360 + 360) % 360;
-      this._bbPlace.rot = d * Math.PI / 180;
-      changed();
-    });
+  _bbGetConstraints() {
+    if (!this._bbConstraints) this._bbConstraints = collectConstraints({ data: this.map });
+    return this._bbConstraints;
   }
 
-  // 编辑器里可从地图数据直接得到的不可占用区：描边建筑、模型资产、各类道路
-  _bbObstacleBoxes() {
-    const all = [], roads = [];
-    const m = this.map, B = { minX: -2000, maxX: 2000, minZ: -2000, maxZ: 2000 };
-    for (const o of m.objects || []) {
-      if (o.type === "building" && o.params && o.params.footprint) {
-        const c = Math.cos(o.rot || 0), s = Math.sin(o.rot || 0);
-        let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
-        for (const [lx, lz] of o.params.footprint) {
-          const wx = o.pos[0] + lx * c + lz * s, wz = o.pos[1] - lx * s + lz * c;
-          x0 = Math.min(x0, wx); x1 = Math.max(x1, wx);
-          z0 = Math.min(z0, wz); z1 = Math.max(z1, wz);
-        }
-        all.push([x0, z0, x1, z1]);
-      } else if (o.type === "asset") {
-        const h = 8 * (o.scale || 1);
-        all.push([o.pos[0] - h, o.pos[1] - h, o.pos[0] + h, o.pos[1] + h]);
-      }
-    }
-    for (const r of m.roadsX || []) {
-      const h = corridorHalf(r) + 2;
-      const b = [r.at - h, B.minZ, r.at + h, B.maxZ];
-      all.push(b); roads.push(b);
-    }
-    for (const r of m.roadsZ || []) {
-      const h = corridorHalf(r) + 2;
-      const b = [B.minX, r.at - h, B.maxX, r.at + h];
-      all.push(b); roads.push(b);
-    }
-    for (const r of (m.features && m.features.roads) || []) {
-      const w = (r.width || 12) / 2 + (r.sidewalk ?? 3) + 1.5;
-      const pts = r.points || [];
-      for (let i = 1; i < pts.length; i++) {
-        const a = pts[i - 1], b = pts[i];
-        const box = [Math.min(a[0], b[0]) - w, Math.min(a[1], b[1]) - w, Math.max(a[0], b[0]) + w, Math.max(a[1], b[1]) + w];
-        all.push(box); roads.push(box);
-      }
-    }
-    for (const t of (m.features && m.features.roadTiles) || []) {
-      const rot = t.rot || 0, c = Math.cos(rot), s = Math.sin(rot);
-      const hl = (t.len || 20) / 2, hw = (t.w || 10) / 2;
-      let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
-      for (const [lx, lz] of [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]]) {
-        const wx = t.x + lx * c + lz * s, wz = t.z - lx * s + lz * c;
-        x0 = Math.min(x0, wx); x1 = Math.max(x1, wx);
-        z0 = Math.min(z0, wz); z1 = Math.max(z1, wz);
-      }
-      const box = [x0, z0, x1, z1];
-      all.push(box); roads.push(box);
-    }
-    return { all, roads };
-  }
-
-  // 落点求解：网格 / 路缘吸附 → 建筑与道路避让 → 冲突标记
-  _bbSnapPoint(pt) {
-    const spec = normalizeSpec(this._bbPlace);
-    const rot = this._bbPlace.rot || 0;
-    const snap = this._snap || 5;
-    let pos = [Math.round(pt.x / snap) * snap, Math.round(pt.z / snap) * snap];
-    let state = "grid";
-    const sp = this._assetSnapPoint(pt);           // 靠近拼接路块时先吸到路缘线
-    if (sp.onRoad) { pos = sp.pos; state = "road"; }
-    const { all, roads } = this._bbObstacleBoxes();
-    if (state === "grid" && boxesOverlap(pos, spec, rot, roads)) state = "road";
-    pos = pushOutBoxes(pos, spec, rot, all, 0.6, 10);
-    return { pos, state: boxesOverlap(pos, spec, rot, all) ? "blocked" : state };
-  }
-
-  _ensureBBGhost() {
-    if (this._bbGhost) return;
-    const p = this._bbPlace;
-    const spec = normalizeSpec(p);
-    const bodyMat = editorGhostMaterial();
-    const g = buildBillboardGroup({ pos: [0, 0], rot: p.rot, params: p }, bodyMat).group;
-    // 框架原本是受光照的深灰 MeshStandardMaterial，在深色网格底图上几乎隐身；
-    // 统一换成不受光照的中亮蓝灰半透明，任何底图上都保留轮廓
-    const frameMat = new THREE.MeshBasicMaterial({
-      color: 0x6f9dc4, transparent: true, opacity: 0.5,
-      depthWrite: false, toneMapped: false,
-    });
-    g.traverse((o) => {
-      if (!o.isMesh || o.userData.billboardBack) return; // 立面屏背板保持不透明
-      const old = o.material;
-      o.material = o.geometry.type === "PlaneGeometry" ? bodyMat : frameMat;
-      if (old !== bodyMat && !(old.userData && old.userData.shared)) old.dispose();
-    });
-    // 边界在 group 局部坐标构建（group 自身已带 rot，不能重复旋转）
-    const { aabb } = billboardOutline([0, 0], spec, 0);
-    const w = aabb[2] - aabb[0], d = aabb[3] - aabb[1];
-
-    // 占地填充：先画一层高对比半透明底色，整块范围一眼可见
-    const fillMat = new THREE.MeshBasicMaterial({
-      color: 0x22d3ee, transparent: true, opacity: 0.26, depthWrite: false,
-      depthTest: false, side: THREE.DoubleSide, toneMapped: false,
-    });
-    const fill = new THREE.Mesh(new THREE.PlaneGeometry(w, d).rotateX(-Math.PI / 2), fillMat);
-    fill.position.y = 0.22;
-    fill.renderOrder = -1; // 最先画：屏体叠在底色上，边框最后画
-    g.add(fill);
-
-    // 边框用细长面片而非 Line：WebGL 线宽固定 1px，俯视卫星底图上根本看不清。
-    // 深色宽衬底 + 亮色窄线两层，浅色影像和深色网格上都有足够对比。
-    const darkMat = new THREE.MeshBasicMaterial({
-      color: 0x06121c, transparent: true, opacity: 0.92,
-      depthWrite: false, depthTest: false, toneMapped: false,
-    });
-    const edgeMat = new THREE.MeshBasicMaterial({
-      color: 0x22d3ee, transparent: true, opacity: 1,
-      depthWrite: false, depthTest: false, toneMapped: false,
-    });
-    const bar = (bw, bd, x, z, mat, y, order) => {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(bw, 0.1, bd), mat);
-      m.position.set(x, y, z);
-      m.renderOrder = order;
-      g.add(m);
-    };
-    const W = 1.0, W2 = 0.46; // 衬底 / 亮线宽度（米）
-    for (const sz of [-d / 2, d / 2]) {
-      bar(w + W, W, 0, sz, darkMat, 0.30, 991);
-      bar(w + W2, W2, 0, sz, edgeMat, 0.36, 992);
-    }
-    for (const sx of [-w / 2, w / 2]) {
-      bar(W, d + W, sx, 0, darkMat, 0.30, 991);
-      bar(W2, d + W2, sx, 0, edgeMat, 0.36, 992);
-    }
-    // 四角标柱：俯视时角点最容易定位，也提示这是有高度的实体
-    for (const sx of [-w / 2, w / 2]) for (const sz of [-d / 2, d / 2]) {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.6, 0.55), edgeMat);
-      m.position.set(sx, 0.8, sz);
-      m.renderOrder = 993;
-      g.add(m);
-    }
-
-    g.visible = false;
-    this._bbGhost = g;
-    this._bbGhostLines = [edgeMat, fillMat]; // 随吸附 / 冲突状态改色
-    this._three.scene.add(g);
+  _bbDraftItem(pos) {
+    return { id: "__bb_draft__", type: "billboard", pos: pos || [0, 0], rot: 0, params: { ...this._bbDraft } };
   }
 
   _disposeBBGhost() {
@@ -1862,26 +1733,104 @@ export class MapEditor3d {
       if (o.material && !(o.material.userData && o.material.userData.shared)) o.material.dispose();
     });
     this._bbGhost = null;
-    this._bbGhostLines = null;
+    this._bbGhostKey = "";
+  }
+
+  _ensureBBGhost() {
+    const key = `${this._bbDraft.mount}|${this._bbDraft.w}|${this._bbDraft.h}|${this._bbDraft.y}`;
+    if (this._bbGhost && this._bbGhostKey === key) return;
+    this._disposeBBGhost();
+    this._bbGhost = buildBillboardGroup(this._bbDraftItem(), editorGhostMaterial()).group;
+    this._bbGhost.visible = false;
+    this._bbGhostKey = key;
+    this._three.scene.add(this._bbGhost);
+  }
+
+  _ensureBBBoundary() {
+    if (!this._bbBoundary) {
+      this._bbBoundary = createFootprintBoundary();
+      this._three.scene.add(this._bbBoundary);
+    }
+    return this._bbBoundary;
   }
 
   _hideBBGhost() {
     if (this._bbGhost) this._bbGhost.visible = false;
+    if (this._bbBoundary) this._bbBoundary.visible = false;
   }
 
   _bbGhostMove(e) {
-    this._bbLastMove = e;
-    const pt = this._groundPoint(e);
-    if (!pt) { this._hideBBGhost(); return; }
+    const raw = this._groundPoint(e, true);
+    if (!raw) { this._hideBBGhost(); return; }
+    const ctx = this._bbGetConstraints();
+    const item = this._bbDraftItem([raw.x, raw.z]);
+    const sp = snapPlacement(raw, item, ctx, { snapStep: this._snap, roadSnap: this._bbSnapOn });
+    const v = validatePlacement(item, ctx, sp.pos);
+    const color = !v.ok ? BB_COLORS.invalid : (sp.onRoad ? BB_COLORS.road : BB_COLORS.grid);
+
     this._ensureBBGhost();
-    const sp = this._bbSnapPoint(pt);
-    this._bbGhostPos = sp.pos;
     const g = this._bbGhost;
     g.position.set(sp.pos[0], -this._curveOffset(sp.pos[0], sp.pos[1]), sp.pos[1]);
+    g.rotation.y = 0;
     g.visible = true;
-    // 亮青 = 网格吸附，亮黄 = 贴路缘/被道路推开，亮红 = 仍冲突；深色衬底让三种色在任何底图上都清晰
-    const color = sp.state === "blocked" ? 0xff2d55 : sp.state === "road" ? 0xffd400 : 0x22d3ee;
-    for (const mat of this._bbGhostLines) mat.color.setHex(color);
+    editorGhostMaterial().color.setHex(color);
+
+    const bd = this._ensureBBBoundary();
+    updateFootprintBoundary(bd, item, color);
+    bd.position.copy(g.position);
+    bd.rotation.y = 0;
+
+    this._bbLastPlace = { pos: sp.pos, onRoad: sp.onRoad, ok: v.ok, reasons: v.reasons };
+    const f = footprintOf(item);
+    const size = `${(f.hx * 2).toFixed(1)}×${(f.hz * 2).toFixed(1)}m`;
+    const msg = !v.ok
+      ? `不可放置：占位压到${reasonText(v.reasons)}（红框）· 占位 ${size}`
+      : `${MOUNTS[this._bbDraft.mount].label} · ${sp.onRoad ? "已吸附路缘" : "网格吸附"} · 合法占位 ${size} · 单击放置`;
+    if (msg !== this._bbLastStatus) { this.status(msg); this._bbLastStatus = msg; }
+  }
+
+  // 已放置的大屏都常驻显示占位边界（亮蓝），选中的那块改用合法/冲突色。
+  // 边界是 wrapper 的子节点，随 Gizmo 平移旋转一起走，改尺寸后由重建刷新几何。
+  _updateBBSelection() {
+    for (const w of this._wrappers ? this._wrappers.values() : []) {
+      if (!w.bbEmbedded) continue;
+      for (const c of w.bbEmbedded.children) c.material.color.setHex(BB_COLORS.idle);
+    }
+    const sel = this.sel;
+    if (!sel || !sel.bbEmbedded || sel.kind !== "object" || !sel.data || sel.data.type !== "billboard") return;
+    const v = validatePlacement(sel.data, this._bbGetConstraints());
+    const color = v.ok ? BB_COLORS.grid : BB_COLORS.invalid;
+    for (const c of sel.bbEmbedded.children) c.material.color.setHex(color);
+  }
+
+  // 放置工具无选中时：先在右侧选承载形式与尺寸，幽灵/边界随之变成对应形状
+  _renderBBPicker(el) {
+    const d = this._bbDraft;
+    const opts = Object.entries(MOUNTS)
+      .map(([id, m]) => `<option value="${id}"${id === d.mount ? " selected" : ""}>${m.label}</option>`).join("");
+    el.innerHTML = `
+      <h4>广告大屏 · 放置</h4>
+      <label class="me-row">承载形式<select id="ep-bbp-mount" class="me-input-wide">${opts}</select></label>
+      <label class="me-row">屏宽(m)<input id="ep-bbp-w" class="me-input-wide" type="number" min="4" max="40" step="1" value="${d.w}" /></label>
+      <label class="me-row">屏高(m)<input id="ep-bbp-h" class="me-input-wide" type="number" min="2" max="30" step="1" value="${d.h}" /></label>
+      <label class="me-row">屏心高度(m)<input id="ep-bbp-y" class="me-input-wide" type="number" min="3" max="120" step="1" value="${d.y}" /></label>
+      <div class="me-hint">移动鼠标即可预览真实占位边界（含旋转后的包络与屏体高度）：<b style="color:#2ce8c0">青色</b>=网格吸附合法、<b style="color:#ffc24d">金色</b>=吸附路缘、<b style="color:#ff4d5e">红色</b>=压到建筑/道路/范围外，红色时禁止放置。顶栏可开关路缘吸附。</div>`;
+    const refresh = () => {
+      this._bbGhostKey = "";
+      if (this._bbLastEvent) this._bbGhostMove(this._bbLastEvent);
+    };
+    el.querySelector("#ep-bbp-mount").addEventListener("change", (e) => {
+      this._bbDraft = { mount: e.target.value, ...MOUNTS[e.target.value].defaults, autoSnap: true };
+      this._renderProps();
+      refresh();
+    });
+    for (const [id, k, min, max] of [["w", "w", 4, 40], ["h", "h", 2, 30], ["y", "y", 3, 120]]) {
+      el.querySelector(`#ep-bbp-${id}`).addEventListener("change", (e) => {
+        this._bbDraft[k] = clamp(+e.target.value || this._bbDraft[k], min, max);
+        e.target.value = this._bbDraft[k];
+        refresh();
+      });
+    }
   }
 
   // 右侧「我的模型」选择面板（place-asset 工具的无选中状态）
@@ -1939,6 +1888,7 @@ export class MapEditor3d {
 
   _addObject(data) {
     this.map.objects.push(data);
+    this._bbConstraints = null; // 新物件（尤其是大屏/建筑）参与后续摆放避让
     const m = this._buildObjectMesh(data);
     if (m) { this._select(this._makeWrapper("object", data, m)); }
   }
@@ -1968,6 +1918,7 @@ export class MapEditor3d {
     }
     // 道路（程序化/描边）选中/取消时刷新骨架高亮（金色 = 选中）
     if (wasRoad || (w && (w.kind === "roadX" || w.kind === "roadZ" || w.kind === "road"))) this._rebuildSkeleton();
+    this._updateBBSelection();
   }
 
   _syncGizmoToData(commit = false) {
@@ -2017,6 +1968,7 @@ export class MapEditor3d {
       this.sel.data.pos = [Math.round(r.position.x * 10) / 10, Math.round(r.position.z * 10) / 10];
       this.sel.data.rot = Math.round((r.rotation.y || 0) * 100) / 100;
       r.position.y = -this._curveOffset(r.position.x, r.position.z); // 维持球面贴合
+      if (this.sel.data.type === "billboard") this._updateBBSelection(); // 拖动中边界实时跟随
     } else if (this.sel.kind === "roadTile") {
       this.sel.data.x = Math.round(r.position.x * 10) / 10;
       this.sel.data.z = Math.round(r.position.z * 10) / 10;
@@ -2088,7 +2040,7 @@ export class MapEditor3d {
     const el = document.getElementById("e3-props");
     if (!this.sel && this.tool === "place-road") { rtRenderPanel(this); return; } // 路块工具无选中：右侧显示拼接面板（含添加/编辑模式切换），而非地图统计
     if (!this.sel && this.tool === "place-asset") { this._renderAssetPicker(el); return; } // 资产工具无选中：右侧显示「我的模型」选择面板
-    if (!this.sel && this.tool === "place-billboard") { this._renderBBPlacePanel(el); return; } // 大屏工具无选中：显示待放置参数
+    if (!this.sel && this.tool === "place-billboard") { this._renderBBPicker(el); return; } // 大屏工具无选中：先选承载形式/尺寸
     if (!this.sel) {
       const f = this.map.features;
       const opT = Math.round((1 - (this.map.gridOpacity ?? GRID_OPACITY_DEFAULT)) * 100); // 网格透明度%（0=默认浓度，100=完全透出影像）
@@ -2480,8 +2432,15 @@ export class MapEditor3d {
         .map(([id, m]) => `<option value="${id}"${id === spec.mount ? " selected" : ""}>${m.label}</option>`)
         .join("");
       const deg = Math.round(((data.rot || 0) * 180 / Math.PI % 360 + 360) % 360);
+      const valid = validatePlacement(data, this._bbGetConstraints());
+      const f = footprintOf(data);
+      const validHint = valid.ok
+        ? `<span style="color:#2ce8c0">✓ 占位边界有效</span> · 未压占建筑 / 道路 / 范围外`
+        : `<span style="color:#ff4d5e">✗ 占位冲突：${reasonText(valid.reasons)}</span> · 进游戏会自动挪到最近合法路缘`;
       el.innerHTML = `
         <h4>广告大屏 · 属性</h4>
+        <div class="me-hint">占位 ${(f.hx * 2).toFixed(1)}×${(f.hz * 2).toFixed(1)}m · ${validHint}</div>
+        <button class="me-btn" id="ep-bb-fix">自动校正到合法落点</button>
         <label class="me-row">承载形式<select id="ep-bb-mount" class="me-input-wide">${mountOpts}</select></label>
         <label class="me-row">屏宽(m)<input id="ep-bb-w" class="me-input-wide" type="number" min="4" max="40" step="1" value="${spec.w}" /></label>
         <label class="me-row">屏高(m)<input id="ep-bb-h" class="me-input-wide" type="number" min="2" max="30" step="1" value="${spec.h}" /></label>
@@ -2494,11 +2453,25 @@ export class MapEditor3d {
         <button class="me-del" id="ep-del">删除</button>`;
       const apply = (patch, undoLabel) => {
         Object.assign(data.params, patch);
+        this._bbConstraints = null;
         this._rebuildObjects(); this._dirty = true;
         const w = this._wrappers.get(data.id);
         if (w) { this.sel = w; this._three.tc.attach(w.root); } // 重建后接回 Gizmo
         this._pushUndo(undoLabel);
       };
+      el.querySelector("#ep-bb-fix").addEventListener("click", () => {
+        const r = resolvePlacement(data, this._bbGetConstraints());
+        if (!r.ok) { this.status("附近没有合法落点：请先调整道路/建筑，或缩小屏体尺寸"); return; }
+        if (!r.moved) { this.status("当前落点已合法，无需校正"); return; }
+        data.pos = r.item.pos;
+        this._bbConstraints = null;
+        this._rebuildObjects(); this._dirty = true;
+        const w = this._wrappers.get(data.id);
+        if (w) { this.sel = w; this._three.tc.attach(w.root); }
+        this._pushUndo("自动校正大屏落点");
+        this._renderProps();
+        this.status(`已校正落点至 ${data.pos[0]}, ${data.pos[1]} · 边界有效`);
+      });
       el.querySelector("#ep-bb-mount").addEventListener("change", (e) => {
         // 切换承载形式：尺寸缺省跟随新形式的默认值（避免立面屏继承了广告牌的离地高度）
         apply({ mount: e.target.value, ...MOUNTS[e.target.value].defaults }, "切换承载形式");
@@ -2824,7 +2797,7 @@ export class MapEditor3d {
           "draw-building": "建筑描边：点击多边形顶点（≥3 点自动闭合生成盒子）",
           "place-tree": "点击地面放置树木",
           "place-lamp": "点击地面放置路灯",
-          "place-billboard": "右侧先选承载形式/尺寸/朝向，鼠标预览蓝色占地边界 · 靠近道路贴路缘（金）、网格吸附（蓝）、冲突（红）· 单击放置",
+          "place-billboard": "先在右侧选承载形式（含转角包柱屏）与尺寸 · 移动鼠标看真实占位边界 · 自动吸附路缘/网格 · 红框禁止放置",
           "place-asset": "在右侧「我的模型」中选择资产后，点击地图放置",
         }[t] || "");
       });
@@ -2842,6 +2815,15 @@ export class MapEditor3d {
     document.getElementById("e3-undo").addEventListener("click", () => this._undo(), this._sig);
     document.getElementById("e3-redo").addEventListener("click", () => this._redo(), this._sig);
     document.getElementById("e3-snap").addEventListener("change", (e) => { this._snap = +e.target.value; }, this._sig);
+    const roadSnap = document.getElementById("e3-road-snap");
+    if (roadSnap) {
+      roadSnap.checked = this._bbSnapOn;
+      roadSnap.addEventListener("change", (e) => {
+        this._bbSnapOn = !!e.target.checked;
+        this.status(this._bbSnapOn ? "路缘吸附已开启：靠近道路自动落到合法路缘（金色边界）" : "路缘吸附已关闭：仅按网格吸附");
+        if (this._bbLastEvent && this.tool === "place-billboard") this._bbGhostMove(this._bbLastEvent);
+      }, this._sig);
+    }
     document.getElementById("e3-basemap").addEventListener("click", () => this._toggleBasemap(), this._sig);
     document.getElementById("e3-settings").addEventListener("click", () => this._toggleSettings(), this._sig);
 

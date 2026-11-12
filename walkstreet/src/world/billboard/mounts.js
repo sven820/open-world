@@ -12,6 +12,7 @@ import { makeCanvas } from "../textures.js";
  *   { group, screenMats, collider }   // collider 可为 null
  * 局部坐标约定：group 原点 = 地面落点，rotation.y = rot，
  * 屏面朝局部 +Z（corner 为 -Z/-X 两面）。
+ * 单面屏（facade）必须自带不透明背板，否则 FrontSide 面片背面被剔除后会看穿。
  ---------------------------------------------------------------------- */
 
 const HOUSING = 0x262a30;   // 塔体/边框深灰
@@ -27,6 +28,11 @@ function housingMat() {
 function trimMat() {
   return new THREE.MeshBasicMaterial({ color: 0x8a93a2, toneMapped: false });
 }
+// 单面屏背板：比机箱稍亮的恒定深灰蓝（不随光照变全黑），
+// 从墙侧一眼能读出"这是一块实心设备背板"，而不是一个能看穿的洞
+function backPanelMat() {
+  return new THREE.MeshBasicMaterial({ color: 0x3b4453, toneMapped: false });
+}
 function mesh(geo, mat, x, y, z) {
   const m = new THREE.Mesh(geo, mat);
   m.position.set(x, y, z);
@@ -34,8 +40,9 @@ function mesh(geo, mat, x, y, z) {
   return m;
 }
 
-/* 四边中空边框（替代实心背板）：双面屏由前后两块各自朝外的面片组成，
- * 背面透出的是背侧那块屏面，不再出现"夜间整块纯黑矩形"。返回的 Group 以中心定位。 */
+/* 四边中空边框：仅用于前后各有一块朝外面片的双面屏（standalone），
+ * 背面透出的是背侧那块屏面，不再出现"夜间整块纯黑矩形"。
+ * 单面屏（facade）不能用它 —— 中间会漏空看穿。返回的 Group 以中心定位。 */
 function frame(w, h, depth, mat) {
   const g = new THREE.Group();
   const t = 0.35; // 边框条宽
@@ -96,17 +103,24 @@ export const MOUNTS = {
         group.add(mesh(new THREE.BoxGeometry(0.5, 0.5, 0.12), housingMat(), 0, sy, 0.06));
         group.add(mesh(new THREE.BoxGeometry(0.14, 0.14, armZ), housingMat(), 0, sy, armZ / 2));
       }
-      // 外框与屏面同层，一起构成"一整块屏"；框内沿正好贴住屏面边缘，不重叠
-      const frameG = frame(w + 0.7, h + 0.7, 0.3, housingMat());
-      frameG.position.set(0, y, screenZ - 0.13);
-      group.add(frameG);
-      // 不透明背板：屏面是 FrontSide，背面不显示内容；这块壳体同时挡住视线，
-      // 从背面看到的是实体深灰板，而不是中空框透出后面的街景
-      const backPlate = mesh(new THREE.BoxGeometry(w, h, 0.08), housingMat(), 0, y, screenZ - 0.06);
-      backPlate.userData.billboardBack = true; // 放置幽灵保留不透明，便于分辨正反
-      backPlate.castShadow = false;
-      group.add(backPlate);
-      // 单张朝外面片：材质为 FrontSide，背面不渲染内容（贴墙屏背面本来朝墙）
+      // 实心机箱（替代四边中空框）：立面屏只有一张朝外的 FrontSide 面片，
+      // 中空框会让中间那块直接透出后面的街景 —— 从墙侧/斜后方看整块屏是"透明"的。
+      // 换成不透明箱体后背面是整块深灰背板；正面仍只露出 0.35m 边框（视觉不变）。
+      const CABINET_DEPTH = 0.34;
+      const cabinet = mesh(
+        new THREE.BoxGeometry(w + 0.7, h + 0.7, CABINET_DEPTH),
+        housingMat(), 0, y, screenZ - 0.04 - CABINET_DEPTH / 2,
+      );
+      group.add(cabinet);
+      // 背板稍稍外凸、四周留 0.3m 机箱边框：背光时也不会黑成一团看不出形状
+      const cabinetBackZ = screenZ - 0.04 - CABINET_DEPTH;
+      const backPanel = mesh(
+        new THREE.BoxGeometry(w + 0.1, h + 0.1, 0.04),
+        backPanelMat(), 0, y, cabinetBackZ - 0.02,
+      );
+      backPanel.castShadow = false;
+      group.add(backPanel);
+      // 屏面贴在机箱正面外 0.04m，避免 z-fighting 且不遮挡四周边框
       const front = mesh(new THREE.PlaneGeometry(w, h), screenMat, 0, y, screenZ);
       front.castShadow = false;
       group.add(front);
@@ -157,61 +171,6 @@ export function normalizeSpec(params = {}) {
   };
 }
 
-/* ---------------- 放置边界 / 避让（编辑器预览与运行时共用） ---------------- */
-
-/** 屏体水平占地半尺寸（含外框、悬挑与塔体），用于放置边界与建筑/道路避让 */
-export function billboardFootprint(spec) {
-  if (spec.mount === "corner") {
-    const half = (spec.w + 1.4) / 2 + 0.1;          // 塔体宽 = w + 1.4
-    return { halfW: half, halfD: half };
-  }
-  if (spec.mount === "facade") {
-    return { halfW: spec.w / 2 + 0.35, halfD: 0.3 + FACADE_STANDOFF + 0.1 };
-  }
-  return { halfW: spec.w / 2 + 0.5, halfD: 0.8 };    // 独立广告牌：外框 + 前后屏面
-}
-
-/** 屏体占地四角与外接矩形（世界坐标；rot 变换约定同 buildBillboardGroup） */
-export function billboardOutline(pos, spec, rot = 0) {
-  const { halfW, halfD } = billboardFootprint(spec);
-  const cs = Math.cos(rot), sn = Math.sin(rot);
-  const corners = [[-halfW, -halfD], [halfW, -halfD], [halfW, halfD], [-halfW, halfD]]
-    .map(([lx, lz]) => [pos[0] + lx * cs + lz * sn, pos[1] - lx * sn + lz * cs]);
-  const xs = corners.map((c) => c[0]), zs = corners.map((c) => c[1]);
-  return { corners, aabb: [Math.min(...xs), Math.min(...zs), Math.max(...xs), Math.max(...zs)] };
-}
-
-/** 把落点沿最浅分离轴推出所有占用矩形 [x0,z0,x1,z1]；每轮处理重叠面积最大的一个。
- *  只返回新落点，朝向 / 尺寸 / ID / 内容都不变。 */
-export function pushOutBoxes(pos, spec, rot, boxes, gap = 0.6, maxPass = 8) {
-  let px = pos[0], pz = pos[1];
-  for (let pass = 0; pass < maxPass; pass++) {
-    const [x0, z0, x1, z1] = billboardOutline([px, pz], spec, rot).aabb;
-    let hit = null, bestArea = 0;
-    for (const b of boxes) {
-      const ow = Math.min(x1, b[2]) - Math.max(x0, b[0]);
-      const oh = Math.min(z1, b[3]) - Math.max(z0, b[1]);
-      if (ow <= 0 || oh <= 0) continue;
-      const area = ow * oh;
-      if (area > bestArea) { bestArea = area; hit = b; }
-    }
-    if (!hit) break;
-    const moves = [
-      [hit[0] - gap - x1, 0], [hit[2] + gap - x0, 0],
-      [0, hit[1] - gap - z1], [0, hit[3] + gap - z0],
-    ];
-    moves.sort((a, c) => Math.abs(a[0] + a[1]) - Math.abs(c[0] + c[1]));
-    px += moves[0][0]; pz += moves[0][1];
-  }
-  return [Math.round(px * 10) / 10, Math.round(pz * 10) / 10];
-}
-
-/** 最终落点是否仍与任一占用矩形相交（编辑器红色冲突提示用） */
-export function boxesOverlap(pos, spec, rot, boxes) {
-  const [x0, z0, x1, z1] = billboardOutline(pos, spec, rot).aabb;
-  return boxes.some((b) => x0 < b[2] && x1 > b[0] && z0 < b[3] && z1 > b[1]);
-}
-
 /**
  * 构建一块大屏（编辑器预览与运行时共用同一套几何）。
  * @param {{pos:[number,number], rot:number, params:object}} item 地图 objects 记录
@@ -245,7 +204,7 @@ export function editorScreenMaterial() {
   ctx.fillStyle = "rgba(255,255,255,0.65)";
   ctx.fillText("AD SCREEN", 256, 190);
   _previewMat = new THREE.MeshBasicMaterial({
-    color: 0xc4c4c4, toneMapped: false, side: THREE.FrontSide, // 与运行时一致：立面屏背面不显示
+    color: 0xc4c4c4, toneMapped: false, side: THREE.FrontSide, // 与运行时一致：背面不显示内容，由实心机箱遮挡
   });
   _previewMat.map = new THREE.CanvasTexture(c);
   _previewMat.map.colorSpace = THREE.SRGBColorSpace;
@@ -253,12 +212,14 @@ export function editorScreenMaterial() {
   return _previewMat;
 }
 
-// 放置幽灵：高对比亮青半透明，避免与卫星底图/蓝色网格糊在一起
+// 放置幽灵：高亮青色。编辑器网格是深蓝灰（0x22303e / 0x3a4a5c），
+// 深蓝半透明盒几乎融进网格看不出边界，故换成高明度 + 双面 + 略高不透明度；
+// 颜色还会随「网格吸附 / 路缘吸附 / 与建筑或道路冲突」实时切换。
 export function editorGhostMaterial() {
   if (_ghostMat) return _ghostMat;
   _ghostMat = new THREE.MeshBasicMaterial({
-    color: 0x8be9ff, transparent: true, opacity: 0.45, depthWrite: false,
-    toneMapped: false, side: THREE.DoubleSide,
+    color: 0x2ce8c0, transparent: true, opacity: 0.42, depthWrite: false,
+    side: THREE.DoubleSide, toneMapped: false,
   });
   _ghostMat.userData.shared = true;
   return _ghostMat;

@@ -26,6 +26,8 @@ import {
   buildParkedScooters, buildTrafficHeads,
 } from "./cityStreetObjects.js";
 import { ColliderGrid } from "./colliderGrid.js";
+import { buildTraceCorridors, collectConstraints, resolvePlacement, footprintBox } from "./billboard/placement.js";
+import { normalizeSpec } from "./billboard/mounts.js";
 
 const FLOOR_H = 3.15;
 const GROUND_H = 4.0;
@@ -65,73 +67,10 @@ export class City {
     this.gen = genConfig(data);
     this.custom = null;         // buildCustomMap 结果（描边内容渲染数据）
     this.buildProgress = 0;     // 程序化城市分块生成进度（0~1，main.js 加载条轮询）
-    // 3D 描边道路走廊预计算：程序化建筑避让 + 玩家脚底高度（路面 0.18 / 人行道 0.24）
-    this.traceCorridors = [];
-    const roadDefs = (data && data.features && data.features.roads) || [];
-    for (let ri = 0; ri < roadDefs.length; ri++) {
-      const r = roadDefs[ri];
-      const ptsRaw = r.points || []; // 原始 [x,z] 数组（pointInPoly 需要）
-      if (ptsRaw.length < 2) continue;
-      const pts = ptsRaw.map(([x, z]) => ({ x, z }));
-      const roadHalf = (r.width || 12) / 2;
-      const sw = Math.min(Math.max(r.sidewalk ?? 3, 0), 12);
-      const segs = [], samples = [];
-      for (let i = 0; i + 1 < pts.length; i++) {
-        const a = pts[i], b = pts[i + 1];
-        segs.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z });
-        const len = Math.hypot(b.x - a.x, b.z - a.z);
-        const n = Math.max(1, Math.ceil(len / 3)); // ~3m 采样，供建筑矩形快速相交测试
-        for (let k = 0; k < n; k++) samples.push({ x: a.x + ((b.x - a.x) * k) / n, z: a.z + ((b.z - a.z) * k) / n });
-      }
-      if (r.closed && pts.length > 2) {
-        // 闭合面路补采样最后一条封边，否则封边一侧的走廊避让（建筑 / 街道家具）会漏
-        const a = pts[pts.length - 1], b = pts[0];
-        const len = Math.hypot(b.x - a.x, b.z - a.z);
-        const n = Math.max(1, Math.ceil(len / 3));
-        for (let k = 0; k < n; k++) samples.push({ x: a.x + ((b.x - a.x) * k) / n, z: a.z + ((b.z - a.z) * k) / n });
-      }
-      samples.push(pts[pts.length - 1]);
-      this.traceCorridors.push({
-        index: ri,   // data.features.roads 中的原始下标（customMap 侧按同一顺序遍历）
-        pts: ptsRaw, closed: !!r.closed, segs, samples,
-        roadHalf, edgeHalf: roadHalf + sw, keepHalf: roadHalf + sw + 1.5,
-      });
-    }
-    // 拼接路块（3D 编辑器「路块拼接」）并入同一走廊体系：程序化建筑/绿植/街具
-    // 避让拼接路（_rectHitsCorridor / inTraceCorridor），程序化路网与其求交得
-    // 路口（斑马线 / 灯杆，见 computeTraceJunctions 的闭合面路分支）。
-    // 每块 = 一个闭合矩形走廊（四角平口矩形，miter 端头外扩量忽略 —— 走廊本就
-    // 外扩人行道+余量）；index 加 1e6 偏移，避免与 features.roads 的下标撞号
-    // （customMap 按 roadIndex 给描边路开断口，拼接路是整块贴图不需要断口）
-    const tileDefs = (data && data.features && data.features.roadTiles) || [];
-    for (let ri = 0; ri < tileDefs.length; ri++) {
-      const t = tileDefs[ri];
-      const hl = (t.len || 3) / 2, hw = (t.w || 2) / 2;
-      const s = Math.sin(t.rot || 0), c = Math.cos(t.rot || 0);
-      // 本地 (lx, lz) → 世界：world = O + n·lx + f·lz（n=(cosθ,−sinθ) 侧向，f=(sinθ,cosθ) 前进向）
-      const pts = [
-        [t.x + hw * c + hl * s, t.z - hw * s + hl * c],
-        [t.x - hw * c + hl * s, t.z + hw * s + hl * c],
-        [t.x - hw * c - hl * s, t.z + hw * s - hl * c],
-        [t.x + hw * c - hl * s, t.z - hw * s - hl * c],
-      ];
-      // 沿前进向 ~6m 采样：keepHalf 圆盘半径 ≥ 半宽+3.5m，6m 间距覆盖无缝
-      const samples = [];
-      const n = Math.max(1, Math.ceil((hl * 2) / 6));
-      for (let k = 0; k <= n; k++) {
-        const lz = -hl + (2 * hl * k) / n;
-        samples.push({ x: t.x + lz * s, z: t.z + lz * c });
-      }
-      this.traceCorridors.push({
-        index: 1e6 + ri, tile: t, pts, closed: true,
-        segs: pts.map((p, i) => {
-          const q = pts[(i + 1) % 4];
-          return { ax: p[0], az: p[1], bx: q[0], bz: q[1] };
-        }),
-        samples,
-        roadHalf: hw, edgeHalf: hw + 2, keepHalf: hw + 3.5,
-      });
-    }
+    // 3D 描边道路走廊预计算：程序化建筑避让 + 玩家脚底高度（路面 0.18 / 人行道 0.24）。
+    // 与 3D 编辑器共用 billboard/placement.js 的同一份走廊算法，保证预览边界 = 实机边界
+    this.traceCorridors = buildTraceCorridors(data);
+    this.billboardPlacements = new Map(); // 屏位 ID → 纠偏后的落点（BillboardManager 读取）
     this.spawnPoint = null;     // 出生点：编辑器设置的 spawn 优先，未设置时用描边内容包围盒中心
 
     // 3D 描边建筑/资产排除区：程序化建筑/绿植避让手绘内容（含 2m 余量），
@@ -192,6 +131,29 @@ export class City {
     }
     this._buildGround();
     this._buildRoads();
+    // 广告大屏（独立牌 / 转角塔体）落点在建城阶段统一纠偏：避开路面、人行道与
+    // 手绘建筑，再把屏体占位登记为建筑排除区。此前只做「撞楼就推开」，而楼群之间
+    // 唯一的空地就是马路，塔体反而被推到路口中间（屏幕上那块挡住斑马线的黑塔）。
+    // 现在由程序化楼主动让位，屏体稳定落在路缘转角，编辑器的预览边界与实机一致。
+    const billboards = ((this.data && this.data.objects) || []).filter((o) => o && o.type === "billboard");
+    const bbCtx = billboards.length
+      ? collectConstraints({ data: this.data, city: this, includeBuildings: false })
+      : null;
+    for (const o of billboards) {
+      const spec = normalizeSpec(o.params);
+      if (spec.mount === "facade") continue; // 立面屏贴墙，由 BillboardManager 贴墙逻辑处理
+      let res = resolvePlacement(o, bbCtx);
+      if (!res.ok) {
+        // 极端情况（老地图里屏体被手绘建筑完全围死）：宁可让手绘楼与屏体重叠，
+        // 也绝不把塔体留在马路上 —— 去掉建筑约束再求一次合法路缘落点
+        res = resolvePlacement(o, { ...bbCtx, buildings: () => [] });
+      }
+      if (!res.ok) continue;
+      this.billboardPlacements.set(o.id, res.item.pos);
+      const b = footprintBox(res.item, res.item.pos, res.item.rot || 0);
+      const M = 1;
+      this.traceBuildingRects.push({ x0: b.x0 - M, x1: b.x1 + M, z0: b.z0 - M, z1: b.z1 + M });
+    }
     // 描边路 × 程序化横纵路的路口：斑马线必须赶在 _finalize 封批之前加进 markWhite
     this.traceJunctions = this._computeTraceJunctions();
     this._buildTraceCrosswalks();

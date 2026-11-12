@@ -172,6 +172,8 @@ kbd {
 .e3-headactions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .e3-headactions .bm-btn { padding: 8px 12px; }
 #e3-snap { padding: 7px 8px; border: 1px solid var(--line); border-radius: 3px; background: rgba(20,22,30,.9); color: var(--text); font: 500 11px/1 var(--sans); outline: none; }
+.e3-roadsnap { display: flex; align-items: center; gap: 4px; white-space: nowrap; font: 500 11px/1 var(--sans); color: var(--text); opacity: .85; cursor: pointer; }
+.e3-roadsnap input { accent-color: #2ce8c0; cursor: pointer; }
 /* 底图开关 + 设置：同组控件（共边框，视觉一体） */
 .e3-bm-group { display: flex; align-items: stretch; }
 .e3-bm-group #e3-basemap { border-top-right-radius: 0; border-bottom-right-radius: 0; white-space: nowrap; }
