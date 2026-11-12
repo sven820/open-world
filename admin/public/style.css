@@ -128,6 +128,18 @@ a { color: var(--accent); text-decoration: none; }
   background: rgba(90,169,255,.12); color: #8fc2ff; border: 1px solid rgba(90,169,255,.25);
 }
 .tag.img { background: rgba(61,220,151,.1); color: #78e5b6; border-color: rgba(61,220,151,.25); }
+.tag.corner { background: rgba(55,230,213,.12); color: var(--accent); border-color: rgba(55,230,213,.3); font-weight: 600; }
+
+/* 转角包柱屏分组：同一根立柱的两块屏面（::A / ::B）连成一块显示 */
+tr.sc-grp td {
+  padding: 7px 10px 6px; font-size: 12px; color: var(--accent);
+  background: rgba(55,230,213,.07); border-bottom: 0;
+}
+tr.sc-grp td .mono { color: var(--muted); font-size: 11px; }
+tr.sc-face td { background: rgba(55,230,213,.035); border-top: 0; }
+tr.sc-face td:first-child { box-shadow: inset 3px 0 0 rgba(55,230,213,.6); }
+tr.sc-face.sc-first td { border-top: 1px solid rgba(55,230,213,.22); }
+tr.sc-face.sc-last td { border-bottom: 1px solid rgba(38,51,74,.65); }
 .tag.vid { background: rgba(255,210,63,.1); color: var(--warn); border-color: rgba(255,210,63,.25); }
 .tag.live { background: rgba(255,107,129,.1); color: #ff9bab; border-color: rgba(255,107,129,.25); }
 

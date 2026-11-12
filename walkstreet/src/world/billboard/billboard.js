@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { buildBillboardGroup } from "./mounts.js";
+import { buildBillboardGroup, normalizeSpec } from "./mounts.js";
 import { Playlist } from "./playlist.js";
 
 /* ---------------- 大屏构建（运行时） ----------------
@@ -67,69 +67,83 @@ function createFade(mats, duration) {
 }
 
 /**
- * 构建一块可播放的大屏：承载形式几何 + 内容轮播 + 过渡。
+ * 构建一块（或多块）可播放的大屏：承载形式几何 + 内容轮播 + 过渡。
+ * 转角包柱屏拆成两面，返回两个独立 screen（id 带 ::A / ::B 后缀），
+ * 各自有独立材质与节目单，可分别绑定不同内容。
+ * @returns {Array} screen 数组（数量 = 面数）
  */
-export function buildPlacedBillboard(city, item, pool, schedule, phase) {
-  const screenMat = screenMaterial();
-  const built = buildBillboardGroup(item, screenMat);
-  const mats = built.screenMats;
+export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
+  const spec0 = normalizeSpec(item.params);
+  const isCorner = spec0.mount === "corner";
+  const nFaces = isCorner ? 2 : 1;
+  const mats = Array.from({ length: nFaces }, () => screenMaterial());
+  const built = buildBillboardGroup(item, mats);
+  const suffixes = isCorner ? ["::A", "::B"] : [""];
 
-  // 碰撞体按世界 AABB 注册（编辑器传 city=null 跳过）：四角包络，适配贴墙旋转
-  if (city && city.colliders && built.collider) {
-    const c = built.collider;
-    const rot = item.rot || 0, cs = Math.cos(rot), sn = Math.sin(rot);
-    let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
-    for (const [lx, lz] of [[c.x0, c.z0], [c.x1, c.z0], [c.x1, c.z1], [c.x0, c.z1]]) {
-      const wx = item.pos[0] + lx * cs + lz * sn;
-      const wz = item.pos[1] - lx * sn + lz * cs;
-      if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
-      if (wz < minZ) minZ = wz; if (wz > maxZ) maxZ = wz;
+  const out = [];
+  built.faceGroups.forEach((fg, i) => {
+    const faceMat = built.screenMats[i] || built.screenMats[0];
+    // 每个面独立成屏（坐标系与合并 group 一致：局部归零 + 外层按 item.pos/rot 定位）
+    const group = new THREE.Group();
+    group.add(fg); // 从合并 group 移出，独立成屏
+    group.position.set(item.pos[0], 0, item.pos[1]);
+    group.rotation.y = item.rot || 0;
+
+    // 碰撞体按世界 AABB 注册（编辑器传 city=null 跳过）；转角两面同范围，仅注册一次
+    if (city && city.colliders && built.collider && i === 0) {
+      const c = built.collider;
+      const rot = item.rot || 0, cs = Math.cos(rot), sn = Math.sin(rot);
+      let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+      for (const [lx, lz] of [[c.x0, c.z0], [c.x1, c.z0], [c.x1, c.z1], [c.x0, c.z1]]) {
+        const wx = item.pos[0] + lx * cs + lz * sn;
+        const wz = item.pos[1] - lx * sn + lz * cs;
+        if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
+        if (wz < minZ) minZ = wz; if (wz > maxZ) maxZ = wz;
+      }
+      city.colliders.add(minX, minZ, maxX, maxZ, c.top);
     }
-    city.colliders.add(minX, minZ, maxX, maxZ, c.top);
-  }
 
-  let fade = createFade(mats, (pool.cfg && pool.cfg.transition) || 0);
-  let applied = false;
-  const onSwap = (tex) => {
-    const prev = mats[0].map;
-    if (fade.begin(prev, tex)) return; // 过渡中：保持旧 map，由 shader 混合新图
-    for (const m of mats) {
-      m.map = tex;
-      if (!applied) m.needsUpdate = true; // 首次 null→texture 需重编译 program
-    }
-    applied = true;
-  };
-  const playlist = new Playlist(pool, schedule, onSwap, phase, fade);
+    let applied = false;
+    let fade = createFade([faceMat], (pool.cfg && pool.cfg.transition) || 0);
+    const onSwap = (tex) => {
+      const prev = faceMat.map;
+      if (fade.begin(prev, tex)) return; // 过渡中：保持旧 map，由 shader 混合新图
+      faceMat.map = tex;
+      if (!applied) faceMat.needsUpdate = true; // 首次 null→texture 需重编译 program
+      applied = true;
+    };
+    const playlist = new Playlist(pool, schedule, onSwap, phaseFor(item.id + suffixes[i], basePhase), fade);
 
-  const b = {
-    id: item.id || "",
-    name: item.name || "",
-    group: built.group,
-    x: item.pos[0], z: item.pos[1],
-    screenMats: mats, playlist, pool,
-    mount: built.spec.mount, w: built.spec.w, h: built.spec.h,
-    aspect: built.spec.w / built.spec.h,
-    // 编辑器里给这块屏单独配的内容；后台未绑定该屏位时回退到这里
-    localContent: (item.params && item.params.content) || null,
-    contentKey: "",
-  };
+    const b = {
+      id: item.id + suffixes[i],
+      name: item.name || "",
+      group, x: item.pos[0], z: item.pos[1],
+      screenMats: [faceMat], playlist, pool,
+      mount: built.spec.mount, w: built.spec.w, h: built.spec.h,
+      aspect: built.spec.w / built.spec.h,
+      // 编辑器里给这块屏单独配的内容；后台未绑定该屏位时回退到这里
+      localContent: (item.params && item.params.content) || null,
+      contentKey: "",
+    };
 
-  /** 后台发布内容热更新：只换内容池与轮播器，不重建几何 / 不动场景节点。
-   *  过渡中的 shader uniform 先归零，避免新轮播接手后残留半透明混合。 */
-  b.setContent = (newPool, newSchedule, key) => {
-    const sh = mats[0].userData.fadeShader;
-    if (sh) { sh.uniforms.uMix.value = 0; sh.uniforms.uNext.value = null; }
-    fade = createFade(mats, (newPool.cfg && newPool.cfg.transition) || 0);
-    // 沿用原轮播相位，但夹在新首条时长内，避免换配置后立刻又翻页
-    const phase = Math.min(playlist.t, Math.max(0, (newSchedule[0]?.duration || 9) - 0.5));
-    const next = new Playlist(newPool, newSchedule, onSwap, phase, fade);
-    next.applyInitial();
-    b.pool = newPool;
-    b.playlist = next;
-    b.contentKey = key;
-  };
+    /** 后台发布内容热更新：只换内容池与轮播器，不重建几何 / 不动场景节点。
+     *  过渡中的 shader uniform 先归零，避免新轮播接手后残留半透明混合。 */
+    b.setContent = (newPool, newSchedule, key) => {
+      const sh = faceMat.userData.fadeShader;
+      if (sh) { sh.uniforms.uMix.value = 0; sh.uniforms.uNext.value = null; }
+      fade = createFade([faceMat], (newPool.cfg && newPool.cfg.transition) || 0);
+      // 沿用原轮播相位，但夹在新首条时长内，避免换配置后立刻又翻页
+      const phase = Math.min(playlist.t, Math.max(0, (newSchedule[0]?.duration || 9) - 0.5));
+      const next = new Playlist(newPool, newSchedule, onSwap, phase, fade);
+      next.applyInitial();
+      b.pool = newPool;
+      b.playlist = next;
+      b.contentKey = key;
+    };
 
-  return b;
+    out.push(b);
+  });
+  return out;
 }
 
 /** 字符串 hash → 轮播相位（同一地图每次构建错开方式一致） */

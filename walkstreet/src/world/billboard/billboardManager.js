@@ -144,8 +144,12 @@ export class BillboardManager {
     items.forEach((item, i) => {
       const spec = normalizeSpec(item.params);
       const pool = this._poolFor(spec.w / spec.h, item.params && item.params.content);
-      const b = buildPlacedBillboard(city, item, pool, this._scheduleFor(pool), phaseFor(item.id, i * 1.7));
-      this._register(b, pool);
+      // 转角屏返回两块独立屏（转角A / 转角B），各自有独立材质与节目单
+      const screens = buildPlacedBillboard(city, item, pool, this._scheduleFor(pool), phaseFor(item.id, i * 1.7));
+      screens.forEach((b, fi) => {
+        this._register(b, pool);
+        if (spec.mount === "corner") b.name = b.name + (fi === 0 ? " · 转角A" : " · 转角B");
+      });
     });
     if (this.external) this.applyExternal(this.external);
     this._powerOn();

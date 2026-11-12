@@ -22,6 +22,9 @@ const FACADE_STANDOFF = 0.9; // 立面屏屏面离墙距离（避开建筑凸窗
 const clampN = (v, min, max, def) =>
   (typeof v === "number" && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def);
 
+// 屏面材质入参兼容「单材质 | 材质数组」：单面屏取 [0]，转角屏取 [0]/[1] 各自独立
+const asMats = (m) => (Array.isArray(m) ? m : [m]);
+
 function housingMat() {
   return new THREE.MeshStandardMaterial({ color: HOUSING, roughness: 0.85, metalness: 0.05 });
 }
@@ -59,7 +62,8 @@ export const MOUNTS = {
   standalone: {
     label: "独立广告牌",
     defaults: { w: 12, h: 7, y: 10 },
-    build(spec, screenMat) {
+    build(spec, mats) {
+      const screenMat = mats[0];
       const w = spec.w, h = spec.h, y = spec.y;
       const bottom = y - h / 2;
       const group = new THREE.Group();
@@ -83,7 +87,7 @@ export const MOUNTS = {
       // 碰撞：立柱 + 底座；屏底 <2.5m 时屏体整块挡人
       const collider = { x0: -1.6, z0: -1.1, x1: 1.6, z1: 1.1, top: y + h / 2 + 0.4 };
       if (bottom < 2.5) { collider.x0 = -w / 2 - 0.4; collider.x1 = w / 2 + 0.4; collider.z0 = -0.6; collider.z1 = 0.6; }
-      return { group, screenMats: [screenMat], collider };
+      return { faceGroups: [group], screenMats: [screenMat], collider };
     },
   },
 
@@ -91,7 +95,8 @@ export const MOUNTS = {
   facade: {
     label: "建筑立面屏",
     defaults: { w: 14, h: 8, y: 9 },
-    build(spec, screenMat) {
+    build(spec, mats) {
+      const screenMat = mats[0];
       const w = spec.w, h = spec.h, y = spec.y;
       const group = new THREE.Group();
       // 屏面悬挑在墙外 STANDOFF 处（躲开建筑凸窗/雨棚/空调外机等墙面凸出物，
@@ -125,34 +130,38 @@ export const MOUNTS = {
       front.castShadow = false;
       group.add(front);
       const collider = { x0: -w / 2 - 0.35, z0: -0.1, x1: w / 2 + 0.35, z1: screenZ + 0.1, top: y + h / 2 };
-      return { group, screenMats: [screenMat], collider };
+      return { faceGroups: [group], screenMats: [screenMat], collider };
     },
   },
 
-  /* —— 转角包柱屏：楼角 L 形双面（两面屏共享同一节目） —— */
+  /* —— 转角包柱屏：楼角 L 形双面（两面是各自独立的屏，可绑定不同节目单） —— */
   corner: {
     label: "转角包柱屏",
     defaults: { w: 14, h: 8, y: 13 },
-    build(spec, screenMat) {
+    build(spec, mats) {
       const w = spec.w, h = spec.h, y = spec.y;
       const towerW = w + 1.4;
       const totalH = y + h / 2 + 0.6; // 塔体从地面到屏顶 + 上边框
-      const group = new THREE.Group();
-      group.add(mesh(new THREE.BoxGeometry(towerW, totalH, towerW), housingMat(), 0, totalH / 2, 0));
-      const trim = mesh(new THREE.BoxGeometry(towerW + 0.3, 0.5, towerW + 0.3), trimMat(), 0, totalH + 0.25, 0);
-      trim.castShadow = false;
-      group.add(trim);
-      // 两面屏：朝局部 -Z 与 -X（楼角两侧），共享同一张内容纹理
-      const faceZ = mesh(new THREE.PlaneGeometry(w, h), screenMat, 0, y, -(towerW / 2 + SCREEN_OFFSET));
-      faceZ.rotation.y = Math.PI;
-      faceZ.castShadow = false;
-      const faceX = mesh(new THREE.PlaneGeometry(w, h), screenMat, -(towerW / 2 + SCREEN_OFFSET), y, 0);
-      faceX.rotation.y = -Math.PI / 2;
-      faceX.castShadow = false;
-      group.add(faceZ, faceX);
+      const off = towerW / 2 + SCREEN_OFFSET;
+      // 两面各自独立成组：每组自带一份塔体 + 檐口，便于运行时注册为两块独立屏
+      const mkFace = (faceMat, rotY, px, pz) => {
+        const g = new THREE.Group();
+        g.add(mesh(new THREE.BoxGeometry(towerW, totalH, towerW), housingMat(), 0, totalH / 2, 0));
+        const trim = mesh(new THREE.BoxGeometry(towerW + 0.3, 0.5, towerW + 0.3), trimMat(), 0, totalH + 0.25, 0);
+        trim.castShadow = false;
+        g.add(trim);
+        const face = mesh(new THREE.PlaneGeometry(w, h), faceMat, px, y, pz);
+        face.rotation.y = rotY;
+        face.castShadow = false;
+        g.add(face);
+        return g;
+      };
+      // 朝局部 -Z（转角 A 面）与 -X（转角 B 面），各用独立材质
+      const gA = mkFace(mats[0], Math.PI, 0, -off);
+      const gB = mkFace(mats[1] || mats[0], -Math.PI / 2, -off, 0);
       const half = towerW / 2;
       const collider = { x0: -half, z0: -half, x1: half, z1: half, top: totalH };
-      return { group, screenMats: [screenMat], collider };
+      return { faceGroups: [gA, gB], screenMats: [mats[0], mats[1] || mats[0]], collider };
     },
   },
 };
@@ -174,14 +183,24 @@ export function normalizeSpec(params = {}) {
 /**
  * 构建一块大屏（编辑器预览与运行时共用同一套几何）。
  * @param {{pos:[number,number], rot:number, params:object}} item 地图 objects 记录
- * @param {THREE.Material} screenMat 屏面材质（内容由播放器运行时填 map）
- * @returns {{ group, screenMats, collider, spec }}
+ * @param {THREE.Material|THREE.Material[]} screenMat 屏面材质（内容由播放器运行时填 map）；
+ *   单面屏取 [0]；转角屏取 [0]/[1]，两面各自独立。
+ * @returns {{ group, faceGroups:THREE.Group[], screenMats:THREE.Material[], collider, spec }}
+ *   group —— 合并后的整块（编辑器预览 / 放置幽灵用，已按 item.pos/rot 定位）；
+ *   faceGroups —— 各面独立子组（局部坐标、无外层位移），运行时据此拆成多块独立屏。
  */
 export function buildBillboardGroup(item, screenMat) {
   const spec = normalizeSpec(item.params);
-  const built = getMount(spec.mount).build(spec, screenMat);
-  built.group.position.set(item.pos[0], 0, item.pos[1]);
-  built.group.rotation.y = item.rot || 0;
+  const built = getMount(spec.mount).build(spec, asMats(screenMat));
+  const group = new THREE.Group();
+  for (const fg of built.faceGroups) {
+    fg.position.set(0, 0, 0);
+    fg.rotation.y = 0;
+    group.add(fg);
+  }
+  group.position.set(item.pos[0], 0, item.pos[1]);
+  group.rotation.y = item.rot || 0;
+  built.group = group;
   built.spec = spec;
   return built;
 }

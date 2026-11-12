@@ -505,6 +505,53 @@ function viewPlaylists() {
 }
 
 /* ---------------- 屏位绑定 ---------------- */
+/* 转角包柱屏的两个面（id 带 ::A / ::B 后缀）来自同一根立柱（同一个 map.object），
+   渲染时按基础 ID 归组：高亮分组头 + 左侧色条把两行连成一块，一眼看出「这是一块包柱屏」。 */
+const FACE_RE = /^(.*)::([A-Z])$/;
+
+function screenRowsHtml(list) {
+  const groups = new Map();
+  for (const s of list) {
+    const m = s.mount === "corner" ? FACE_RE.exec(s.id) : null;
+    if (m) {
+      if (!groups.has(m[1])) groups.set(m[1], []);
+      groups.get(m[1]).push(s.id);
+    }
+  }
+  const emitted = new Set();
+  const rows = [];
+  for (const s of list) {
+    const m = s.mount === "corner" ? FACE_RE.exec(s.id) : null;
+    let head = "", cls = "", badge = "";
+    if (m) {
+      const g = groups.get(m[1]);
+      if (!emitted.has(m[1])) {
+        emitted.add(m[1]);
+        head = `<tr class="sc-grp"><td colspan="6">◧ 同一块转角包柱屏 · 以下 ${g.length} 行是同一根立柱的两块屏面（基础 ID <span class="mono">${esc(m[1])}</span>），可分别绑定不同节目单</td></tr>`;
+      }
+      cls = ` class="sc-face${g[0] === s.id ? " sc-first" : ""}${g[g.length - 1] === s.id ? " sc-last" : ""}"`;
+      badge = `<span class="tag corner">面 ${m[2]}</span>`;
+    }
+    rows.push(`${head}<tr${cls} data-sc="${esc(s.id)}">
+          <td><input class="inp mini" data-f="name" value="${esc(s.name)}" />
+            <div class="mono muted small" style="margin-top:3px">${esc(s.id)}
+              <button class="btn sm" data-act="copy" style="padding:1px 6px;font-size:10px;margin-left:4px">复制 ID</button>
+              ${badge}
+            </div></td>
+          <td>${esc(MOUNTS[s.mount] || s.mount)}<div class="mono muted small">${s.w} × ${s.h} m</div></td>
+          <td>${esc(s.mapName || "-")}<div class="mono muted small">${s.x !== undefined ? `(${s.x}, ${s.z})` : "—"}</div></td>
+          <td>${s.reported ? '<span class="tag img">游戏端上报</span>' : '<span class="tag">手动占位</span>'}<div class="muted small">${fmt(s.lastSeen)}</div></td>
+          <td><select class="inp mini" data-f="playlistId"><option value="">未绑定</option>${S.playlists.map((p) => `<option value="${esc(p.id)}" ${p.id === s.playlistId ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></td>
+          <td><div class="row" style="gap:4px">
+            <button class="btn sm" data-act="preview">预览</button>
+            <button class="btn sm" data-act="edit">编辑单</button>
+            <button class="btn sm danger" data-act="del">删除</button>
+          </div></td>
+        </tr>`);
+  }
+  return rows.join("");
+}
+
 function viewScreens() {
   const list = visibleScreens();
   const active = S.activeMap;
@@ -536,21 +583,7 @@ function viewScreens() {
       <table class="tbl" style="margin-top:12px"><thead><tr>
         <th style="width:25%">屏位名称 / ID</th><th>承载形式 / 尺寸</th><th>地图 / 坐标</th><th>来源 / 心跳</th><th style="width:23%">绑定节目单</th><th>操作</th>
       </tr></thead><tbody>
-        ${list.map((s) => `<tr data-sc="${esc(s.id)}">
-          <td><input class="inp mini" data-f="name" value="${esc(s.name)}" />
-            <div class="mono muted small" style="margin-top:3px">${esc(s.id)}
-              <button class="btn sm" data-act="copy" style="padding:1px 6px;font-size:10px;margin-left:4px">复制 ID</button>
-            </div></td>
-          <td>${esc(MOUNTS[s.mount] || s.mount)}<div class="mono muted small">${s.w} × ${s.h} m</div></td>
-          <td>${esc(s.mapName || "-")}<div class="mono muted small">${s.x !== undefined ? `(${s.x}, ${s.z})` : "—"}</div></td>
-          <td>${s.reported ? '<span class="tag img">游戏端上报</span>' : '<span class="tag">手动占位</span>'}<div class="muted small">${fmt(s.lastSeen)}</div></td>
-          <td><select class="inp mini" data-f="playlistId"><option value="">未绑定</option>${S.playlists.map((p) => `<option value="${esc(p.id)}" ${p.id === s.playlistId ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></td>
-          <td><div class="row" style="gap:4px">
-            <button class="btn sm" data-act="preview">预览</button>
-            <button class="btn sm" data-act="edit">编辑单</button>
-            <button class="btn sm danger" data-act="del">删除</button>
-          </div></td>
-        </tr>`).join("") || '<tr><td colspan="6" class="empty">当前筛选下没有屏位。打开游戏端让它自动上报，或切到「全部屏位」看看。</td></tr>'}
+        ${screenRowsHtml(list) || '<tr><td colspan="6" class="empty">当前筛选下没有屏位。打开游戏端让它自动上报，或切到「全部屏位」看看。</td></tr>'}
       </tbody></table>
     </section>
     <section class="card">
