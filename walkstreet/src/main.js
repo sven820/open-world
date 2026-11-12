@@ -93,7 +93,7 @@ async function buildWorld(mapData, mapId) {
   if (city.custom && city.custom.group) city.registerStreamed(city.custom.group);
   setProgress(0.72, "正在布置地图中的广告大屏…");
   // 广告大屏：只构建地图里手动放置的 billboard 记录，默认街区不自动生成
-  const billboards = new BillboardManager(engine.scene, city);
+  const billboards = new BillboardManager(engine.scene, city, engine.renderer);
   for (const s of billboards.screens) city.registerStreamed(s.group);
   setProgress(0.78, "正在唤醒行人与车流…");
   await new Promise((r) => setTimeout(r, 30));
