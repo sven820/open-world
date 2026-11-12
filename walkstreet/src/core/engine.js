@@ -1,5 +1,7 @@
 import * as THREE from "three/webgpu";
-import { pass, bloom, PostProcessing } from "three/webgpu";
+import { RenderPipeline } from "three/webgpu";
+import { pass } from "three/tsl";
+import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { getRenderSettings, onRenderSettingsChange } from "../config/renderSettings.js";
 
 function pixelRatioFor(s) {
@@ -31,7 +33,8 @@ export class Engine {
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.05;
     renderer.shadowMap.enabled = !!this.settings.shadows;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // r187 起 WebGPU 后端移除 PCFSoftShadowMap，只支持 PCF/Basic/VSM
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     // 手动重置统计：后处理链每个 pass 都会调用 renderer.render，
     // 自动重置会让 info 只剩最后一个全屏 pass 的 1 个 draw call（看不到真实负载）
     renderer.info.autoReset = false;
@@ -53,7 +56,7 @@ export class Engine {
 
     // 节点式后处理（WebGPU 原生管线，替代 WebGL 版 EffectComposer+UnrealBloomPass）：
     // 场景先渲进离屏 RT（线性空间），bloom 叠加后统一做 tone mapping + sRGB 输出
-    const postProcessing = new PostProcessing(renderer);
+    const postProcessing = new RenderPipeline(renderer);
     const scenePass = pass(scene, camera);
     this._sceneColor = scenePass.getTextureNode("output");
     this._bloomNode = bloom(this._sceneColor, 0.62, 0.55, 0.86);

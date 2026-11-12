@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import { texture as tslTexture, uniform as tslUniform, materialColor, mix as tslMix } from "three/webgpu";
+import { texture as tslTexture, uniform as tslUniform, materialColor, mix as tslMix } from "three/tsl";
 import { buildBillboardGroup, normalizeSpec } from "./mounts.js";
 import { Playlist } from "./playlist.js";
 

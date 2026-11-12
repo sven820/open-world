@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import { uniform, positionLocal, mix, vec3 } from "three/webgpu";
+import { uniform, positionLocal, mix, vec3 } from "three/tsl";
 import { getRenderSettings, onRenderSettingsChange } from "../config/renderSettings.js";
 
 /* 天空：TSL 节点材质（WebGPU/WebGL 双后端可编译，替代原 GLSL ShaderMaterial）。
