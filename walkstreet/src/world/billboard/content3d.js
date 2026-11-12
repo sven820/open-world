@@ -28,6 +28,16 @@ import { parseGLB } from "../../data/assetStore.js";
 const NEAR = 0.12, FAR = 400;      // 实验台 frame() 同款
 const RTW = 768, RTH = 512;        // 实验台 RT 尺寸同款
 const EYE_H = 1.7;                 // 观看视点离地高度（玩家视高）
+
+/* —— 诊断模式（URL 参数 ?bb3ddebug=N，配合 billboard.js 的测试图案）——
+ * 1 = 屏面显示 FACE A/B 测试图案（billboard.js，验证两面屏几何/UV/分配）
+ * 2 = RT 改用普通透视相机渲染（绕开离轴投影：若屏面内容恢复正常连贯，
+ *     即离轴投影矩阵在 WebGPU 下有实锤问题）
+ * 3 = 虚拟眼睛固定在默认位置（忽略玩家 focus：若屏面恢复 dev 的连贯画面，
+ *     即 focus/eye 位置导致分裂） */
+export const DEBUG_3D =
+  (typeof location !== "undefined" && /bb3ddebug=(\d)/.exec(location.search || ""))
+    ? Number(RegExp.$1) : 0;
 const AD_BG = new THREE.Color(0x05101f); // 实验台 adBg 同款：RT 渲染期间的场景背景
 
 /* 实验台 §5 离轴投影（_template.html 417-429 行逐字同款，仅改 three 引用名） */
@@ -174,6 +184,9 @@ export function makeModel3D(it, W, H, ctx) {
   const projCam = new THREE.Camera();          // 实验台同款：裸 Camera + 手写投影矩阵
   projCam.layers.set(layer);
   projCam.matrixAutoUpdate = false;
+  // 诊断模式 2：普通透视相机（绕开离轴投影）
+  const dbgCam = DEBUG_3D === 2 ? new THREE.PerspectiveCamera(55, RTW / RTH, NEAR, FAR) : null;
+  let _dbgTick = 0;
   const rts = faces.map((f) => ({
     f,
     // RenderTarget 基类：WebGPU 与 WebGL 回退后端通用（WebGLRenderTarget 是 WebGL 专属包装）
@@ -304,7 +317,8 @@ export function makeModel3D(it, W, H, ctx) {
       if (demoKnot) demoKnot.rotation.y = time * 0.55;
       if (dead || failed || !active) return;
       // 虚拟眼睛 = 观看者真实位置（实验台 state.track ? camera.position : HERO 的"跟随"档）
-      if (focus && Number.isFinite(focus.x)) _eye.set(focus.x, EYE_H, focus.z);
+      if (DEBUG_3D === 3) _eye.copy(VC).addScaledVector(OUT, 20).setY(VC.y * 0.4);
+      else if (focus && Number.isFinite(focus.x)) _eye.set(focus.x, EYE_H, focus.z);
       else _eye.copy(VC).addScaledVector(OUT, 20).setY(VC.y * 0.4);
       // 992-1000 行同款：临时替换背景/雾 → 双路离轴渲染 → 还原
       const savedBg = scene.background, savedFog = scene.fog;
@@ -316,10 +330,27 @@ export function makeModel3D(it, W, H, ctx) {
       // renderer.render 会按 camera.coordinateSystem 判断是否需要重建逆矩阵
       const isWebGPU = renderer.coordinateSystem === THREE.WebGPUCoordinateSystem;
       projCam.coordinateSystem = renderer.coordinateSystem;
+      if (DEBUG_3D && (_dbgTick++ % 90 === 0)) {
+        console.log("[bb3ddebug] mode=" + DEBUG_3D,
+          "eye=", _eye.x.toFixed(1) + "," + _eye.y.toFixed(1) + "," + _eye.z.toFixed(1),
+          "faceA.pa=", faces[0].pa.x.toFixed(1) + "," + faces[0].pa.y.toFixed(1) + "," + faces[0].pa.z.toFixed(1),
+          "backend=", renderer.backend ? renderer.backend.constructor.name : "?",
+          "cs=", renderer.coordinateSystem);
+      }
       for (const r of rts) {
-        const M = offAxis(r.f.pa, r.f.pb, r.f.pc, _eye, NEAR, FAR, isWebGPU);
-        projCam.projectionMatrix.copy(M);
-        projCam.projectionMatrixInverse.copy(M).invert();
+        if (dbgCam) {
+          // 诊断模式 2：普通透视视角（正对内容中心），两块 RT 内容相同
+          dbgCam.position.copy(VC).addScaledVector(OUT, 24);
+          dbgCam.lookAt(contentRoot.position);
+          dbgCam.coordinateSystem = renderer.coordinateSystem;
+          dbgCam.updateProjectionMatrix();
+          projCam.projectionMatrix.copy(dbgCam.projectionMatrix);
+          projCam.projectionMatrixInverse.copy(dbgCam.projectionMatrix).invert();
+        } else {
+          const M = offAxis(r.f.pa, r.f.pb, r.f.pc, _eye, NEAR, FAR, isWebGPU);
+          projCam.projectionMatrix.copy(M);
+          projCam.projectionMatrixInverse.copy(M).invert();
+        }
         renderer.setRenderTarget(r.rt);
         renderer.render(scene, projCam);
       }

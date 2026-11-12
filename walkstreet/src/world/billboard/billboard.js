@@ -2,6 +2,32 @@ import * as THREE from "three/webgpu";
 import { texture as tslTexture, uniform as tslUniform, materialColor, mix as tslMix } from "three/tsl";
 import { buildBillboardGroup, normalizeSpec } from "./mounts.js";
 import { Playlist } from "./playlist.js";
+import { DEBUG_3D } from "./content3d.js";
+
+/* 诊断模式 1：两面屏直接上测试图案（不经过 RT 内容），验证两面屏几何/UV/
+ * 纹理分配是否正常。图案含网格（看变形/偏移）、"▲ TOP"（看上下颠倒）、
+ * FACE A/B 大字（看两面分配）。 */
+function makeDebugFaceTex(i) {
+  const c = document.createElement("canvas");
+  c.width = 768; c.height = 512;
+  const x = c.getContext("2d");
+  x.fillStyle = i === 0 ? "#7a1f1f" : "#1f5a2a";
+  x.fillRect(0, 0, 768, 512);
+  x.strokeStyle = "rgba(255,255,255,0.35)";
+  x.lineWidth = 2;
+  for (let gx = 0; gx <= 768; gx += 64) { x.beginPath(); x.moveTo(gx, 0); x.lineTo(gx, 512); x.stroke(); }
+  for (let gy = 0; gy <= 512; gy += 64) { x.beginPath(); x.moveTo(0, gy); x.lineTo(768, gy); x.stroke(); }
+  x.fillStyle = "#ffffff";
+  x.font = "bold 90px sans-serif"; x.textAlign = "center";
+  x.fillText("▲ TOP", 384, 110);
+  x.font = "bold 150px sans-serif";
+  x.fillText(i === 0 ? "FACE A" : "FACE B", 384, 300);
+  x.font = "bold 60px sans-serif";
+  x.fillText(i === 0 ? "红=面A" : "绿=面B", 384, 420);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
 
 /* ---------------- 大屏构建（运行时） ----------------
  * 只处理编辑器手动放置的 objects 记录 { type:"billboard", pos, rot, params:{mount,w,h,y} }
@@ -144,6 +170,11 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
     };
     const onSwap = (tex) => {
       const prev = faceMats[0].map;
+      if (DEBUG_3D === 1) { // 诊断：测试图案替换 RT 内容（分配路径不变）
+        const dbg = [makeDebugFaceTex(0), makeDebugFaceTex(1)];
+        applyTex(Array.isArray(tex) ? dbg : dbg[0]);
+        return;
+      }
       if (fade.begin(prev, tex)) return; // 过渡中：保持旧 map，由 shader 混合新图
       applyTex(tex);
     };
