@@ -5,7 +5,9 @@ import { makeCanvas } from "../textures.js";
  * 每种承载形式（mount）描述屏体如何"立"在世界里：
  *   standalone —— 独立广告牌：底座 + 立柱 + 悬臂屏，屏底 ≥2.5m 可通行
  *   facade     —— 建筑立面屏：无立柱，贴附建筑外墙（pos 放在墙面上）
- *   corner     —— 转角包柱屏：楼角 L 形双面（横纵路口转角）
+ *   corner     —— 转角包柱屏：楼角 L 形双面（横纵路口转角），两面是独立屏
+ *   corner3d   —— 3D转角包柱屏：楼角 L 形一体屏，两面共享同一条转角棱线（无屏缝），
+ *                 配合 content3d.js 的离轴投影可播出跨转角的 3D 裸眼画面
  * 后期新增形式：在 MOUNTS 里加一项即可，编辑器下拉与运行时自动识别。
  *
  * build(spec, screenMat) 统一返回：
@@ -164,7 +166,83 @@ export const MOUNTS = {
       return { faceGroups: [gA, gB], screenMats: [mats[0], mats[1] || mats[0]], collider };
     },
   },
+
+  /* —— 3D转角包柱屏：楼角 L 形一体屏（不分块）。
+   * 两块屏面四边形在转角棱线 (-D,-D) 处共享同一顶点 —— 几何上无缝、转角处没有
+   * 柱体也没有屏缝；整块屏只有一份节目单 / 一个后台屏位（不拆 ::A/::B）。
+   * 内容管线：普通 2D 内容（图/视频/直播/文字）每面各自整幅铺贴；
+   * model3d 内容经 content3d.js 离轴投影逐帧渲染到两面 RenderTarget，
+   * 以真实观看视点为虚拟眼睛 → 跨转角视差连续，即 3D 裸眼效果。 —— */
+  corner3d: {
+    label: "3D转角包柱屏",
+    defaults: { w: 14, h: 8, y: 13 },
+    build(spec, mats) {
+      const w = spec.w, h = spec.h, y = spec.y;
+      const towerW = w + 1.4;
+      const totalH = y + h / 2 + 0.6;
+      const group = new THREE.Group();
+      group.add(mesh(new THREE.BoxGeometry(towerW, totalH, towerW), housingMat(), 0, totalH / 2, 0));
+      const trim = mesh(new THREE.BoxGeometry(towerW + 0.3, 0.5, towerW + 0.3), trimMat(), 0, totalH + 0.25, 0);
+      trim.castShadow = false;
+      group.add(trim);
+      // 一体屏面：corner3dFaceDefs 给出两面四边形的局部四角（转角棱线处顶点重合）
+      const matA = mats[0], matB = mats[1] || mats[0];
+      for (const f of corner3dFaceDefs(spec)) {
+        const face = new THREE.Mesh(quadGeom(f.pa, f.pb, f.pc, f.pd), f.i === 0 ? matA : matB);
+        face.castShadow = false;
+        group.add(face);
+      }
+      const half = towerW / 2;
+      const collider = { x0: -half, z0: -half, x1: half, z1: half, top: totalH };
+      return { faceGroups: [group], screenMats: [matA, matB], collider };
+    },
+  },
 };
+
+/* 手写四边形 BufferGeometry（与 rea/billboard-content-lab 同款）：
+ * 顶点序 pa(左下) → pb(右下) → pd(右上)、pa → pd → pc(左上)，
+ * UV 每面独立 0..1（左下为原点），法线朝观察者。 */
+export function quadGeom(pa, pb, pc, pd) {
+  const pos = [
+    pa.x, pa.y, pa.z, pb.x, pb.y, pb.z, pd.x, pd.y, pd.z,
+    pa.x, pa.y, pa.z, pd.x, pd.y, pd.z, pc.x, pc.y, pc.z,
+  ];
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1], 2));
+  g.computeVertexNormals();
+  return g;
+}
+
+/** corner3d 两面屏面的局部四角（group 原点 = 地面落点，未含 pos/rot）。
+ *  角点命名与实验台 quadGeom/offAxis 约定一致：
+ *    pa = 左下(UV 0,0)、pb = 右下(UV 1,0)、pc = 左下正上方(UV 0,1)、pd = 右下正上方(UV 1,1)
+ *  —— offAxis(pa,pb,pc) 的 up 向量取 pc-pa，必须保证 pc 在 pa 正上方，否则投影歪斜。
+ *  A 面朝局部 -Z（纹理右缘 = 转角棱线）；B 面朝局部 -X（纹理左缘 = 转角棱线）；
+ *  两面共享棱线 (-D, y, -D)，D = 塔体半宽 + 屏面外凸。 */
+export function corner3dFaceDefs(spec) {
+  const w = spec.w, h = spec.h, y = spec.y;
+  const D = (w + 1.4) / 2 + SCREEN_OFFSET;
+  const y0 = y - h / 2, y1 = y + h / 2;
+  const x1 = -D + w, z1 = -D + w;
+  return [
+    { i: 0, pa: new THREE.Vector3(x1, y0, -D), pb: new THREE.Vector3(-D, y0, -D), pc: new THREE.Vector3(x1, y1, -D), pd: new THREE.Vector3(-D, y1, -D) },
+    { i: 1, pa: new THREE.Vector3(-D, y0, -D), pb: new THREE.Vector3(-D, y0, z1), pc: new THREE.Vector3(-D, y1, -D), pd: new THREE.Vector3(-D, y1, z1) },
+  ];
+}
+
+/** corner3d 两面屏面的世界坐标四角（含 pos/rot），供 content3d.js 离轴投影使用。
+ *  旋转约定与 billboard.js 碰撞体一致：wx = x + lx*cs + lz*sn, wz = z - lx*sn + lz*cs */
+export function corner3dWorldFaces(spec, pos, rot = 0) {
+  const cs = Math.cos(rot), sn = Math.sin(rot);
+  return corner3dFaceDefs(spec).map((f) => {
+    const w2 = (p) => {
+      const lx = p.x, lz = p.z;
+      return new THREE.Vector3(pos[0] + lx * cs + lz * sn, p.y, pos[1] - lx * sn + lz * cs);
+    };
+    return { pa: w2(f.pa), pb: w2(f.pb), pc: w2(f.pc), pd: w2(f.pd) };
+  });
+}
 
 export function getMount(id) { return MOUNTS[id] || MOUNTS.standalone; }
 

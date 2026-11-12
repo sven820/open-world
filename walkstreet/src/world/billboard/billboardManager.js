@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { createContentPool, disposeContentPool } from "./contentSource.js";
 import { buildPlacedBillboard, phaseFor } from "./billboard.js";
-import { normalizeSpec } from "./mounts.js";
+import { normalizeSpec, corner3dWorldFaces } from "./mounts.js";
 import { defaultContent, normalizeContent, contentKey, scheduleFrom } from "./contentConfig.js";
 
 /* ---------------- 广告大屏管理器 ----------------
@@ -23,9 +23,10 @@ const MAX_VIDEO_DECODE = 2;  // 全局同时解码的视频路数上限
 const ASPECT_STEP = 0.05;
 
 export class BillboardManager {
-  constructor(scene, city) {
+  constructor(scene, city, renderer = null) {
     this.scene = scene;
     this.city = city;
+    this.renderer = renderer;   // 3D 裸眼内容源离轴渲染需要
     this._pools = new Map();
     this._refs = new WeakMap();   // 内容池引用计数：热更新释放不再使用的视频 / 纹理
     this.external = null;         // 最近一次后台发布快照
@@ -35,11 +36,17 @@ export class BillboardManager {
     this._build(city);
   }
 
-  _poolFor(aspect, rawContent) {
+  /** 3D 裸眼上下文：renderer + 主场景（内容层放这里，layer 隔离）+ 两面屏世界坐标四角 */
+  _ctxFor(spec, pos, rot = 0) {
+    return { renderer: this.renderer, scene: this.scene, faces: corner3dWorldFaces(spec, pos, rot) };
+  }
+
+  _poolFor(aspect, rawContent, ctx = null, scope = "") {
     const key = Math.round(aspect / ASPECT_STEP) * ASPECT_STEP;
     const cfg = normalizeContent(rawContent) || defaultContent();
-    const fullKey = contentKey(cfg, key);
-    if (!this._pools.has(fullKey)) this._pools.set(fullKey, createContentPool(key, cfg));
+    // 含 3D 裸眼内容的池与具体屏绑定（离轴投影依赖该屏的几何/视点），不跨屏共享
+    const fullKey = (scope ? scope + "|" : "") + contentKey(cfg, key);
+    if (!this._pools.has(fullKey)) this._pools.set(fullKey, createContentPool(key, cfg, ctx));
     return this._pools.get(fullKey);
   }
 
@@ -62,7 +69,7 @@ export class BillboardManager {
   _register(b, pool) {
     this._acquire(pool);
     b.contentKey = this._keyFor(b.aspect, pool.cfg);
-    const label = { standalone: "独立广告牌", facade: "建筑立面屏", corner: "转角包柱屏" }[b.mount] || b.mount;
+    const label = { standalone: "独立广告牌", facade: "建筑立面屏", corner: "转角包柱屏", corner3d: "3D转角包柱屏" }[b.mount] || b.mount;
     if (!b.name) b.name = `${this.screens.length + 1} 号屏 · ${label}（${b.w}×${b.h}）`;
     this.group.add(b.group);
     this.screens.push(b);
@@ -92,7 +99,7 @@ export class BillboardManager {
     if (spec.mount === "facade") return item;
     const grid = this.city.colliders;
     if (!grid || !grid.overlaps) return item;
-    const corner = spec.mount === "corner";
+    const corner = spec.mount === "corner" || spec.mount === "corner3d";
     const halfW = corner ? (spec.w + 1.4) / 2 + 0.1 : spec.w / 2 + 0.5;
     const halfD = corner ? halfW : 0.8;
     // 屏底以下的矮碰撞体（树 5m / 路灯 6m）不会插到屏面；塔体落地按 7m 过滤
@@ -143,8 +150,13 @@ export class BillboardManager {
     });
     items.forEach((item, i) => {
       const spec = normalizeSpec(item.params);
-      const pool = this._poolFor(spec.w / spec.h, item.params && item.params.content);
-      // 转角屏返回两块独立屏（转角A / 转角B），各自有独立材质与节目单
+      // 3D 转角包柱屏：注入离轴渲染上下文并按屏隔离内容池
+      const is3d = spec.mount === "corner3d";
+      const ctx = is3d ? this._ctxFor(spec, item.pos, item.rot || 0) : null;
+      const scope = is3d ? item.id : "";
+      const pool = this._poolFor(spec.w / spec.h, item.params && item.params.content, ctx, scope);
+      // 转角屏返回两块独立屏（转角A / 转角B），各自有独立材质与节目单；
+      // 3D转角包柱屏是一体屏，只返回一块
       const screens = buildPlacedBillboard(city, item, pool, this._scheduleFor(pool), phaseFor(item.id, i * 1.7));
       screens.forEach((b, fi) => {
         this._register(b, pool);
@@ -168,7 +180,10 @@ export class BillboardManager {
       const key = this._keyFor(s.aspect, cfg);
       if (has) applied++;
       if (s.contentKey === key) continue;   // 内容没变：不重建纹理 / 不打断视频
-      const pool = this._poolFor(s.aspect, cfg);
+      const is3d = s.mount === "corner3d";
+      const ctx = is3d ? this._ctxFor({ w: s.w, h: s.h, y: s.y }, [s.x, s.z], s.rot) : null;
+      const scope = is3d ? s.id : "";
+      const pool = this._poolFor(s.aspect, cfg, ctx, scope);
       if (pool === s.pool) continue;
       const old = s.pool;
       this._acquire(pool);
@@ -194,9 +209,10 @@ export class BillboardManager {
       s._near = near;
       if (!near || !s.pool) continue;
       s.playlist.update(dt, true);
+      s.playlist.focus = focus; // 3D 裸眼内容源据此取虚拟眼睛（翻页刷新也用）
       s.pool._wanted = true;
       if (d2 < s.pool._dist * s.pool._dist) s.pool._dist = Math.sqrt(d2);
-      for (const item of s.pool) if (item.kind === "animated") item.update(dt, time);
+      for (const item of s.pool) if (item.kind === "animated") item.update(dt, time, focus);
     }
 
     // 视频解码并发上限：按最近使用屏的距离排序，只放行前 MAX_VIDEO_DECODE 路

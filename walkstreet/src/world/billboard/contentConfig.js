@@ -9,6 +9,7 @@
  *   image   图片 URL（可选显示模式）
  *   video   视频 URL（mp4/webm，可选显示模式）
  *   stream  直播流 URL（HLS/m3u8 经 hls.js，低延迟模式）
+ *   model3d GLB 3D 模型（离轴投影 3D 裸眼；仅 3D转角包柱屏生效，URL 空 = 内置演示）
  *
  * fit 显示模式（仅图片/视频/直播有效；文字类永远自动排版）：
  *   auto    完整显示且按屏比自适应（等价 contain，推荐）
@@ -39,6 +40,7 @@ export const CONTENT_TYPES = {
   image: { label: "图片", media: true, hint: "http(s) 图片地址；跨域图片需服务端允许 CORS" },
   video: { label: "视频", media: true, hint: "mp4 / webm 直链；远离屏幕时自动暂停解码" },
   stream: { label: "直播流", media: true, hint: "HLS(m3u8) 经 hls.js 低延迟播放；失败自动切备用海报" },
+  model3d: { label: "3D裸眼模型", media: true, hint: "GLB 模型经离轴投影呈现 3D 裸眼；仅 3D转角包柱屏生效，其他屏显示占位提示；URL 留空 = 内置 3D 演示" },
 };
 
 export const DEFAULT_TEXT = "潮汇坊 · 中央大道商圈 今日营业至 22:00   ◆   新品上市 全场 8 折起   ◆   周末街头市集 · 梧桐街广场   ◆   ";
@@ -78,6 +80,7 @@ export function normalizeContent(raw) {
       if (it.type === "text") out.text = String(it.text || DEFAULT_TEXT).slice(0, 400);
       if (it.type === "clock") out.note = String(it.note || "晴 24°C").slice(0, 40);
       if (it.type === "ad") out.seed = clamp(it.seed, 0, 99999, 1);
+      if (it.type === "model3d") out.depth = clamp(Math.round((+it.depth || 0) * 10) / 10, 0, 10, 2.5);
       if (CONTENT_TYPES[it.type].media) {
         out.url = String(it.url || "").slice(0, 4000).trim();
         out.fallback = String(it.fallback || "").slice(0, 4000).trim();

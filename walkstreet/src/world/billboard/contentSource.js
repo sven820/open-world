@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { makeCanvas, canvasTexture } from "../textures.js";
 import { SHOP_NAMES, SHOP_SUBS } from "../../data/cityData.js";
 import { defaultContent, normalizeContent, DEFAULT_TEXT } from "./contentConfig.js";
+import { makeModel3D } from "./content3d.js";
 
 /* ---------------- 广告大屏内容源 ----------------
  * 文字类（内置广告 / 滚动字幕 / 时钟）按屏比重新排版，字号按可用宽度收缩，不会裁切。
@@ -406,8 +407,10 @@ function makeVideo(it, W, H, aspect) {
 
 /**
  * 按配置生成内容池。返回数组，附带 setActive / setAudio / hasVideo 控制位。
+ * @param {object|null} ctx 3D 裸眼上下文（仅 3D转角包柱屏注入）：
+ *   { renderer, faces:[{pa,pb,pc,pd 世界坐标}] } —— 由 BillboardManager 提供
  */
-export function createContentPool(aspect = 1.75, rawContent = null) {
+export function createContentPool(aspect = 1.75, rawContent = null, ctx = null) {
   const cfg = normalizeContent(rawContent) || defaultContent();
   const H = BASE_H;
   const W = Math.max(384, Math.round(H * aspect));
@@ -418,6 +421,7 @@ export function createContentPool(aspect = 1.75, rawContent = null) {
       case "image": return makeImage(it, W, H);
       case "video":
       case "stream": return makeVideo(it, W, H, aspect);
+      case "model3d": return makeModel3D(it, W, H, ctx);
       default: return makeAd(it, W, H);
     }
   });

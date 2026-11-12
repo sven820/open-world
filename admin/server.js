@@ -48,6 +48,7 @@ function defaultState() {
       { id: "m-live-1", name: "演示直播流 HLS（本地离线）", type: "stream", url: "/media/live/live.m3u8", createdAt: now },
       { id: "m-video-ext", name: "示例视频（外链 · 需联网）", type: "video", url: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4", createdAt: now },
       { id: "m-live-ext", name: "示例直播流（外链 · 需联网）", type: "stream", url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", createdAt: now },
+      { id: "m-3d-demo1", name: "3D演示1（内置环形装置）", type: "model3d", url: "builtin://demo1", createdAt: now },
     ],
     playlists: [
       {
@@ -73,6 +74,12 @@ function defaultState() {
           { type: "image", url: "/media/demo-ad-1.svg", fallback: "", fit: "cover", duration: 10 },
         ],
       },
+      {
+        id: "pl-3d-corner", name: "3D转角屏测试（3D裸眼演示1）", fit: "auto", transition: 0, audio: "off", updatedAt: now,
+        items: [
+          { type: "model3d", url: "builtin://demo1", depth: 2.5, duration: 16 },
+        ],
+      },
     ],
     published: { version: 0, publishedAt: null, screens: {} },
     ack: { version: 0, at: null },
@@ -94,9 +101,28 @@ function ensureFiles() {
     if (!fs.existsSync(path.join(MEDIA, f))) console.warn(`[admin] 缺少${label} ${f}，相关节目单会降级到备用海报`);
   }
 }
+/** 内置 3D 演示素材 + 3D转角屏测试节目单：对已存在的 state.json 幂等补种 */
+function ensureBuiltin(state) {
+  let changed = false;
+  const now = new Date().toISOString();
+  if (!Array.isArray(state.media)) state.media = [];
+  if (!state.media.some((m) => m.id === "m-3d-demo1")) {
+    state.media.push({ id: "m-3d-demo1", name: "3D演示1（内置环形装置）", type: "model3d", url: "builtin://demo1", createdAt: now });
+    changed = true;
+  }
+  if (!Array.isArray(state.playlists)) state.playlists = [];
+  if (!state.playlists.some((p) => p.id === "pl-3d-corner")) {
+    state.playlists.push({
+      id: "pl-3d-corner", name: "3D转角屏测试（3D裸眼演示1）", fit: "auto", transition: 0, audio: "off", updatedAt: now,
+      items: [{ type: "model3d", url: "builtin://demo1", depth: 2.5, duration: 16 }],
+    });
+    changed = true;
+  }
+  if (changed) saveState(state);
+}
 function loadState() {
   ensureFiles();
-  try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); }
+  try { const s = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); ensureBuiltin(s); return s; }
   catch { const s = defaultState(); saveState(s); return s; }
 }
 function saveState(s) {
@@ -274,8 +300,10 @@ async function handleApi(req, res, u) {
       const i = state.screens.findIndex((x) => x.id === s.id);
       if (i >= 0) applyReported(state.screens[i], s);
       else {
-        // 新屏位轮流绑定演示节目单：图片 / 视频 / 直播各覆盖一批，方便直接演示
-        const pl = state.playlists.length ? state.playlists[state.screens.length % state.playlists.length] : null;
+        // 3D转角包柱屏优先绑 3D 裸眼测试节目单；其余屏位轮流绑定演示节目单（图片/视频/直播各覆盖一批）
+        const pl3d = state.playlists.find((p) => p.id === "pl-3d-corner") || null;
+        const pl = s.mount === "corner3d" && pl3d ? pl3d
+          : state.playlists.length ? state.playlists[state.screens.length % state.playlists.length] : null;
         const sc = {
           id: s.id, name: s.name || `${mapName} · ${idx + 1} 号屏`,
           mount: "standalone", w: 14, h: 8, playlistId: pl ? pl.id : "",

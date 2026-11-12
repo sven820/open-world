@@ -12,12 +12,13 @@ export class Playlist {
     this.cur = 0;
     this.pending = false;
     this.fade = fade;         // { advance(dt) } | null
+    this.focus = null;        // 观看者位置 {x,z}（3D 裸眼内容源用），每帧由管理器写入
   }
 
   /** 立即应用当前条目（构建时调用一次） */
   applyInitial() {
     const item = this.pool[this.schedule[this.cur].idx];
-    if (item && item.update) item.update(0, 0);
+    if (item && item.update) item.update(0, 0, this.focus);
     this.onSwap(item.texture);
   }
 
@@ -27,7 +28,7 @@ export class Playlist {
     // 首次进入视野时把动画内容推进一帧再上屏，避免黑屏/过期帧
     if (this.pending) {
       const item = this.pool[this.schedule[this.cur].idx];
-      if (item && item.update) item.update(0, 0);
+      if (item && item.update) item.update(0, 0, this.focus);
       this.onSwap(item.texture);
       this.pending = false;
     }
@@ -37,7 +38,7 @@ export class Playlist {
       this.t -= slot.duration;
       this.cur = (this.cur + 1) % this.schedule.length;
       const next = this.pool[this.schedule[this.cur].idx];
-      if (next && next.update) next.update(0, 0);
+      if (next && next.update) next.update(0, 0, this.focus);
       this.onSwap(next.texture);
     }
   }

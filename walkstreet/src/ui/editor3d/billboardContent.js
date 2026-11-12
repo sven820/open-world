@@ -71,6 +71,7 @@ export function openBillboardContent(content, onSave) {
         url: get("bbc-url") !== undefined ? get("bbc-url") : old.url,
         fallback: get("bbc-fallback") !== undefined ? get("bbc-fallback") : old.fallback,
         fit: get("bbc-rowfit") !== undefined ? get("bbc-rowfit") : old.fit,
+        depth: get("bbc-depth") !== undefined ? +get("bbc-depth") : old.depth,
       };
     });
   }
@@ -85,6 +86,10 @@ export function openBillboardContent(content, onSave) {
         fields = `<label class="bbc-f">字幕内容<textarea class="bbc-text" rows="2" placeholder="循环滚动的文字">${esc(it.text || DEFAULT_TEXT)}</textarea></label>`;
       } else if (it.type === "clock") {
         fields = `<label class="bbc-f">右侧文案<input class="bbc-note" value="${esc(it.note || "晴 24°C")}" placeholder="晴 24°C" /></label>`;
+      } else if (it.type === "model3d") {
+        fields = `<label class="bbc-f">模型地址 GLB URL（留空 = 内置 3D 演示）<input class="bbc-url" value="${esc(it.url || "")}" placeholder="https://… /model.glb" /></label>
+                  <label class="bbc-f">出屏深度（米，0~10，模型中心到屏面距离）<input class="bbc-depth" type="number" min="0" max="10" step="0.5" value="${it.depth ?? 2.5}" /></label>
+                  <span class="bbc-desc">经离轴投影呈现 3D 裸眼效果，仅 3D转角包柱屏生效；显示模式对本类型无效。</span>`;
       } else if (meta.media) {
         fields = `<label class="bbc-f">地址 URL<input class="bbc-url" value="${esc(it.url || "")}" placeholder="https://… / .mp4 / .m3u8" /></label>
                   <label class="bbc-f">备用海报（加载失败时显示）<input class="bbc-fallback" value="${esc(it.fallback || "")}" placeholder="https://… / 图片 URL" /></label>
@@ -128,6 +133,7 @@ export function openBillboardContent(content, onSave) {
       const item = { type, duration: 9, seed: state.items.length + 1 };
       if (type === "text") item.text = DEFAULT_TEXT;
       if (type === "clock") item.note = "晴 24°C";
+      if (type === "model3d") item.depth = 2.5;
       if (CONTENT_TYPES[type].media) { item.url = ""; item.fallback = ""; item.fit = state.fit; }
       state.items.push(item);
       render();

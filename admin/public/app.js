@@ -17,10 +17,11 @@ const TYPES = {
   image: { label: "图片", media: true, hint: "http(s) 或 /media/ 地址" },
   video: { label: "视频", media: true, hint: "mp4 / webm 直链，远离屏幕自动暂停解码" },
   stream: { label: "直播流", media: true, hint: "HLS(m3u8)，游戏端 hls.js 低延迟播放" },
+  model3d: { label: "3D裸眼模型", media: true, hint: "GLB 经离轴投影呈现 3D 裸眼，仅 3D转角包柱屏生效；URL 填 builtin://demo1 或留空 = 内置 3D 演示1" },
 };
 const FITS = { auto: "自适应（完整显示）", contain: "完整显示（留黑边）", cover: "铺满裁切", stretch: "拉伸铺满" };
 const AUDIOS = { off: "静音（推荐）", nearest: "仅最近一块屏出声", on: "全部出声" };
-const MOUNTS = { standalone: "独立广告牌", facade: "建筑立面屏", corner: "转角包柱屏" };
+const MOUNTS = { standalone: "独立广告牌", facade: "建筑立面屏", corner: "转角包柱屏", corner3d: "3D转角包柱屏" };
 const VIEW_META = {
   dashboard: ["概览", "内容运营总览 · 发布状态 · 演示流程"],
   media: ["素材库", "图片 / 视频 / 直播流统一管理，支持 URL 与本地上传"],
@@ -223,6 +224,7 @@ async function doPublish() {
 function mediaThumb(m) {
   if (m.type === "image") return `<img src="${esc(m.url)}" alt="" loading="lazy">`;
   if (m.type === "video") return `<video src="${esc(m.url)}" muted loop autoplay playsinline preload="metadata"></video>`;
+  if (m.type === "model3d") return `<div class="ph" style="font-size:13px;text-align:center;line-height:1.9;color:#37e6d5">✦ 3D<br><small>裸眼模型 · 离轴投影</small></div>`;
   return `<div class="ph" style="font-size:13px;text-align:center;line-height:1.9;color:#8fd8e8">● LIVE<br><small>点下方「预览」查看画面</small></div>`;
 }
 function viewMedia() {
@@ -328,7 +330,7 @@ function openMediaForm() {
   });
 }
 function openUseMedia(m) {
-  const type = m.type === "stream" ? "stream" : m.type === "video" ? "video" : "image";
+  const type = m.type === "stream" || m.type === "model3d" ? m.type : m.type === "video" ? "video" : "image";
   openModal(`
     <div class="modal-head"><h3>插入节目单</h3><button class="btn sm" data-x>✕</button></div>
     <p class="desc">把「${esc(m.name)}」作为一条 ${typeTag(type)} 内容追加到节目单，追加后仍需「发布」才会上屏。</p>
@@ -345,7 +347,11 @@ function openUseMedia(m) {
       const pl = S.playlists.find((p) => p.id === $("#u-pl", root).value);
       if (!pl) return toast("请选择节目单", "err");
       const next = clone(pl);
-      next.items.push({ type, url: m.url, fallback: $("#u-fb", root).value.trim(), fit: $("#u-fit", root).value, duration: Number($("#u-dur", root).value) || 10 });
+      if (type === "model3d") {
+        next.items.push({ type, url: m.url, depth: 2.5, duration: Number($("#u-dur", root).value) || 16 });
+      } else {
+        next.items.push({ type, url: m.url, fallback: $("#u-fb", root).value.trim(), fit: $("#u-fit", root).value, duration: Number($("#u-dur", root).value) || 10 });
+      }
       try { await api("/api/playlists", { method: "POST", body: next }); closeModal(); toast("已追加到「" + pl.name + "」，记得发布"); await refresh(); }
       catch (e) { toast("保存失败：" + e.message, "err"); }
     };
@@ -368,6 +374,10 @@ function itemRow(it, i, total) {
     fields = `<label class="field"><span>右下角备注（天气等）</span><input ${f("note")} value="${esc(it.note || "")}" /></label>`;
   } else if (it.type === "ad") {
     fields = `<label class="field"><span>广告随机种子</span><input type="number" ${f("seed")} value="${esc(it.seed ?? 1)}" /></label>`;
+  } else if (it.type === "model3d") {
+    fields = `
+      <label class="field full"><span>模型地址 GLB URL（builtin://demo1 或留空 = 内置 3D 演示1）</span><input ${f("url")} list="media-urls" value="${esc(it.url || "")}" placeholder="builtin://demo1 / https://...glb" /></label>
+      <label class="field"><span>出屏深度（米）</span><input type="number" min="0" max="10" step="0.5" ${f("depth")} value="${esc(it.depth ?? 2.5)}" /></label>`;
   } else {
     fields = `
       <label class="field full"><span>内容 URL（可从素材库复制）</span><input ${f("url")} list="media-urls" value="${esc(it.url || "")}" placeholder="https://... 或 /media/..." /></label>
@@ -481,13 +491,18 @@ function viewPlaylists() {
     if (t === "text") it.text = "潮汇坊 · 中央大道商圈 今日营业至 22:00   ◆   ";
     if (t === "clock") it.note = "晴 24°C";
     if (t === "ad") it.seed = Math.floor(Math.random() * 10) + 1;
-    if (TYPES[t].media) { it.url = ""; it.fallback = ""; it.fit = draft.fit || "auto"; }
+    if (t === "model3d") { it.url = "builtin://demo1"; it.depth = 2.5; it.duration = 16; }
+    else if (TYPES[t].media) { it.url = ""; it.fallback = ""; it.fit = draft.fit || "auto"; }
     draft.items.push(it); viewPlaylists();
   };
   $("#add-from-media").onclick = () => {
     const m = S.media.find((x) => x.id === $("#add-media").value);
     if (!m) return;
-    draft.items.push({ type: m.type, url: m.url, fallback: m.type === "image" ? "" : "/media/demo-ad-2.svg", fit: draft.fit || "auto", duration: 10 });
+    if (m.type === "model3d") {
+      draft.items.push({ type: "model3d", url: m.url, depth: 2.5, duration: 16 });
+    } else {
+      draft.items.push({ type: m.type, url: m.url, fallback: m.type === "image" ? "" : "/media/demo-ad-2.svg", fit: draft.fit || "auto", duration: 10 });
+    }
     viewPlaylists();
   };
   $("#pl-save").onclick = async () => {
@@ -898,6 +913,10 @@ function renderPvFrame() {
   } else if (it.type === "clock") {
     html = `<div class="pv-canvas" style="background:linear-gradient(180deg,#132a4a,#101828);display:block;padding-top:12%">
       <div class="pv-clock" id="pv-clock-time">--:--</div><div class="pv-note">${esc(it.note || "")}</div></div>`;
+  } else if (it.type === "model3d") {
+    html = `<div class="pv-canvas" style="background:radial-gradient(circle at 50% 40%,#12527a,#01040c);display:block;padding-top:16%">
+      <div style="color:#37e6d5;font-size:30px;font-weight:900">✦ 3D 裸眼内容</div>
+      <div class="small" style="margin-top:10px;opacity:.75">${esc(it.url && it.url !== "builtin://demo1" ? it.url : "内置 3D 演示1（环形装置）")}<br>3D 裸眼效果需在游戏内的 3D转角包柱屏上查看</div></div>`;
   } else {
     const hues = ["#132a4a,#2c5364", "#3b0d2e,#8a1f4d", "#0d2b1e,#1f6e4e", "#2b1206,#a34a17"];
     const [a, b] = hues[(Number(it.seed) || 1) % hues.length].split(",");

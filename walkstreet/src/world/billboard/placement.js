@@ -17,12 +17,12 @@ const EDGE_EPS = 0.3;
 /* ---------------- 占位包络（局部坐标，group 原点 = 地面落点） ----------------
  * 与 mounts.js 的几何一一对应：
  *   standalone 屏框 w+1.0 / 底座 2.0 深；facade 屏面悬挑到 z≈1.2；
- *   corner 塔体边长 w+1.4（整块落地）。
+ *   corner / corner3d 塔体边长 w+1.4（整块落地）。
  * ox/oz 为包络中心相对 group 原点的偏移，top 为包络顶面高度。
  --------------------------------------------------------------------------- */
 export function footprintOf(item) {
   const s = normalizeSpec(item && item.params);
-  if (s.mount === "corner") {
+  if (s.mount === "corner" || s.mount === "corner3d") {
     const half = (s.w + 1.4) / 2;
     return { mount: s.mount, spec: s, hx: half, hz: half, ox: 0, oz: 0, top: s.y + s.h / 2 + 0.6 };
   }
@@ -218,7 +218,7 @@ export function validatePlacement(item, ctx, pos = item.pos, rot = item.rot || 0
   if (f.mount === "facade") return { ok: true, reasons: [], box: b, corners, buildings: [] };
   const reasons = [];
 
-  const minTop = f.mount === "corner" ? 7 : Math.max(4, f.spec.y - f.spec.h / 2 - 0.5);
+  const minTop = f.mount === "corner" || f.mount === "corner3d" ? 7 : Math.max(4, f.spec.y - f.spec.h / 2 - 0.5);
   const hits = ctx.buildings(b.x0, b.z0, b.x1, b.z1, minTop).filter((r) => !item.id || r.id !== item.id);
   if (hits.length) reasons.push("building");
 
