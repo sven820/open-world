@@ -8,10 +8,11 @@ import { DEBUG_3D } from "./content3d.js";
  * 纹理分配是否正常。图案含网格（看变形/偏移）、"▲ TOP"（看上下颠倒）、
  * FACE A/B 大字（看两面分配）。 */
 function makeDebugFaceTex(i) {
+  const is3d = i >= 0; // 0/1 = RT 数组两面的测试图；2 = 普通 2D 内容（两面同图）
   const c = document.createElement("canvas");
   c.width = 768; c.height = 512;
   const x = c.getContext("2d");
-  x.fillStyle = i === 0 ? "#7a1f1f" : "#1f5a2a";
+  x.fillStyle = i === 0 ? "#7a1f1f" : i === 1 ? "#1f5a2a" : "#1f2a7a";
   x.fillRect(0, 0, 768, 512);
   x.strokeStyle = "rgba(255,255,255,0.35)";
   x.lineWidth = 2;
@@ -21,9 +22,9 @@ function makeDebugFaceTex(i) {
   x.font = "bold 90px sans-serif"; x.textAlign = "center";
   x.fillText("▲ TOP", 384, 110);
   x.font = "bold 150px sans-serif";
-  x.fillText(i === 0 ? "FACE A" : "FACE B", 384, 300);
+  x.fillText(is3d ? (i === 0 ? "FACE A" : "FACE B") : "2D CONTENT", 384, 300);
   x.font = "bold 60px sans-serif";
-  x.fillText(i === 0 ? "红=面A" : "绿=面B", 384, 420);
+  x.fillText(is3d ? (i === 0 ? "红=面A" : "绿=面B") : "蓝=普通2D内容", 384, 420);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
@@ -171,8 +172,7 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
     const onSwap = (tex) => {
       const prev = faceMats[0].map;
       if (DEBUG_3D === 1) { // 诊断：测试图案替换 RT 内容（分配路径不变）
-        const dbg = [makeDebugFaceTex(0), makeDebugFaceTex(1)];
-        applyTex(Array.isArray(tex) ? dbg : dbg[0]);
+        applyTex(Array.isArray(tex) ? [makeDebugFaceTex(0), makeDebugFaceTex(1)] : makeDebugFaceTex(2));
         return;
       }
       if (fade.begin(prev, tex)) return; // 过渡中：保持旧 map，由 shader 混合新图
