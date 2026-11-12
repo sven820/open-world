@@ -1,54 +1,63 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
+import { uniform, positionLocal, mix, vec3 } from "three/webgpu";
 import { getRenderSettings, onRenderSettingsChange } from "../config/renderSettings.js";
 
-const SKY_VERT = /* glsl */ `
-  varying vec3 vDir;
-  void main() {
-    vDir = normalize(position);
-    vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    gl_Position = projectionMatrix * mv;
-  }
-`;
+/* 天空：TSL 节点材质（WebGPU/WebGL 双后端可编译，替代原 GLSL ShaderMaterial）。
+ * 逻辑与原 SKY_VERT/SKY_FRAG 一致：vDir = normalize(局部坐标)（球心即 mesh 原点），
+ * 按高度做三段渐变 + 太阳/月亮辉光 + 太阳圆盘。 */
+function skyColorNode(U) {
+  const dir = positionLocal.normalize();
+  const h = dir.y;
+  // 纯表达式树：select() 条件节点不能作为 addAssign 的赋值目标，只能逐级 add
+  let col = h.greaterThan(0).select(
+    mix(U.hor, U.top, h.clamp(0, 1).pow(0.55)),
+    mix(U.hor, U.bot, h.mul(-1).mul(3.2).clamp(0, 1)),
+  );
+  // sun glow
+  const sd = dir.dot(U.sunDir).max(0);
+  const glow = sd.pow(90).mul(1.6).add(sd.pow(9).mul(0.28));
+  col = col.add(U.sunColor.mul(glow).mul(U.night.mul(-0.85).add(1)));
+  // moon glow
+  const md = dir.dot(U.moonDir).max(0);
+  const moonGlow = md.pow(260).mul(2.4).add(md.pow(22).mul(0.12));
+  col = col.add(vec3(0.72, 0.8, 1.0).mul(moonGlow).mul(U.night));
+  // sun disc：smoothstep(0.9985 - uSunSize, 0.9995, sd)
+  const disc = sd.smoothstep(U.sunSize.mul(-1).add(0.9985), 0.9995);
+  col = col.add(U.sunColor.mul(disc).mul(2.2).mul(U.night.mul(-0.9).add(1)));
+  return col;
+}
 
-const SKY_FRAG = /* glsl */ `
-  precision highp float;
-  varying vec3 vDir;
-  uniform vec3 uTop;
-  uniform vec3 uHorizon;
-  uniform vec3 uBottom;
-  uniform vec3 uSunDir;
-  uniform vec3 uSunColor;
-  uniform vec3 uMoonDir;
-  uniform float uNight;
-  uniform float uSunSize;
-
-  void main() {
-    float h = vDir.y;
-    vec3 col;
-    if (h > 0.0) {
-      float t = pow(clamp(h, 0.0, 1.0), 0.55);
-      col = mix(uHorizon, uTop, t);
-    } else {
-      col = mix(uHorizon, uBottom, clamp(-h * 3.2, 0.0, 1.0));
+/* 星空：WebGPU 后端对 THREE.Points 只支持 1px 点（无 gl_PointSize 等价物），
+ * 改为把星点烘焙成 equirect 贴图铺在背面球体上（半径略小于天空穹顶 3200）。 */
+function makeStarTexture() {
+  const W = 2048, H = 1024;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const ctx = c.getContext("2d");
+  for (let i = 0; i < 1400; i++) {
+    // 球面均匀分布：纬度按 acos 反变换（equirect 线性采样会让两极过密）
+    const u = Math.random(), th = Math.random() * Math.PI * 2;
+    const phi = Math.acos(1 - 2 * u);
+    const x = (th / (Math.PI * 2)) * W;
+    const y = (phi / Math.PI) * H;
+    const big = Math.random() < 0.08;
+    const r = big ? 1.4 + Math.random() * 1.2 : 0.6 + Math.random() * 0.9;
+    const a = 0.35 + Math.random() * 0.65;
+    if (big) {
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r * 3);
+      g.addColorStop(0, `rgba(200,215,255,${a})`);
+      g.addColorStop(0.4, `rgba(160,185,255,${a * 0.35})`);
+      g.addColorStop(1, "rgba(160,185,255,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x, y, r * 3, 0, Math.PI * 2); ctx.fill();
     }
-
-    // sun / moon glow
-    float sd = max(dot(normalize(vDir), normalize(uSunDir)), 0.0);
-    float glow = pow(sd, 90.0) * 1.6 + pow(sd, 9.0) * 0.28;
-    col += uSunColor * glow * (1.0 - uNight * 0.85);
-
-    // moon
-    float md = max(dot(normalize(vDir), normalize(uMoonDir)), 0.0);
-    float moonGlow = pow(md, 260.0) * 2.4 + pow(md, 22.0) * 0.12;
-    col += vec3(0.72, 0.8, 1.0) * moonGlow * uNight;
-
-    // sun disc
-    float disc = smoothstep(0.9985 - uSunSize, 0.9995, sd);
-    col += uSunColor * disc * 2.2 * (1.0 - uNight * 0.9);
-
-    gl_FragColor = vec4(col, 1.0);
+    ctx.fillStyle = `rgba(217,228,255,${a})`;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
   }
-`;
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
 
 function lerpColor(a, b, t, out) {
   out.r = a.r + (b.r - a.r) * t;
@@ -85,61 +94,42 @@ export class Environment {
     };
 
     const skyGeo = new THREE.SphereGeometry(3200, 40, 24);
-    this.skyUniforms = {
-      uTop: { value: new THREE.Color(0x3b3a70) },
-      uHorizon: { value: new THREE.Color(0xf2a58e) },
-      uBottom: { value: new THREE.Color(0x3a2f3a) },
-      uSunDir: { value: new THREE.Vector3(0, 1, 0) },
-      uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
-      uSunColor: { value: new THREE.Color(0xffb27a) },
-      uNight: { value: 0 },
-      uSunSize: { value: 0.0006 },
+    // TSL uniform：update() 里 .value.copy() 推进，与原 uniforms 写法一致
+    this.skyU = {
+      top: uniform(new THREE.Color(0x3b3a70)),
+      hor: uniform(new THREE.Color(0xf2a58e)),
+      bot: uniform(new THREE.Color(0x3a2f3a)),
+      sunDir: uniform(new THREE.Vector3(0, 1, 0)),
+      moonDir: uniform(new THREE.Vector3(0, -1, 0)),
+      sunColor: uniform(new THREE.Color(0xffb27a)),
+      night: uniform(0),
+      sunSize: uniform(0.0006),
     };
-    const skyMat = new THREE.ShaderMaterial({
-      uniforms: this.skyUniforms,
-      vertexShader: SKY_VERT,
-      fragmentShader: SKY_FRAG,
+    const skyMat = new THREE.MeshBasicMaterial({
       side: THREE.BackSide,
       depthWrite: false,
       fog: false,
+      // 原 ShaderMaterial 输出不经 tone mapping，保持一致
     });
+    skyMat.toneMapped = false;
+    skyMat.colorNode = skyColorNode(this.skyU);
     this.sky = new THREE.Mesh(skyGeo, skyMat);
     this.sky.renderOrder = -1000;
     scene.add(this.sky);
 
-    // stars
-    const starCount = 1400;
-    const starPos = new Float32Array(starCount * 3);
-    const starSizes = new Float32Array(starCount);
-    for (let i = 0; i < starCount; i++) {
-      const u = Math.random() * 2 - 1;
-      const th = Math.random() * Math.PI * 2;
-      const r = Math.sqrt(1 - u * u);
-      const R = 3000;
-      starPos[i * 3] = Math.cos(th) * r * R;
-      starPos[i * 3 + 1] = Math.abs(u) * R * 0.95 + 40;
-      starPos[i * 3 + 2] = Math.sin(th) * r * R;
-      starSizes[i] = 1 + Math.random() * 2.2;
-    }
-    const starGeo = new THREE.BufferGeometry();
-    starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
-    starGeo.setAttribute("aSize", new THREE.BufferAttribute(starSizes, 1));
-    this.starMat = new THREE.ShaderMaterial({
-      uniforms: { uOpacity: { value: 0 } },
-      vertexShader: `
-        attribute float aSize; varying float vS;
-        void main(){ vS = aSize; vec4 mv = modelViewMatrix*vec4(position,1.0); gl_PointSize = aSize*(320.0/-mv.z); gl_Position = projectionMatrix*mv; }
-      `,
-      fragmentShader: `
-        varying float vS; uniform float uOpacity;
-        void main(){ vec2 p = gl_PointCoord-0.5; float d = length(p); float a = smoothstep(0.5,0.0,d); gl_FragColor = vec4(vec3(0.85,0.9,1.0), a*uOpacity); }
-      `,
+    // stars：星图球（背面），透明度随夜晚系数
+    const starMat = new THREE.MeshBasicMaterial({
+      map: makeStarTexture(),
+      side: THREE.BackSide,
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       fog: false,
     });
-    this.stars = new THREE.Points(starGeo, this.starMat);
+    starMat.toneMapped = false;
+    starMat.opacity = 0;
+    this.starMat = starMat;
+    this.stars = new THREE.Mesh(new THREE.SphereGeometry(2900, 48, 24), starMat);
     this.stars.renderOrder = -900;
     scene.add(this.stars);
 
@@ -225,21 +215,21 @@ export class Environment {
     lerpColor(a.fog, b.fog, t, ca.fog);
     lerpColor(a.sun, b.sun, t, ca.sun);
 
-    this.skyUniforms.uTop.value.copy(ca.top);
-    this.skyUniforms.uHorizon.value.copy(ca.hor);
-    this.skyUniforms.uBottom.value.copy(ca.bot);
+    this.skyU.top.value.copy(ca.top);
+    this.skyU.hor.value.copy(ca.hor);
+    this.skyU.bot.value.copy(ca.bot);
 
     // night factor: 1 when sun well below horizon
     const sunDir = this.sunDirection();
     const elev = sunDir.y;
     const night = 1 - THREE.MathUtils.smoothstep(elev, -0.12, 0.16);
     this.night = night;
-    this.skyUniforms.uNight.value = night;
-    this.skyUniforms.uSunDir.value.copy(sunDir);
-    this.skyUniforms.uSunColor.value.copy(ca.sun);
-    this.skyUniforms.uMoonDir.value.set(-sunDir.x, -sunDir.y, -sunDir.z).normalize();
+    this.skyU.night.value = night;
+    this.skyU.sunDir.value.copy(sunDir);
+    this.skyU.sunColor.value.copy(ca.sun);
+    this.skyU.moonDir.value.set(-sunDir.x, -sunDir.y, -sunDir.z).normalize();
 
-    this.starMat.uniforms.uOpacity.value = night * night * 0.9;
+    this.starMat.opacity = night * night * 0.9;
 
     // fog
     this.scene.fog.color.copy(ca.fog);

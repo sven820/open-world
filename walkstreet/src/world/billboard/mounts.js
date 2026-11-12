@@ -1,4 +1,4 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { makeCanvas } from "../textures.js";
 
 /* ---------------- 广告大屏 · 承载形式注册表 ----------------

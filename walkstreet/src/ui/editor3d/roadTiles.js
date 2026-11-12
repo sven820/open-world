@@ -14,7 +14,7 @@
 // 的派生分组），组面板批量写入组内所有块，新块端口连通时自动继承。
 // 全部以编辑器实例（ed）为第一参数（mixin 风格，同 measure.js）。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { uid } from "./util.js";
 import { makeRoadTileTexture } from "../../world/textures.js";
 import { rtPortPairs, rtMiters, rtTileQuadGeometry, rtEndKey } from "../../world/customMap.js";

@@ -3,7 +3,7 @@
 //   _cesium {Cesium,viewer,enu,creditEl} / _cesiumOn / _originEntity / _three / _v / _v2
 //   map.origin / map.area / _layerVis / status()
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import {
   buildImageryLayers, basemapInfo,
 } from "../../config/cesium.js";

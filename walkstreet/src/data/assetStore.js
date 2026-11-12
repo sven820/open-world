@@ -7,7 +7,7 @@
 //   meta   —— 版本/迁移标记
 // 降级：IndexedDB 打不开（隐私模式等）→ 内存 Map 兜底 + memoryOnly 标记，不抛错。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
@@ -218,8 +218,10 @@ export async function saveAssetThumb(id, blob) {
   await putAsset(asset);
 }
 
-// 渲染一个 Object3D 的正面截图 → png Blob（Studio/导入后自动出缩略图）
-export function renderThumb(root, { size = 256 } = {}) {
+// 渲染一个 Object3D 的正面截图 → png Blob（Studio/导入后自动出缩略图）。
+// WebGPU 画布没有 preserveDrawingBuffer 式的画布读回：渲染进离屏 RenderTarget，
+// readRenderTargetPixelsAsync 读回线性 RGBA，手动 sRGB 编码 + Y 翻转后编码 PNG。
+export async function renderThumb(root, { size = 256 } = {}) {
   const scene = new THREE.Scene();
   scene.add(root);
   const box = new THREE.Box3().setFromObject(root);
@@ -231,14 +233,32 @@ export function renderThumb(root, { size = 256 } = {}) {
   const dl = new THREE.DirectionalLight(0xffffff, 2.2);
   dl.position.set(3, 6, 4);
   scene.add(dl, new THREE.AmbientLight(0xffffff, 1.2));
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+  const renderer = new THREE.WebGPURenderer({ antialias: true, alpha: true });
+  await renderer.init();
+  const rt = new THREE.RenderTarget(size, size, { format: THREE.RGBAFormat, samples: 4 });
   renderer.setSize(size, size);
-  renderer.render(scene, cam);
-  const canvas = renderer.domElement;
-  return new Promise((resolve) => {
-    canvas.toBlob((blob) => {
-      renderer.dispose();
-      resolve(blob);
-    }, "image/png");
-  });
+  renderer.setClearColor(0x000000, 0); // 透明背景
+  await renderer.renderAsync(scene, cam, rt);
+  const buf = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, size, size);
+  rt.dispose();
+  renderer.dispose();
+
+  // 线性 → sRGB（RT 渲染不做输出变换）+ Y 翻转（读回原点在左下，PNG 在左上）
+  const src = new Uint8ClampedArray(buf);
+  const out = new Uint8ClampedArray(src.length);
+  for (let y = 0; y < size; y++) {
+    const srcRow = (size - 1 - y) * size * 4;
+    const dstRow = y * size * 4;
+    for (let i = 0; i < size * 4; i += 4) {
+      for (let k = 0; k < 3; k++) {
+        const v = src[srcRow + i + k] / 255;
+        out[dstRow + i + k] = (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055) * 255;
+      }
+      out[dstRow + i + 3] = src[srcRow + i + 3];
+    }
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  canvas.getContext("2d").putImageData(new ImageData(out, size, size), 0, 0);
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
 }

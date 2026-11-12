@@ -1,4 +1,4 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { makeCanvas } from "../textures.js";
 import { parseGLB } from "../../data/assetStore.js";
 
@@ -36,17 +36,26 @@ const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vect
 const _P = new THREE.Matrix4(), _R = new THREE.Matrix4(), _Tm = new THREE.Matrix4(), _M = new THREE.Matrix4();
 const _eye = new THREE.Vector3(), _look = new THREE.Vector3();
 
-function offAxis(pa, pb, pc, pe, near, far) {
+function offAxis(pa, pb, pc, pe, near, far, webgpuCS) {
   _vr.subVectors(pb, pa).normalize(); _vu.subVectors(pc, pa).normalize();
   _vn.crossVectors(_vr, _vu).normalize();
   _va.subVectors(pa, pe); _vb.subVectors(pb, pe); _vc.subVectors(pc, pe);
   let d = -_vn.dot(_va); if (d < 0.05) d = 0.05;
   const l = _vr.dot(_va) * near / d, r = _vr.dot(_vb) * near / d,
     b = _vu.dot(_va) * near / d, t = _vu.dot(_vc) * near / d;
+  // z 行按坐标系约定区分：WebGL z∈[-1,1]，WebGPU z∈[0,1]
+  let c, dd;
+  if (webgpuCS) {
+    c = -far / (far - near);
+    dd = (-far * near) / (far - near);
+  } else {
+    c = -(far + near) / (far - near);
+    dd = (-2 * far * near) / (far - near);
+  }
   _P.set(
     2 * near / (r - l), 0, (r + l) / (r - l), 0,
     0, 2 * near / (t - b), (t + b) / (t - b), 0,
-    0, 0, -(far + near) / (far - near), -2 * far * near / (far - near),
+    0, 0, c, dd,
     0, 0, -1, 0,
   );
   _R.set(_vr.x, _vr.y, _vr.z, 0, _vu.x, _vu.y, _vu.z, 0, _vn.x, _vn.y, _vn.z, 0, 0, 0, 0, 1);
@@ -167,7 +176,8 @@ export function makeModel3D(it, W, H, ctx) {
   projCam.matrixAutoUpdate = false;
   const rts = faces.map((f) => ({
     f,
-    rt: new THREE.WebGLRenderTarget(RTW, RTH, {
+    // RenderTarget 基类：WebGPU 与 WebGL 回退后端通用（WebGLRenderTarget 是 WebGL 专属包装）
+    rt: new THREE.RenderTarget(RTW, RTH, {
       minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
     }),
@@ -302,8 +312,12 @@ export function makeModel3D(it, W, H, ctx) {
       const savedShadow = renderer.shadowMap.autoUpdate;
       renderer.shadowMap.autoUpdate = false; // RT 渲染不重复生成阴影贴图（主渲染前恢复）
       const prevRT = renderer.getRenderTarget();
+      // 裸 Camera 的投影矩阵按当前后端的坐标系约定构建（WebGPU z∈[0,1]）；
+      // renderer.render 会按 camera.coordinateSystem 判断是否需要重建逆矩阵
+      const isWebGPU = renderer.coordinateSystem === THREE.WebGPUCoordinateSystem;
+      projCam.coordinateSystem = renderer.coordinateSystem;
       for (const r of rts) {
-        const M = offAxis(r.f.pa, r.f.pb, r.f.pc, _eye, NEAR, FAR);
+        const M = offAxis(r.f.pa, r.f.pb, r.f.pc, _eye, NEAR, FAR, isWebGPU);
         projCam.projectionMatrix.copy(M);
         projCam.projectionMatrixInverse.copy(M).invert();
         renderer.setRenderTarget(r.rt);

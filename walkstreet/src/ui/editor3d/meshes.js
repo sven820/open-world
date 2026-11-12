@@ -2,7 +2,7 @@
 // 以及描边实体（道路/河流/建筑/树/路灯）的材质与网格构建。
 // 全部以编辑器实例（ed）为第一参数（曲率下沉依赖 ed._curveOffset / ed._three.renderer）。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { Line2 } from "three/addons/lines/Line2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
@@ -28,13 +28,26 @@ function planarUV(geo) {
 // 屏幕空间胖线（Line2）：线宽恒定像素，任意视角/距离都清晰可见（不受雾影响）；
 // 曲率下沉直接烘焙进端点（相邻点间距内弯曲量可忽略），不参与 _bendArea 顶点重写。
 // ox/oz：几何存储的相对原点（位置减去原点，曲率仍按绝对坐标计算）
+// 注：r169 的 WebGPURenderer 不支持 Line2/LineMaterial（GLSL 材质无法编译为 WGSL），
+// WebGPU 后端自动降级为普通 1px 线（LineBasicMaterial）；WebGL 回退后端仍用胖线。
 export function fatLine(ed, pts, widthPx, colorHex, opacity, lift, ox = 0, oz = 0) {
+  const renderer = ed._three.renderer;
+  const offsetY = (p) => lift - ed._curveOffset(p.x, p.z);
+  const isWebGPU = renderer.coordinateSystem === THREE.WebGPUCoordinateSystem;
+  if (isWebGPU) {
+    const geo = new THREE.BufferGeometry().setFromPoints(
+      pts.map((p) => new THREE.Vector3(p.x - ox, offsetY(p), p.z - oz)),
+    );
+    return new THREE.Line(geo, new THREE.LineBasicMaterial({
+      color: colorHex, transparent: true, opacity, depthWrite: false,
+    }));
+  }
   const geo = new LineGeometry();
-  geo.setPositions(pts.flatMap((p) => [p.x - ox, lift - ed._curveOffset(p.x, p.z), p.z - oz]));
+  geo.setPositions(pts.flatMap((p) => [p.x - ox, offsetY(p), p.z - oz]));
   const mat = new LineMaterial({
     color: colorHex, linewidth: widthPx, transparent: true, opacity, depthWrite: false,
   });
-  const size = ed._three.renderer.getSize(new THREE.Vector2());
+  const size = renderer.getSize(new THREE.Vector2());
   mat.resolution.set(size.x, size.y);
   const line = new Line2(geo, mat);
   line.userData.fatLine = true;

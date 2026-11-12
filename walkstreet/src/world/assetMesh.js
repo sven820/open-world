@@ -11,7 +11,7 @@
 //   preloadAssetTemplates() 预热缓存，再同步 assetInstance()；未命中返回 null
 //   （调用方跳过该物件），编辑器侧则 warm 后触发重建。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "./materials.js";
 import { parseGLB } from "../data/assetStore.js"; // 含 DRACOLoader（Draco 压缩 GLB）
 

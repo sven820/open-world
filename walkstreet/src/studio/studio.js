@@ -2,7 +2,7 @@
 // 独立模块 —— 只依赖 assetStore（数据层）与 world/materials、world/assetMesh
 // （共享渲染层），不 import 任何编辑器；编辑器通过 main.js 的回调跳转进来。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
@@ -31,6 +31,11 @@ export class ModelStudio {
     this._buildDOM();
     this._buildScene();
     this._wireKeys();
+    try {
+      await this._threeReady; // WebGPU 设备就绪（含 IBL 生成）后再开渲染循环
+    } catch (e) {
+      console.error("[studio] 渲染器初始化失败：", e);
+    }
     await this._refreshAssetList();
     if (isMemoryOnly()) this._setStatus("注意：IndexedDB 不可用，资产仅保存在内存中（刷新即丢）");
     if (this.opts.initialAssetId) {
@@ -129,9 +134,31 @@ export class ModelStudio {
 
   _buildScene() {
     const wrap = this._el.querySelector(".ms3-canvas-wrap");
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    // WebGPU 渲染器（不可用时自动回退 WebGL2）
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
     renderer.shadowMap.enabled = true;
     wrap.appendChild(renderer.domElement);
+    // 后端就绪后生成 IBL（PMREM 预滤波需要渲染设备）：RoomEnvironment 经
+    // PMREM 预滤波 → 每个方向都有光（背光面不死黑）、金属/光泽材质有真实反射；
+    // 与四盏灯独立，面板可单独开关
+    this._threeReady = renderer.init().then(() => {
+      // addons 的 RoomEnvironment 内部 PointLight 来自核心 'three' 构建，与
+      // three/webgpu 构建的同名类不是同一实例，WebGPU 光照节点按类匹配不到
+      // （LightsNode 警告）→ 换成 webgpu 构建的同参 PointLight
+      const roomEnv = new RoomEnvironment();
+      const stale = [];
+      roomEnv.traverse((o) => { if (o.isPointLight) stale.push(o); });
+      for (const old of stale) {
+        const l = new THREE.PointLight(old.color, old.intensity, old.distance, old.decay);
+        l.position.copy(old.position);
+        roomEnv.add(l);
+        roomEnv.remove(old);
+      }
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      this._iblTex = pmrem.fromScene(roomEnv, 0.04).texture;
+      pmrem.dispose();
+      // IBL 默认关闭（面板里手动开）；贴图已就绪，打开是零成本切换
+    });
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a1e23);
     const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 5000);
@@ -172,14 +199,6 @@ export class ModelStudio {
     tc.addEventListener("dragging-changed", (e) => { orbit.enabled = !e.value; });
     tc.addEventListener("mouseUp", () => { this._geometryDirty = true; this._renderProps(); });
     scene.add(tc.getHelper());
-
-    // IBL 环境光照：RoomEnvironment 经 PMREM 预滤波 → 每个方向都有光（背光面
-    // 不死黑）、金属/光泽材质有真实反射；与四盏灯独立，面板可单独开关
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    this._iblTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    pmrem.dispose();
-    // IBL 默认关闭（面板里手动开）；贴图已就绪，打开是零成本切换
-    scene.environment = null;
 
     this._three = { renderer, scene, camera, orbit, tc, wrap };
     this._lights = { hemi, sun, fill, camFill }; // 供光照工具条勾选

@@ -93,7 +93,7 @@ async function buildWorld(mapData, mapId) {
   if (city.custom && city.custom.group) city.registerStreamed(city.custom.group);
   setProgress(0.72, "正在布置地图中的广告大屏…");
   // 广告大屏：只构建地图里手动放置的 billboard 记录，默认街区不自动生成
-  const billboards = new BillboardManager(engine.scene, city);
+  const billboards = new BillboardManager(engine.scene, city, engine.renderer);
   for (const s of billboards.screens) city.registerStreamed(s.group);
   setProgress(0.78, "正在唤醒行人与车流…");
   await new Promise((r) => setTimeout(r, 30));
@@ -171,6 +171,13 @@ async function rebuildWorld(stage, showMenu = true) {
 }
 
 async function boot() {
+  // WebGPU 设备异步初始化（不可用时自动回退 WebGL2）；GLTF/KTX2 的
+  // detectSupport 依赖已就绪的后端，必须在世界构建前完成
+  try {
+    await engine.ready;
+  } catch (e) {
+    console.error("[engine] 渲染器初始化失败：", e);
+  }
   setProgress(0.08, "正在对齐街区坐标…");
   const mapData = resolveActiveMap();
   await buildWorld(mapData, getActiveMapId());
@@ -468,7 +475,7 @@ engine.onUpdate((dt, time) => {
     }
     w.hud.update(dt, fps);
   }
-  engine.bloom.strength = 0.32 + env.night * 0.6;
+  engine.setBloomStrength(0.32 + env.night * 0.6);
   input.update();
   window.__frames = (window.__frames || 0) + 1;
   const fs = engine.frameStats;

@@ -2,7 +2,7 @@
 // Gizmo 移动旋转缩放；可选 Cesium 地球作为底图（相机同步 + 局部米坐标桥）。
 // 与 2D 编辑器共享同一份地图数据（schema v2 的 features/objects/origin）。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { dropAt, bendGeometry } from "../config/curvature.js";
@@ -118,6 +118,11 @@ export class MapEditor3d {
     this._applyLayerVis(); // 应用记忆中的图层面板显隐（含 Cesium 就绪前的 Three 侧）
     this._pushUndo("打开编辑器");
     try {
+      await this._threeReady; // WebGPU 设备就绪后再开渲染循环
+    } catch (e) {
+      console.error("[editor3d] 渲染器初始化失败：", e);
+    }
+    try {
       await this._initCesium(); // 失败不影响编辑（仅无底图）
     } catch (e) {
       console.warn("[editor3d] Cesium 底图加载失败：", e);
@@ -213,8 +218,10 @@ export class MapEditor3d {
     vp.appendChild(layersPop);
     this._layersPop = layersPop;
 
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    // WebGPU 渲染器（不可用时自动回退 WebGL2），alpha 透出 Cesium 底图
+    const renderer = new THREE.WebGPURenderer({ canvas, antialias: true, alpha: true });
     renderer.shadowMap.enabled = true;
+    this._threeReady = renderer.init(); // open() 里 await 后才开渲染循环
 
     const scene = new THREE.Scene();
     scene.background = null; // 透出 Cesium

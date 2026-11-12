@@ -1,4 +1,4 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import {
   PED_PARTS, pedPartGeometry, makePedRig,
   SKIN_TONES, HAIR_COLORS, CLOTH_COLORS, PANTS_COLORS,

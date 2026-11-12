@@ -15,7 +15,7 @@
 //   roof    —— 屋顶贴图
 //   surface —— 通用 PBR 素材（纯色/金属/玻璃，抽自地标建筑）
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { FACADE_VARIANTS, makeFacades, makeRoofTexture, STOREFRONT_STYLES, makeStorefronts, makeSignAtlas } from "./textures.js";
 
 /* ---------------- 中文显示名（编辑器 UI 用） ---------------- */

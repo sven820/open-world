@@ -3,7 +3,7 @@
 // 双击/Enter 结束后结果保留在图上，直到清除或重新开始。
 // 全部以编辑器实例（ed）为第一参数。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { fmtDist } from "./util.js";
 
 export function startMeasure(ed) {

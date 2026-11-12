@@ -2,7 +2,7 @@
 // 与路口红绿灯灯杆（程序化路口四角 + 描边路口四角）。
 // 函数以 city 实例为第一参数（City 类做薄委托）。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { applyColor, cylAt } from "./batch.js";
 import { scooterParts } from "../entities/models.js";

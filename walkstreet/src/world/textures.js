@@ -1,4 +1,4 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { SHOP_NAMES, SHOP_SUBS, SIGN_COLORS } from "../data/cityData.js";
 
 export function makeCanvas(w, h) {

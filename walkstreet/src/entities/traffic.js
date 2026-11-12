@@ -1,4 +1,4 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { buildCar, buildBus, buildScooter } from "./models.js";
 
 const CAR_COLORS = [0xe8e8e8, 0x1b1c20, 0xb8bcc2, 0x8a1f24, 0x1f3f7a, 0x2c5a3a, 0xd8d2c4, 0x6a6f78, 0x9a4a1f];

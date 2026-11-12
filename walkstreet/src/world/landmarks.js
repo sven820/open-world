@@ -1,4 +1,4 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { activeLandmarks } from "../data/cityData.js";
 import { getMaterial } from "./materials.js";
 

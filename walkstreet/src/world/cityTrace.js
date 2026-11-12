@@ -2,7 +2,7 @@
 // 路口求交（供斑马线 / 红绿灯灯位 / customMap 断口使用）+ 路口斑马线铺条。
 // 函数均以 city 实例为第一参数（City 类做薄委托，保持调用面不变）。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { asphaltHalf } from "../data/cityData.js";
 import {
   polyClipX, polyClipZ, polyDirNear, polyEdgeRange,

@@ -1,7 +1,7 @@
 // 3D 编辑器描边内容（features.roads/rivers + objects 建筑/树/路灯）→ 运行时世界网格。
 // 编辑器数据为局部平面米制坐标，运行时世界同为平面坐标，直接按坐标构建；
 // 与编辑器渲染语义保持一致：建筑 = footprint（相对 pos 的局部坐标）+ pos 平移 + rot 旋转。
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { mapBounds } from "../data/cityData.js";
 import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "./materials.js";

@@ -1,8 +1,5 @@
-import * as THREE from "three";
-import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
-import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import * as THREE from "three/webgpu";
+import { pass, bloom, PostProcessing } from "three/webgpu";
 import { getRenderSettings, onRenderSettingsChange } from "../config/renderSettings.js";
 
 function pixelRatioFor(s) {
@@ -21,7 +18,8 @@ export class Engine {
     this.updaters = [];
     this.settings = getRenderSettings();
 
-    const renderer = new THREE.WebGLRenderer({
+    // WebGPU 渲染器（navigator.gpu 不可用时自动回退 WebGL2 后端）
+    const renderer = new THREE.WebGPURenderer({
       canvas,
       antialias: true,
       powerPreference: "high-performance",
@@ -34,10 +32,13 @@ export class Engine {
     renderer.toneMappingExposure = 1.05;
     renderer.shadowMap.enabled = !!this.settings.shadows;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    // 手动重置统计：EffectComposer 每个 pass 都会调用 renderer.render，
+    // 手动重置统计：后处理链每个 pass 都会调用 renderer.render，
     // 自动重置会让 info 只剩最后一个全屏 pass 的 1 个 draw call（看不到真实负载）
     renderer.info.autoReset = false;
     this.renderer = renderer;
+    // WebGPU 设备初始化是异步的：main.js 的 boot() 里 await engine.ready
+    // 之后才构建世界 / 开渲染循环（GLTF/KTX2 的 detectSupport 也依赖已初始化的后端）
+    this.ready = renderer.init();
     this._shadowEnabled = !!this.settings.shadows;
 
     const scene = new THREE.Scene();
@@ -50,13 +51,17 @@ export class Engine {
     camera.position.set(0, 8, 20);
     this.camera = camera;
 
-    const composer = new EffectComposer(renderer);
-    composer.addPass(new RenderPass(scene, camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.62, 0.55, 0.86);
-    composer.addPass(this.bloom);
-    composer.addPass(new OutputPass());
-    this.composer = composer;
+    // 节点式后处理（WebGPU 原生管线，替代 WebGL 版 EffectComposer+UnrealBloomPass）：
+    // 场景先渲进离屏 RT（线性空间），bloom 叠加后统一做 tone mapping + sRGB 输出
+    const postProcessing = new PostProcessing(renderer);
+    const scenePass = pass(scene, camera);
+    this._sceneColor = scenePass.getTextureNode("output");
+    this._bloomNode = bloom(this._sceneColor, 0.62, 0.55, 0.86);
     this.bloomEnabled = !!this.settings.bloom;
+    postProcessing.outputNode = this.bloomEnabled
+      ? this._sceneColor.add(this._bloomNode)
+      : this._sceneColor;
+    this.postProcessing = postProcessing;
     this.fpsCap = this.settings.fpsCap || 0;
 
     window.addEventListener("resize", () => this.resize());
@@ -70,7 +75,11 @@ export class Engine {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
-    this.composer.setSize(w, h);
+  }
+
+  /** 泛光强度热调（夜景增强），不触发管线重建 */
+  setBloomStrength(v) {
+    this._bloomNode.strength.value = v;
   }
 
   /** 应用渲染设置（分辨率缩放 / 阴影开关 / 泛光 / 帧率上限），可随时热切换。 */
@@ -87,28 +96,36 @@ export class Engine {
     if (shadows !== this._shadowEnabled) {
       this._shadowEnabled = shadows;
       this.renderer.shadowMap.enabled = shadows;
-      // three 的阴影采样是在材质编译期写死的：运行时开关阴影必须重编材质，
-      // 否则会残留/丢失阴影采样（画面全黑或阴影不消失）。
+      // 阴影采样在材质编译期写死：运行时开关阴影必须重编材质，
+      // 否则会残留/丢失阴影采样（画面全黑或阴影不消失）
       this.scene.traverse((o) => {
         if (!o.material) return;
         for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.needsUpdate = true;
       });
     }
 
-    this.bloomEnabled = !!s.bloom;
+    const bloomOn = !!s.bloom;
+    if (bloomOn !== this.bloomEnabled) {
+      this.bloomEnabled = bloomOn;
+      // 开泛光走 PostProcessing 链；关泛光时 render() 直接前向渲染（省离屏 RT）
+      this.postProcessing.outputNode = bloomOn
+        ? this._sceneColor.add(this._bloomNode)
+        : this._sceneColor;
+      this.postProcessing.needsUpdate = true;
+    }
     this.fpsCap = s.fpsCap || 0;
   }
 
   onUpdate(fn) { this.updaters.push(fn); }
 
   render() {
-    // 关泛光时直接前向渲染：省掉 composer 的离屏 RT + 5 次降采样/模糊 pass
-    if (this.bloomEnabled) this.composer.render();
+    // 关泛光时直接前向渲染：省掉离屏 RT + 5 次降采样/模糊 pass
+    if (this.bloomEnabled) this.postProcessing.render();
     else this.renderer.render(this.scene, this.camera);
 
     // 整帧（含阴影 pass 与全部后处理 pass）的统计快照，供 HUD/设置面板显示
     const r = this.renderer.info.render;
-    this.frameStats = { calls: r.calls, triangles: r.triangles };
+    this.frameStats = { calls: r.drawCalls, triangles: r.triangles };
   }
 
   start() {

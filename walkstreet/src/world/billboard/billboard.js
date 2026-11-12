@@ -1,4 +1,5 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
+import { texture as tslTexture, uniform as tslUniform, materialColor, mix as tslMix } from "three/webgpu";
 import { buildBillboardGroup, normalizeSpec } from "./mounts.js";
 import { Playlist } from "./playlist.js";
 
@@ -7,7 +8,23 @@ import { Playlist } from "./playlist.js";
  * 并经承载形式注册表（mounts.js）构建；没有记录就不建屏。
  */
 
-/** 屏幕材质：onBeforeCompile 注入第二张纹理 + uMix，实现单面片 shader 交叉淡入。
+/* 共享 1×1 白色占位纹理：TSL 纹理节点首次编译时不能是空值 */
+let _whiteTex = null;
+function whiteTex() {
+  if (!_whiteTex) {
+    const c = document.createElement("canvas");
+    c.width = c.height = 2;
+    const x = c.getContext("2d");
+    x.fillStyle = "#fff";
+    x.fillRect(0, 0, 2, 2);
+    _whiteTex = new THREE.CanvasTexture(c);
+    _whiteTex.colorSpace = THREE.SRGBColorSpace;
+  }
+  return _whiteTex;
+}
+
+/** 屏幕材质：TSL 节点混合（cur → next 按 uMix 交叉淡入），替代 WebGL 版
+ *  的 onBeforeCompile GLSL 注入（WebGPU 不走 onBeforeCompile）。
  *  保留 MeshBasicMaterial 的 toneMapped:false / 色彩空间 / Bloom 行为。 */
 function screenMaterial() {
   const m = new THREE.MeshBasicMaterial({
@@ -20,47 +37,48 @@ function screenMaterial() {
     side: THREE.FrontSide,
     map: null,
   });
-  m.userData.fadeShader = null;
-  m.onBeforeCompile = (shader) => {
-    shader.uniforms.uNext = { value: null };
-    shader.uniforms.uMix = { value: 0 };
-    shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\nuniform sampler2D uNext;\nuniform float uMix;")
-      .replace("#include <map_fragment>", `#include <map_fragment>
-        if (uMix > 0.0) {
-          vec4 nxt = texture2D(uNext, vMapUv);
-          diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * nxt.rgb, uMix);
-        }`);
-    m.userData.fadeShader = shader;
-  };
+  // 纹理节点换图 = 换 .value（uniform 更新，不触发管线重编）
+  const cur = tslTexture(whiteTex());
+  const nxt = tslTexture(whiteTex());
+  const uMix = tslUniform(0);
+  m.userData.fadeTex = { cur, nxt, uMix };
+  const base = cur.rgb.mul(materialColor);
+  m.colorNode = tslMix(base, base.mul(nxt.rgb), uMix);
   return m;
 }
 
-/** 交叉淡入控制器：过渡期间保持旧 map，用 uNext+uMix 混合，结束后换 map */
+/** 交叉淡入控制器：过渡期间保持旧图（cur），按 uMix 混入新图（nxt），结束后换 map。
+ *  mats 可为多块材质（3D转角包柱屏两面共用一份节目单）——uniform 同步推进。
+ *  数组纹理（3D 裸眼各面 RT）不支持 shader 混合，直接硬切。 */
 function createFade(mats, duration) {
   let next = null, mix = 0;
+  const fades = () => mats.map((m) => m.userData.fadeTex).filter(Boolean);
   const commit = () => {
-    for (const m of mats) m.map = next;
-    const sh = mats[0].userData.fadeShader;
-    if (sh) sh.uniforms.uMix.value = 0;
+    for (const m of mats) {
+      m.map = next;
+      const f = m.userData.fadeTex;
+      if (f) f.cur.value = next;
+    }
+    for (const f of fades()) f.uMix.value = 0;
     next = null; mix = 0;
   };
   return {
     /** @returns {boolean} true = 交给过渡处理，调用方不要立刻换 map */
     begin(prev, tex) {
       if (next) commit(); // 上一轮过渡尚未结束又被切：先落定
-      const sh = mats[0].userData.fadeShader;
-      if (duration <= 0 || !prev || prev === tex || !sh) return false;
+      if (Array.isArray(tex)) return false; // 3D RT 数组：硬切
+      if (duration <= 0 || !prev || prev === tex || !fades().length) return false;
       next = tex; mix = 0;
-      sh.uniforms.uNext.value = tex;
-      sh.uniforms.uMix.value = 0;
+      for (const f of fades()) {
+        f.nxt.value = tex;
+        f.uMix.value = 0;
+      }
       return true;
     },
     advance(dt) {
       if (!next) return;
       mix = Math.min(1, mix + dt / duration);
-      const sh = mats[0].userData.fadeShader;
-      if (sh) sh.uniforms.uMix.value = mix;
+      for (const f of fades()) f.uMix.value = mix;
       if (mix >= 1) commit();
     },
   };
@@ -117,8 +135,10 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
     const applyTex = (tex) => {
       const arr = Array.isArray(tex) ? tex : null;
       faceMats.forEach((m, mi) => {
-        m.map = arr ? (arr[mi] || arr[0]) : tex;
-        if (!applied) m.needsUpdate = true; // 首次 null→texture 需重编译 program
+        const t = arr ? (arr[mi] || arr[0]) : tex;
+        m.map = t;
+        const f = m.userData.fadeTex;
+        if (f) f.cur.value = t; // 节点混合走 fadeTex，map 仅作状态记录
       });
       applied = true;
     };
@@ -146,8 +166,8 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
      *  过渡中的 shader uniform 先归零，避免新轮播接手后残留半透明混合。 */
     b.setContent = (newPool, newSchedule, key) => {
       for (const m of faceMats) {
-        const sh = m.userData.fadeShader;
-        if (sh) { sh.uniforms.uMix.value = 0; sh.uniforms.uNext.value = null; }
+        const f = m.userData.fadeTex;
+        if (f) { f.uMix.value = 0; f.nxt.value = whiteTex(); }
       }
       fade = createFade(faceMats, (newPool.cfg && newPool.cfg.transition) || 0);
       // 沿用原轮播相位，但夹在新首条时长内，避免换配置后立刻又翻页

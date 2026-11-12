@@ -1,4 +1,4 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { makeCanvas, canvasTexture } from "../textures.js";
 import { SHOP_NAMES, SHOP_SUBS } from "../../data/cityData.js";
 import { defaultContent, normalizeContent, DEFAULT_TEXT } from "./contentConfig.js";

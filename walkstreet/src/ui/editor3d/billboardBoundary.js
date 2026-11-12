@@ -2,7 +2,7 @@
 // 深蓝网格（0x22303e / 0x3a4a5c）与深色塔体几乎同色，单靠半透明盒看不出边界，
 // 因此用高亮色填充 + 加粗边框 + 立柱/顶框，并按吸附/冲突状态换色。
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { footprintOf } from "../../world/billboard/placement.js";
 
 export const BB_COLORS = {
