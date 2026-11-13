@@ -17,11 +17,34 @@ const TYPES = {
   image: { label: "图片", media: true, hint: "http(s) 或 /media/ 地址" },
   video: { label: "视频", media: true, hint: "mp4 / webm 直链，远离屏幕自动暂停解码" },
   stream: { label: "直播流", media: true, hint: "HLS(m3u8)，游戏端 hls.js 低延迟播放" },
-  model3d: { label: "3D裸眼模型", media: true, hint: "GLB 经离轴投影呈现 3D 裸眼，仅 3D转角包柱屏生效；URL 填 builtin://demo1（内置 3D 演示1）、builtin://demo2（3D 演示2 · 12秒品牌广告）或 GLB 地址，留空 = 内置 3D 演示1" },
+  model3d: { label: "3D裸眼模型", media: true, hint: "GLB 经离轴投影呈现 3D 裸眼，仅 3D转角包柱屏生效；URL 填 builtin://demo1（内置演示1）、builtin://demo2（演示2 · 12秒品牌广告）、builtin://calib（几何校准片）、或 http(s) / /media/ 的 GLB 地址；留空 = 演示1" },
 };
+
+/* 3D 内容地址提示：只做提示、不拦截保存。builtin:// 是内置内容标识，其余按 GLB 地址处理。 */
+function model3dWarn(url) {
+  const u = String(url || "").trim();
+  if (!u || u === "builtin://demo1") return "";
+  if (/^builtin:\/\/(demo2|calib)$/i.test(u)) return "";
+  if (/^builtin:\/\//i.test(u)) return "未知内置 3D 内容：可用 builtin://demo1 / demo2 / calib，请检查拼写";
+  if (!/^https?:\/\//i.test(u) && !u.startsWith("/")) return "地址无效：请填 http(s) 或 /media/ 的 GLB 地址，或 builtin:// 内置内容";
+  return "";
+}
+
 const FITS = { auto: "自适应（完整显示）", contain: "完整显示（留黑边）", cover: "铺满裁切", stretch: "拉伸铺满" };
 const AUDIOS = { off: "静音（推荐）", nearest: "仅最近一块屏出声", on: "全部出声" };
 const MOUNTS = { standalone: "独立广告牌", facade: "建筑立面屏", corner: "转角包柱屏", corner3d: "3D转角包柱屏" };
+/* 3D 转角包柱屏的屏位级参数（游戏端 contentConfig.D3_DEFAULTS 对应）：
+ * 遛眼参数 + 显示开关，发布时合并进该屏位的快照 d3 字段。 */
+const D3_DEFAULTS = { depth: 2.5, scale: 1, spin: true, flat: false, track: true, hud: false, helper: false };
+const D3_FIELDS = [
+  { k: "depth", label: "出屏深度（米，0~10）", type: "number", step: 0.5, min: 0, max: 10 },
+  { k: "scale", label: "尺寸（0.4~2）", type: "number", step: 0.05, min: 0.4, max: 2 },
+  { k: "spin", label: "轻微摆动 / 自转", type: "check", hint: "平面素材板不受此开关影响（板子一转就会被离轴投影拉成梯形）" },
+  { k: "flat", label: "平贴退化（对照：直接贴屏）", type: "check", hint: "勾选后该屏位跳过离轴渲染，所有内容按普通平面贴图显示" },
+  { k: "track", label: "片源跟随当前视点（实时追踪）", type: "check", hint: "关闭则固定最佳视点（固定机位评审用）" },
+  { k: "hud", label: "右下角双路预览", type: "check", hint: "游戏画面右下角叠加两面离轴 RT 的小窗，检查预扭曲用" },
+  { k: "helper", label: "视线 / 眼位辅助线", type: "check", hint: "从虚拟眼睛拉到两面屏角的视锥线 + 眼位金球" },
+];
 const VIEW_META = {
   dashboard: ["概览", "内容运营总览 · 发布状态 · 演示流程"],
   media: ["素材库", "图片 / 视频 / 直播流统一管理，支持 URL 与本地上传"],
@@ -244,7 +267,7 @@ function viewMedia() {
     </section>
     <div class="media-grid">
       ${S.media.map((m) => `<div class="card media-card" data-id="${esc(m.id)}" data-type="${esc(m.type)}" data-text="${esc((m.name + " " + m.url).toLowerCase())}">
-        <div class="media-thumb">${mediaThumb(m)}<span class="badge">${typeTag(m.type)}</span></div>
+        <div class="media-thumb">${mediaThumb(m)}<span class="badge">${typeTag(m.type)}</span><button class="media-del" data-act="del" title="删除素材" aria-label="删除素材">✕</button></div>
         <div class="media-body">
           <b>${esc(m.name)}</b>
           <div class="url mono" title="${esc(m.url)}">${esc(m.url)}</div>
@@ -252,7 +275,7 @@ function viewMedia() {
             <button class="btn sm" data-act="probe">探测</button>
             <button class="btn sm" data-act="use">插入节目单</button>
             <button class="btn sm" data-act="preview">预览</button>
-            <button class="btn sm danger" data-act="del">删除</button>
+            <button class="btn sm" data-act="edit">编辑</button>
           </div>
           <div class="probe-result small muted" style="margin-top:8px"></div>
         </div>
@@ -267,7 +290,7 @@ function viewMedia() {
   });
   $("#m-filter").onchange = (e) => { mediaFilter = e.target.value; applyFilter(); };
   $("#m-search").oninput = (e) => { mediaQuery = e.target.value; applyFilter(); };
-  $("#m-add").onclick = openMediaForm;
+  $("#m-add").onclick = () => openMediaForm();
   $$(".media-card").forEach((card) => {
     const m = S.media.find((x) => x.id === card.dataset.id);
     $$("[data-act]", card).forEach((btn) => {
@@ -284,6 +307,8 @@ function viewMedia() {
           openPreview({ name: m.name, items: [{ type: m.type, url: m.url, fit: "contain", duration: 20 }] });
         } else if (act === "use") {
           openUseMedia(m);
+        } else if (act === "edit") {
+          openMediaForm(m);
         } else if (act === "del") {
           if (!confirm(`删除素材「${m.name}」？引用它的节目单不会自动更新。`)) return;
           await api(`/api/media/${encodeURIComponent(m.id)}`, { method: "DELETE" });
@@ -301,17 +326,21 @@ function readDataUrl(file) {
     r.readAsDataURL(file);
   });
 }
-function openMediaForm() {
+/** 新增 / 编辑素材。传 m（现有素材）= 编辑模式：同一套表单预填原值，PUT 原地更新。 */
+function openMediaForm(m = null) {
+  const editing = !!m;
   openModal(`
-    <div class="modal-head"><h3>新增素材</h3><button class="btn sm" data-x>✕</button></div>
+    <div class="modal-head"><h3>${editing ? "编辑素材" : "新增素材"}</h3><button class="btn sm" data-x>✕</button></div>
     <div class="form-grid">
-      <label class="field"><span>素材名称</span><input id="f-name" class="inp" placeholder="例如：秋季新品主视觉" /></label>
-      <label class="field"><span>类型</span><select id="f-type" class="inp">${opts({ image: "图片", video: "视频", stream: "直播流", model3d: "3D裸眼模型" }, "image")}</select></label>
-      <label class="field full"><span>外链 URL（http(s)、/media/ 本地素材；3D裸眼模型填 builtin://demo1 / demo2 或 GLB 地址）</span><input id="f-url" class="inp" placeholder="https://.../ad.png 或 builtin://demo1 / demo2" /></label>
-      <label class="field full"><span>或上传本地文件（图片 / mp4 / webm，≤32MB）</span><input id="f-file" type="file" class="inp" accept="image/*,video/mp4,video/webm" /></label>
+      <label class="field"><span>素材名称</span><input id="f-name" class="inp" value="${editing ? esc(m.name) : ""}" placeholder="例如：秋季新品主视觉" /></label>
+      <label class="field"><span>类型</span><select id="f-type" class="inp">${opts({ image: "图片", video: "视频", stream: "直播流", model3d: "3D裸眼模型" }, editing ? m.type : "image")}</select></label>
+      <label class="field full"><span>外链 URL（http(s)、/media/ 本地素材；3D裸眼模型填 builtin://demo1 / demo2 或 GLB 地址）</span><input id="f-url" class="inp" value="${editing ? esc(m.url) : ""}" placeholder="https://.../ad.png 或 builtin://demo1 / demo2" /></label>
+      <label class="field full"><span>${editing ? "重新上传本地文件替换当前素材（可选）" : "或上传本地文件（图片 / mp4 / webm，≤32MB）"}</span><input id="f-file" type="file" class="inp" accept="image/*,video/mp4,video/webm" /></label>
     </div>
-    <p class="desc" style="margin:12px 0 0">上传优先于 URL。视频与直播建议同时准备一张备用海报，节目单里可配置「备用海报」实现失败降级。</p>
-    <div class="modal-foot"><button class="btn" data-x>取消</button><button id="f-save" class="btn primary">保存素材</button></div>
+    <p class="desc" style="margin:12px 0 0">${editing
+      ? "保存后 ID 不变。若节目单已引用该素材，重新上传 / 修改地址后需要「发布」才会上屏；旧的本地上传文件会保留，已发布版本仍可播放。"
+      : "上传优先于 URL。视频与直播建议同时准备一张备用海报，节目单里可配置「备用海报」实现失败降级。"}</p>
+    <div class="modal-foot"><button class="btn" data-x>取消</button><button id="f-save" class="btn primary">${editing ? "保存修改" : "保存素材"}</button></div>
   `, (root) => {
     $$("[data-x]", root).forEach((b) => b.onclick = closeModal);
     $("#f-save", root).onclick = async () => {
@@ -319,13 +348,21 @@ function openMediaForm() {
       try {
         const file = $("#f-file", root).files[0];
         const dataUrl = file ? await readDataUrl(file) : null;
-        const name = $("#f-name", root).value.trim() || (file ? file.name.replace(/\.[^.]+$/, "") : "未命名素材");
-        await api("/api/media", { method: "POST", body: {
-          name, type: $("#f-type", root).value,
-          url: $("#f-url", root).value.trim(), dataUrl,
-        } });
-        closeModal(); toast("素材已加入素材库"); await refresh();
-      } catch (e) { btn.disabled = false; btn.textContent = "保存素材"; toast("保存失败：" + e.message, "err"); }
+        const name = $("#f-name", root).value.trim() || (file ? file.name.replace(/\.[^.]+$/, "") : (editing ? m.name : "未命名素材"));
+        if (editing) {
+          await api(`/api/media/${encodeURIComponent(m.id)}`, { method: "PUT", body: {
+            name, type: $("#f-type", root).value,
+            url: $("#f-url", root).value.trim(), dataUrl,
+          } });
+          closeModal(); toast("素材已更新；如已引用请重新发布"); await refresh();
+        } else {
+          await api("/api/media", { method: "POST", body: {
+            name, type: $("#f-type", root).value,
+            url: $("#f-url", root).value.trim(), dataUrl,
+          } });
+          closeModal(); toast("素材已加入素材库"); await refresh();
+        }
+      } catch (e) { btn.disabled = false; btn.textContent = editing ? "保存修改" : "保存素材"; toast("保存失败：" + e.message, "err"); }
     };
   });
 }
@@ -375,9 +412,12 @@ function itemRow(it, i, total) {
   } else if (it.type === "ad") {
     fields = `<label class="field"><span>广告随机种子</span><input type="number" ${f("seed")} value="${esc(it.seed ?? 1)}" /></label>`;
   } else if (it.type === "model3d") {
+    // 兼容性警告就地显示：保存前就能看到该地址在哪些渲染分支会退化成提示板
+    const warn = model3dWarn(it.url);
     fields = `
       <label class="field full"><span>模型地址 GLB URL（builtin://demo1 = 3D 演示1 · builtin://demo2 = 3D 演示2 · 留空 = 演示1）</span><input ${f("url")} list="media-urls" value="${esc(it.url || "")}" placeholder="builtin://demo1 / builtin://demo2 / https://...glb" /></label>
-      <label class="field"><span>出屏深度（米）</span><input type="number" min="0" max="10" step="0.5" ${f("depth")} value="${esc(it.depth ?? 2.5)}" /></label>`;
+      <label class="field"><span>出屏深度（米）</span><input type="number" min="0" max="10" step="0.5" ${f("depth")} value="${esc(it.depth ?? 2.5)}" /></label>
+      ${warn ? `<div class="full small" style="color:#ffb86b">注意：${esc(warn)}</div>` : ""}`;
   } else {
     fields = `
       <label class="field full"><span>内容 URL（可从素材库复制）</span><input ${f("url")} list="media-urls" value="${esc(it.url || "")}" placeholder="https://... 或 /media/..." /></label>
@@ -560,11 +600,60 @@ function screenRowsHtml(list) {
           <td><div class="row" style="gap:4px">
             <button class="btn sm" data-act="preview">预览</button>
             <button class="btn sm" data-act="edit">编辑单</button>
+            ${s.mount === "corner3d" ? '<button class="btn sm" data-act="d3">3D 配置</button>' : ""}
             <button class="btn sm danger" data-act="del">删除</button>
           </div></td>
         </tr>`);
   }
   return rows.join("");
+}
+
+/** 3D 转角包柱屏的遛眼参数 / 显示开关配置（实验台同款面板，保存到屏位 d3 字段） */
+function openD3Config(sc) {
+  const cur = { ...D3_DEFAULTS, ...(sc.d3 || {}) };
+  openModal(`
+    <div class="modal-head"><h3>3D 裸眼参数 · ${esc(sc.name)}</h3><button class="btn sm" data-x>✕</button></div>
+    <p class="desc">仅对 3D转角包柱屏生效，随该屏位发布。播放内容需绑定含 3D 裸眼内容的节目单（3D演示 / GLB / 图片 / 视频 / 直播均可上 3D 屏）。</p>
+    <div class="form-grid">
+      <div class="full" style="font-weight:700;font-size:13px;margin-top:4px">遛眼参数</div>
+      ${D3_FIELDS.slice(0, 2).map((f) => `
+        <label class="field"><span>${esc(f.label)}</span>
+          <input id="d3-${f.k}" class="inp" type="number" step="${f.step}" min="${f.min}" max="${f.max}" value="${esc(cur[f.k])}" />
+        </label>`).join("")}
+      <div class="full" style="font-weight:700;font-size:13px;margin-top:4px">显示开关</div>
+      ${D3_FIELDS.slice(2).map((f) => `
+        <label class="field full"><span style="display:flex;align-items:center;gap:8px">
+          <input id="d3-${f.k}" type="checkbox" ${cur[f.k] ? "checked" : ""} /> ${esc(f.label)}
+        </span>
+        <span class="small muted">${esc(f.hint || "")}</span></label>`).join("")}
+    </div>
+    <div class="modal-foot"><button class="btn" data-x>取消</button>
+      <button class="btn" id="d3-reset">恢复默认</button>
+      <button id="d3-save" class="btn primary">保存（未发布）</button></div>
+  `, (root) => {
+    $$("[data-x]", root).forEach((b) => b.onclick = closeModal);
+    $("#d3-reset", root).onclick = () => {
+      for (const f of D3_FIELDS) {
+        const el = $(`#d3-${f.k}`, root);
+        if (!el) continue;
+        if (f.type === "check") el.checked = D3_DEFAULTS[f.k];
+        else el.value = D3_DEFAULTS[f.k];
+      }
+    };
+    $("#d3-save", root).onclick = async () => {
+      const d3 = {};
+      for (const f of D3_FIELDS) {
+        const el = $(`#d3-${f.k}`, root);
+        if (!el) continue;
+        if (f.type === "check") d3[f.k] = el.checked;
+        else d3[f.k] = Number(el.value);
+      }
+      try {
+        await api(`/api/screens/${encodeURIComponent(sc.id)}`, { method: "PUT", body: { d3 } });
+        closeModal(); toast("3D 参数已保存，发布后生效"); await refreshStatus();
+      } catch (e) { toast("保存失败：" + e.message, "err"); }
+    };
+  });
 }
 
 function viewScreens() {
@@ -665,6 +754,8 @@ GET ${esc(S.endpoint)}/api/publish   →   v${snapshot.version}，${Object.keys(
       } else if (act === "edit") {
         if (!sc.playlistId) return toast("请先绑定节目单", "err");
         curPl = sc.playlistId; draft = null; go("playlists");
+      } else if (act === "d3") {
+        openD3Config(sc);
       } else if (act === "del") {
         if (!confirm(`删除屏位「${sc.name}」？游戏端下次上报时会重新出现。`)) return;
         await api(`/api/screens/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -914,9 +1005,12 @@ function renderPvFrame() {
     html = `<div class="pv-canvas" style="background:linear-gradient(180deg,#132a4a,#101828);display:block;padding-top:12%">
       <div class="pv-clock" id="pv-clock-time">--:--</div><div class="pv-note">${esc(it.note || "")}</div></div>`;
   } else if (it.type === "model3d") {
+    // 预览同样给出兼容性提示，避免运营以为 demo2 在所有游戏端都能播
+    const warn = model3dWarn(it.url);
     html = `<div class="pv-canvas" style="background:radial-gradient(circle at 50% 40%,#12527a,#01040c);display:block;padding-top:16%">
       <div style="color:#37e6d5;font-size:30px;font-weight:900">✦ 3D 裸眼内容</div>
-      <div class="small" style="margin-top:10px;opacity:.75">${esc(it.url && it.url !== "builtin://demo1" ? it.url : "内置 3D 演示1（环形装置）")}<br>3D 裸眼效果需在游戏内的 3D转角包柱屏上查看</div></div>`;
+      <div class="small" style="margin-top:10px;opacity:.75">${esc(it.url && it.url !== "builtin://demo1" ? it.url : "内置 3D 演示1（环形装置）")}<br>3D 裸眼效果需在游戏内的 3D转角包柱屏上查看</div>
+      ${warn ? `<div class="small" style="margin-top:8px;color:#ffb86b">注意：${esc(warn)}</div>` : ""}</div>`;
   } else {
     const hues = ["#132a4a,#2c5364", "#3b0d2e,#8a1f4d", "#0d2b1e,#1f6e4e", "#2b1206,#a34a17"];
     const [a, b] = hues[(Number(it.seed) || 1) % hues.length].split(",");

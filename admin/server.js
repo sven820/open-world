@@ -50,6 +50,8 @@ function defaultState() {
       { id: "m-live-ext", name: "示例直播流（外链 · 需联网）", type: "stream", url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", createdAt: now },
       { id: "m-3d-demo1", name: "3D演示1（内置环形装置）", type: "model3d", url: "builtin://demo1", createdAt: now },
       { id: "m-3d-demo2", name: "3D演示2（品牌广告 · 12秒）", type: "model3d", url: "builtin://demo2", createdAt: now },
+      { id: "m-3d-calib", name: "几何校准片（内置线框）", type: "model3d", url: "builtin://calib", createdAt: now },
+      { id: "m-3d-glb", name: "3D示例模型（GLB 文件）", type: "model3d", url: "/media/demo_pulse.glb", createdAt: now },
     ],
     playlists: [
       {
@@ -113,6 +115,14 @@ function ensureBuiltin(state) {
   }
   if (!state.media.some((m) => m.id === "m-3d-demo2")) {
     state.media.push({ id: "m-3d-demo2", name: "3D演示2（品牌广告 · 12秒）", type: "model3d", url: "builtin://demo2", createdAt: now });
+    changed = true;
+  }
+  if (!state.media.some((m) => m.id === "m-3d-calib")) {
+    state.media.push({ id: "m-3d-calib", name: "几何校准片（内置线框）", type: "model3d", url: "builtin://calib", createdAt: now });
+    changed = true;
+  }
+  if (!state.media.some((m) => m.id === "m-3d-glb")) {
+    state.media.push({ id: "m-3d-glb", name: "3D示例模型（GLB 文件）", type: "model3d", url: "/media/demo_pulse.glb", createdAt: now });
     changed = true;
   }
   if (!Array.isArray(state.playlists)) state.playlists = [];
@@ -183,12 +193,29 @@ function playlistToContent(pl, base) {
     }),
   };
 }
+
+/** 屏位级 3D 参数（遛眼参数 / 显示开关）：只保留白名单字段，非法值丢弃交给游戏端兜底 */
+function sanitizeD3(raw) {
+  const out = {};
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v * 100) / 100 : undefined);
+  const depth = num(raw.depth); if (depth !== undefined) out.depth = depth;
+  const scale = num(raw.scale); if (scale !== undefined) out.scale = scale;
+  for (const k of ["spin", "flat", "track", "hud", "helper"]) {
+    if (typeof raw[k] === "boolean") out[k] = raw[k];
+  }
+  return out;
+}
+
 /** 当前工作区（未发布）快照；base="" 时保留 /media/ 相对地址便于持久化 */
 function buildPublished(state, base) {
   const screens = {};
   for (const sc of state.screens) {
     const pl = state.playlists.find((p) => p.id === sc.playlistId);
-    if (pl) screens[sc.id] = playlistToContent(pl, base);
+    if (!pl) continue;
+    const cfg = playlistToContent(pl, base);
+    // 3D转角包柱屏：屏位上配的遛眼参数 / 显示开关合并进发布快照（d3）
+    if (sc.mount === "corner3d" && sc.d3 && Object.keys(sc.d3).length) cfg.d3 = sc.d3;
+    screens[sc.id] = cfg;
   }
   return { version: state.published.version, publishedAt: state.published.publishedAt, screens };
 }
@@ -360,6 +387,7 @@ async function handleApi(req, res, u) {
     if (typeof body.playlistId === "string") sc.playlistId = body.playlistId;
     if (typeof body.w === "number") sc.w = body.w;
     if (typeof body.h === "number") sc.h = body.h;
+    if (body.d3 && typeof body.d3 === "object") sc.d3 = sanitizeD3(body.d3); // 3D 屏遛眼参数
     saveState(state);
     return json(res, 200, sc);
   }
@@ -389,6 +417,28 @@ async function handleApi(req, res, u) {
   }
 
   m = /^\/api\/media\/([^/]+)$/.exec(p);
+  // 素材编辑（改名 / 换地址 / 重传替换）：与新增同一套表单，ID 不变。
+  // 注意：节目单条目记录的是素材地址字符串，地址变更后需重新发布才会上屏；
+  // 旧的本地上传文件保留不删 —— 已发布的节目单可能仍引用旧地址。
+  if (m && method === "PUT") {
+    const item = state.media.find((x) => x.id === decodeURIComponent(m[1]));
+    if (!item) return json(res, 404, { error: "素材不存在" });
+    if (typeof body.name === "string" && body.name.trim()) item.name = body.name.trim().slice(0, 80);
+    if (typeof body.type === "string" && ["image", "video", "stream", "model3d"].includes(body.type)) item.type = body.type;
+    if (body.dataUrl && /^data:([^;]+);base64,/.test(body.dataUrl)) {
+      const mime = /^data:([^;]+);base64,/.exec(body.dataUrl)[1];
+      const ext = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/svg+xml": ".svg", "video/mp4": ".mp4", "video/webm": ".webm" }[mime] || ".bin";
+      const fname = `${uid("up")}${ext}`;
+      fs.writeFileSync(path.join(MEDIA, fname), Buffer.from(body.dataUrl.split(",")[1], "base64"));
+      item.url = `/media/${fname}`;
+    } else if (typeof body.url === "string") {
+      item.url = body.url.trim();
+    }
+    if (!item.url) return json(res, 400, { error: "缺少 URL 或上传内容" });
+    item.updatedAt = new Date().toISOString();
+    saveState(state);
+    return json(res, 200, item);
+  }
   if (m && method === "DELETE") {
     const id = decodeURIComponent(m[1]);
     const item = state.media.find((x) => x.id === id);
