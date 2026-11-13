@@ -48,7 +48,6 @@ export const D3_DEFAULTS = {
   depth: 2.5,   // 出屏深度（米，0~10）：contentRoot.position = VC + OUT·depth
   scale: 1,     // 尺寸（0.4~2）：contentRoot.scale
   spin: true,   // 轻微摆动/自转（平面素材板不受此开关影响，永远不转）
-  flat: false,  // 平贴退化：直接贴屏，跳过离轴渲染（对照档）
   track: true,  // 片源跟随当前视点（实时追踪）；关闭则固定最佳视点
   hud: false,   // 右下角双路预览（管理器叠加层）
   helper: false, // 视线 / 眼位辅助线
@@ -87,7 +86,6 @@ export function normalizeContent(raw) {
       depth: clamp(Math.round((+raw.d3.depth || 0) * 10) / 10, 0, 10, D3_DEFAULTS.depth),
       scale: clamp(Math.round((+raw.d3.scale || 0) * 100) / 100, 0.4, 2, D3_DEFAULTS.scale),
       spin: raw.d3.spin !== false,
-      flat: !!raw.d3.flat,
       track: raw.d3.track !== false,
       hud: !!raw.d3.hud,
       helper: !!raw.d3.helper,
@@ -104,7 +102,15 @@ export function normalizeContent(raw) {
       if (it.type === "text") out.text = String(it.text || DEFAULT_TEXT).slice(0, 400);
       if (it.type === "clock") out.note = String(it.note || "晴 24°C").slice(0, 40);
       if (it.type === "ad") out.seed = clamp(it.seed, 0, 99999, 1);
-      if (it.type === "model3d") out.depth = clamp(Math.round((+it.depth || 0) * 10) / 10, 0, 10, 2.5);
+      // 条目级 3D 属性（来自素材库勾选，发布时合并）：是否 3D 展示 + 出屏深度（米，0~10）。
+      // model3d 天然是 3D 内容；普通素材勾选 is3d 也会进离轴管线，游戏端按条目实时切换显示模式。
+      const is3d = it.type === "model3d" || it.is3d === true;
+      if (it.type === "model3d" || it.is3d !== undefined) out.is3d = is3d;
+      if (is3d) {
+        out.depth = clamp(Math.round((+it.depth || 0) * 10) / 10, 0, 10, 2.5);
+        // 平贴退化（素材属性）：勾选后该条目跳过离轴渲染，按普通平面贴图直接贴屏
+        out.flat = it.flat === true;
+      }
       if (CONTENT_TYPES[it.type].media) {
         out.url = String(it.url || "").slice(0, 4000).trim();
         out.fallback = String(it.fallback || "").slice(0, 4000).trim();

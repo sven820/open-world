@@ -27,7 +27,6 @@ import { parseGLB } from "../../data/assetStore.js";
  *   depth   出屏深度（contentRoot.position = VC + OUT·depth）
  *   scale   尺寸（contentRoot.scale）
  *   spin    轻微摆动/自转（平面素材板永远不转：一转就被离轴拉成梯形）
- *   flat    平贴退化（直接贴屏，跳过离轴 —— 走普通 2D 管线，见 contentSource）
  *   track   片源跟随当前视点（实时追踪）
  *   hud     右下角双路预览（管理器叠加层，见 billboardManager）
  *   helper  视线/眼位辅助线
@@ -383,7 +382,7 @@ function buildCalib() {
  * @param {object} it    content 条目
  * @param {number} W,H   2D 纹理基准尺寸
  * @param {object} ctx   { renderer, scene, faces:[{pa,pb,pc,pd 世界坐标 Vector3}] }
- * @param {object|null} d3  屏位级 3D 参数 { depth, scale, spin, flat, track, hud, helper }
+ * @param {object|null} d3  屏位级 3D 参数 { depth, scale, spin, track, hud, helper }
  * @param {function|null} make2d  该条目的 2D 工厂（平面素材用；model3d 传 null）
  */
 export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
@@ -392,7 +391,8 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
   const scene = ctx && ctx.scene;
   if (!faces || faces.length < 2 || !renderer || !scene) return make3dPlaceholder(it, W, H);
 
-  const depth = clampN(d3 && d3.depth !== undefined ? d3.depth : it.depth, 0, 10, 2.5);
+  // 出屏深度：条目级（素材属性，发布时合并）优先，屏位 d3.depth 兜底
+  const depth = clampN(it.depth !== undefined ? it.depth : (d3 && d3.depth), 0, 10, 2.5);
   const scale = clampN(d3 && d3.scale, 0.4, 2, 1);
   const track = !(d3 && d3.track === false);
   const helperOn = !!(d3 && d3.helper);

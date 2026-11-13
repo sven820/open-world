@@ -414,24 +414,32 @@ export function createContentPool(aspect = 1.75, rawContent = null, ctx = null) 
   const cfg = normalizeContent(rawContent) || defaultContent();
   const H = BASE_H;
   const W = Math.max(384, Math.round(H * aspect));
-  // 平贴退化（d3.flat）：3D 屏也直接贴平面纹理，跳过离轴管线（实验台 flat 档同款）
-  const flat3d = !!(ctx && cfg.d3 && cfg.d3.flat);
-  const make2d = (it) => {
+  // 整屏平面展示（实验台「两面拼成一张图」同款）：3D转角包柱屏上的非 3D 素材
+  // 沿拐角展开成一张完整画布直接平铺，画布宽 = 两倍单面宽，不做离轴预扭曲
+  const isCorner3d = !!ctx;
+  const Wfull = Math.max(768, Math.round(H * aspect * 2));
+  const make2d = (it, w = W, a = aspect) => {
     switch (it.type) {
-      case "text": return makeTicker(it, W, H);
-      case "clock": return makeClock(it, W, H);
-      case "image": return makeImage(it, W, H);
+      case "text": return makeTicker(it, w, H);
+      case "clock": return makeClock(it, w, H);
+      case "image": return makeImage(it, w, H);
       case "video":
-      case "stream": return makeVideo(it, W, H, aspect);
+      case "stream": return makeVideo(it, w, H, a);
       case "model3d": return null; // 3D 原生内容，没有平面版
-      default: return makeAd(it, W, H);
+      default: return makeAd(it, w, H);
     }
   };
   const pool = cfg.items.map((it) => {
-    // 3D转角包柱屏且未平贴：全部内容源进离轴管线（实验台「内容源」全量迁移）
-    if (ctx && !flat3d) return make3dContent(it, W, H, aspect, ctx, cfg.d3, () => make2d(it));
-    if (it.type === "model3d") return make3dPlaceholder(it, W, H); // 非 3D 屏 / 平贴模式：占位
-    return make2d(it);
+    // 3D转角包柱屏按条目实时切换显示模式：model3d 或素材勾选 is3d 的条目进离轴管线
+    //（出屏深度用素材自带值），其余素材整屏平面平铺
+    if (ctx && !it.flat && (it.type === "model3d" || it.is3d)) return make3dContent(it, W, H, aspect, ctx, cfg.d3, () => make2d(it));
+    if (it.type === "model3d") return make3dPlaceholder(it, W, H); // 非 3D 屏 / 平贴退化：占位
+    // 整屏平面展示：仅未勾平贴退化的非 3D 素材 —— 两面拼一张画布（billboard 拆 UV）
+    // 平贴退化（对照档）：保持每面整幅铺满的原 2D 行为，不拆 UV
+    const plane = isCorner3d && !it.flat;
+    const inner = make2d(it, plane ? Wfull : W, plane ? aspect * 2 : aspect);
+    if (plane && inner && inner.texture && !Array.isArray(inner.texture)) inner.texture.planeFull = true;
+    return inner;
   });
   pool.cfg = cfg;
   pool.hasVideo = pool.some((c) => c.isVideo);

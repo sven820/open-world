@@ -36,6 +36,22 @@ function screenMaterial() {
   return m;
 }
 
+/** 整屏平面展示 UV：两面拼成一张画布（实验台 applyPlaneUv 同款）。
+ *  A 面取画布左半 u[0,0.5]，B 面取右半 u[0.5,1]；half=null 恢复整幅 u[0,1]。
+ *  原始 UV 缓存在 mesh.userData.uv0，反复切换不会累积误差。 */
+function applyPlaneUV(mesh, half) {
+  if (!mesh || !mesh.geometry || !mesh.geometry.attributes.uv) return;
+  const attr = mesh.geometry.attributes.uv;
+  if (!mesh.userData.uv0) mesh.userData.uv0 = attr.array.slice();
+  const src = mesh.userData.uv0, dst = attr.array;
+  for (let k = 0; k < src.length; k += 2) {
+    const u = src[k];
+    dst[k] = half === 0 ? u * 0.5 : half === 1 ? 0.5 + u * 0.5 : u;
+    dst[k + 1] = src[k + 1];
+  }
+  attr.needsUpdate = true;
+}
+
 /** 交叉淡入控制器：过渡期间保持旧 map，用 uNext+uMix 混合，结束后换 map。
  *  纹理一律按面展开为 [面0, 面1, ...]（3D 裸眼 = 各面离轴 RT，普通内容 = 每面同张）；
  *  每块材质的 shader 各有自己的 uNext/uMix uniform，必须逐面写入 —— 此前只写
@@ -55,10 +71,10 @@ function createFade(mats, duration) {
   };
   return {
     /** @returns {boolean} true = 交给过渡处理，调用方不要立刻换 map */
-    begin(prev, tex) {
+    begin(prev, tex, canFade = true) {
       if (nextTexs) commit(); // 上一轮过渡尚未结束又被切：先落定
       const shs = mats.map(shOf);
-      if (duration <= 0 || !prev || sameTexs(prev, tex) || shs.some((s) => !s)) return false;
+      if (!canFade || duration <= 0 || !prev || sameTexs(prev, tex) || shs.some((s) => !s)) return false;
       nextTexs = tex; mix = 0;
       shs.forEach((sh, mi) => {
         sh.uniforms.uNext.value = tex[mi];
@@ -124,6 +140,16 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
     let fade = createFade(faceMats, (pool.cfg && pool.cfg.transition) || 0);
     // 当前上屏纹理：按面展开（数组纹理 = [面A RT, 面B RT] 按面分配；普通纹理每面同张）
     let curTexs = null;
+    // 整屏平面展示状态：true = 两面拼一张图（UV 对半拆），null = 尚未初始化
+    let curPlane = null;
+    // 3D转角屏的两面 mesh（整屏平面模式要改 UV），其余形式为空数组。
+    // 注意 corner3d 的 faceGroups 只有 1 个组、两面 mesh 都在里面 —— 必须按材质跨组查找
+    const faceMeshes = isCorner3d
+      ? faceMats.map((m) => built.faceGroups
+          .flatMap((fg) => fg.children)
+          .find((c) => c.isMesh && c.material === m) || null)
+      : [];
+    const setPlaneUV = (on) => faceMeshes.forEach((fm, fi) => applyPlaneUV(fm, on ? fi : null));
     const toFaceTexs = (tex) => {
       const arr = Array.isArray(tex) ? tex : null;
       return faceMats.map((_, mi) => (arr ? (arr[mi] || arr[0] || null) : tex));
@@ -138,8 +164,14 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
       applied = true;
     };
     const onSwap = (tex) => {
+      // 整屏平面 ↔ 离轴/每面整幅 模式切换时改面 UV；UV 是几何属性，交叉淡入期间
+      // 新旧纹理共用同一 UV，半幅 UV 会把旧图拉花 —— 模式不同时退化为硬切
+      const plane = !Array.isArray(tex) && !!tex && tex.planeFull === true;
+      const prevPlane = curPlane;
+      if (plane !== curPlane) setPlaneUV(plane);
+      curPlane = plane;
       const texs = toFaceTexs(tex);
-      if (fade.begin(curTexs, texs)) return; // 过渡中：保持旧 map，由 shader 混合新图
+      if (fade.begin(curTexs, texs, plane === prevPlane)) return; // 过渡中：保持旧 map，由 shader 混合新图
       applyTex(texs);
     };
     const playlist = new Playlist(pool, schedule, onSwap, phaseFor(item.id + suffixes[i], basePhase), fade);

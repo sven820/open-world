@@ -35,12 +35,11 @@ const AUDIOS = { off: "静音（推荐）", nearest: "仅最近一块屏出声",
 const MOUNTS = { standalone: "独立广告牌", facade: "建筑立面屏", corner: "转角包柱屏", corner3d: "3D转角包柱屏" };
 /* 3D 转角包柱屏的屏位级参数（游戏端 contentConfig.D3_DEFAULTS 对应）：
  * 遛眼参数 + 显示开关，发布时合并进该屏位的快照 d3 字段。 */
-const D3_DEFAULTS = { depth: 2.5, scale: 1, spin: true, flat: false, track: true, hud: false, helper: false };
+const D3_DEFAULTS = { depth: 2.5, scale: 1, spin: true, track: true, hud: false, helper: false };
 const D3_FIELDS = [
   { k: "depth", label: "出屏深度（米，0~10）", type: "number", step: 0.5, min: 0, max: 10 },
   { k: "scale", label: "尺寸（0.4~2）", type: "number", step: 0.05, min: 0.4, max: 2 },
   { k: "spin", label: "轻微摆动 / 自转", type: "check", hint: "平面素材板不受此开关影响（板子一转就会被离轴投影拉成梯形）" },
-  { k: "flat", label: "平贴退化（对照：直接贴屏）", type: "check", hint: "勾选后该屏位跳过离轴渲染，所有内容按普通平面贴图显示" },
   { k: "track", label: "片源跟随当前视点（实时追踪）", type: "check", hint: "关闭则固定最佳视点（固定机位评审用）" },
   { k: "hud", label: "右下角双路预览", type: "check", hint: "游戏画面右下角叠加两面离轴 RT 的小窗，检查预扭曲用" },
   { k: "helper", label: "视线 / 眼位辅助线", type: "check", hint: "从虚拟眼睛拉到两面屏角的视锥线 + 眼位金球" },
@@ -269,7 +268,7 @@ function viewMedia() {
       ${S.media.map((m) => `<div class="card media-card" data-id="${esc(m.id)}" data-type="${esc(m.type)}" data-text="${esc((m.name + " " + m.url).toLowerCase())}">
         <div class="media-thumb">${mediaThumb(m)}<span class="badge">${typeTag(m.type)}</span><button class="media-del" data-act="del" title="删除素材" aria-label="删除素材">✕</button></div>
         <div class="media-body">
-          <b>${esc(m.name)}</b>
+          <b>${esc(m.name)}${m.is3d ? ' <span class="badge" style="margin-left:4px">3D</span>' : ""}</b>
           <div class="url mono" title="${esc(m.url)}">${esc(m.url)}</div>
           <div class="media-actions">
             <button class="btn sm" data-act="probe">探测</button>
@@ -329,12 +328,17 @@ function readDataUrl(file) {
 /** 新增 / 编辑素材。传 m（现有素材）= 编辑模式：同一套表单预填原值，PUT 原地更新。 */
 function openMediaForm(m = null) {
   const editing = !!m;
+  // 是否 3D 展示：3D裸眼模型默认勾选，其余默认不勾（出屏深度只在勾选后出现）
+  const curIs3d = editing ? (m.is3d ?? m.type === "model3d") : false;
   openModal(`
     <div class="modal-head"><h3>${editing ? "编辑素材" : "新增素材"}</h3><button class="btn sm" data-x>✕</button></div>
     <div class="form-grid">
       <label class="field"><span>素材名称</span><input id="f-name" class="inp" value="${editing ? esc(m.name) : ""}" placeholder="例如：秋季新品主视觉" /></label>
       <label class="field"><span>类型</span><select id="f-type" class="inp">${opts({ image: "图片", video: "视频", stream: "直播流", model3d: "3D裸眼模型" }, editing ? m.type : "image")}</select></label>
       <label class="field full"><span>外链 URL（http(s)、/media/ 本地素材；3D裸眼模型填 builtin://demo1 / demo2 或 GLB 地址）</span><input id="f-url" class="inp" value="${editing ? esc(m.url) : ""}" placeholder="https://.../ad.png 或 builtin://demo1 / demo2" /></label>
+      <label class="field full" style="display:flex;align-items:center;gap:8px"><input id="f-is3d" type="checkbox" ${curIs3d ? "checked" : ""} /><span>3D 展示（出屏裸眼渲染，仅 3D转角包柱屏生效）</span></label>
+      <label class="field full" id="f-depth-row" hidden><span>出屏深度（米，0~10，模型中心到屏面距离）</span><input id="f-depth" class="inp" type="number" min="0" max="10" step="0.5" value="${editing ? esc(m.depth ?? 2.5) : "2.5"}" /></label>
+      <label class="field full" id="f-flat-row" hidden style="display:flex;align-items:center;gap:8px"><input id="f-flat" type="checkbox" ${editing && m.flat ? "checked" : ""} /><span>平贴退化（对照：直接贴屏，勾选后该素材跳过离轴渲染，按普通平面贴图显示）</span></label>
       <label class="field full"><span>${editing ? "重新上传本地文件替换当前素材（可选）" : "或上传本地文件（图片 / mp4 / webm，≤32MB）"}</span><input id="f-file" type="file" class="inp" accept="image/*,video/mp4,video/webm" /></label>
     </div>
     <p class="desc" style="margin:12px 0 0">${editing
@@ -343,6 +347,18 @@ function openMediaForm(m = null) {
     <div class="modal-foot"><button class="btn" data-x>取消</button><button id="f-save" class="btn primary">${editing ? "保存修改" : "保存素材"}</button></div>
   `, (root) => {
     $$("[data-x]", root).forEach((b) => b.onclick = closeModal);
+    const syncDepthRow = () => {
+      const on = $("#f-is3d", root).checked;
+      $("#f-depth-row", root).hidden = !on;
+      $("#f-flat-row", root).hidden = !on;
+    };
+    syncDepthRow();
+    $("#f-is3d", root).onchange = syncDepthRow;
+    $("#f-type", root).onchange = () => {
+      // 类型切到 3D裸眼模型时默认勾选 3D 展示
+      if ($("#f-type", root).value === "model3d" && !$("#f-is3d", root).checked) $("#f-is3d", root).checked = true;
+      syncDepthRow();
+    };
     $("#f-save", root).onclick = async () => {
       const btn = $("#f-save", root); btn.disabled = true; btn.textContent = "保存中…";
       try {
@@ -353,12 +369,16 @@ function openMediaForm(m = null) {
           await api(`/api/media/${encodeURIComponent(m.id)}`, { method: "PUT", body: {
             name, type: $("#f-type", root).value,
             url: $("#f-url", root).value.trim(), dataUrl,
+            is3d: $("#f-is3d", root).checked, depth: Number($("#f-depth", root).value) || 0,
+            flat: $("#f-flat", root).checked,
           } });
           closeModal(); toast("素材已更新；如已引用请重新发布"); await refresh();
         } else {
           await api("/api/media", { method: "POST", body: {
             name, type: $("#f-type", root).value,
             url: $("#f-url", root).value.trim(), dataUrl,
+            is3d: $("#f-is3d", root).checked, depth: Number($("#f-depth", root).value) || 0,
+            flat: $("#f-flat", root).checked,
           } });
           closeModal(); toast("素材已加入素材库"); await refresh();
         }
@@ -385,7 +405,7 @@ function openUseMedia(m) {
       if (!pl) return toast("请选择节目单", "err");
       const next = clone(pl);
       if (type === "model3d") {
-        next.items.push({ type, url: m.url, depth: 2.5, duration: Number($("#u-dur", root).value) || 16 });
+        next.items.push({ type, url: m.url, duration: Number($("#u-dur", root).value) || 16 });
       } else {
         next.items.push({ type, url: m.url, fallback: $("#u-fb", root).value.trim(), fit: $("#u-fit", root).value, duration: Number($("#u-dur", root).value) || 10 });
       }
@@ -416,7 +436,7 @@ function itemRow(it, i, total) {
     const warn = model3dWarn(it.url);
     fields = `
       <label class="field full"><span>模型地址 GLB URL（builtin://demo1 = 3D 演示1 · builtin://demo2 = 3D 演示2 · 留空 = 演示1）</span><input ${f("url")} list="media-urls" value="${esc(it.url || "")}" placeholder="builtin://demo1 / builtin://demo2 / https://...glb" /></label>
-      <label class="field"><span>出屏深度（米）</span><input type="number" min="0" max="10" step="0.5" ${f("depth")} value="${esc(it.depth ?? 2.5)}" /></label>
+      <div class="full small muted">出屏深度等 3D 参数属于素材本身，请在「素材库 → 编辑素材」中配置；游戏端会按当前显示条目实时切换显示模式。</div>
       ${warn ? `<div class="full small" style="color:#ffb86b">注意：${esc(warn)}</div>` : ""}`;
   } else {
     fields = `
@@ -531,7 +551,7 @@ function viewPlaylists() {
     if (t === "text") it.text = "潮汇坊 · 中央大道商圈 今日营业至 22:00   ◆   ";
     if (t === "clock") it.note = "晴 24°C";
     if (t === "ad") it.seed = Math.floor(Math.random() * 10) + 1;
-    if (t === "model3d") { it.url = "builtin://demo1"; it.depth = 2.5; it.duration = 16; }
+    if (t === "model3d") { it.url = "builtin://demo1"; it.duration = 16; }
     else if (TYPES[t].media) { it.url = ""; it.fallback = ""; it.fit = draft.fit || "auto"; }
     draft.items.push(it); viewPlaylists();
   };
@@ -539,7 +559,7 @@ function viewPlaylists() {
     const m = S.media.find((x) => x.id === $("#add-media").value);
     if (!m) return;
     if (m.type === "model3d") {
-      draft.items.push({ type: "model3d", url: m.url, depth: 2.5, duration: 16 });
+      draft.items.push({ type: "model3d", url: m.url, duration: 16 });
     } else {
       draft.items.push({ type: m.type, url: m.url, fallback: m.type === "image" ? "" : "/media/demo-ad-2.svg", fit: draft.fit || "auto", duration: 10 });
     }

@@ -144,6 +144,7 @@ tr.sc-face.sc-last td { border-bottom: 1px solid rgba(38,51,74,.65); }
 .tag.live { background: rgba(255,107,129,.1); color: #ff9bab; border-color: rgba(255,107,129,.25); }
 
 label.field { display: block; }
+[hidden] { display: none !important; }
 label.field > span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; }
 input.inp, select.inp, textarea.inp {
   width: 100%; background: #0e1622; border: 1px solid var(--line); border-radius: 7px;
@@ -211,7 +212,8 @@ table.tbl tr:hover td { background: rgba(255,255,255,.02); }
 .media-body { padding: 12px 14px 14px; }
 .media-body b { display: block; font-size: 13px; margin-bottom: 3px; }
 .media-body .url { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.media-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+.media-actions { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 11px; }
+.media-actions .btn.sm { flex: 1; min-width: 0; padding: 5px 4px; white-space: nowrap; text-align: center; }
 
 /* ---------- 节目单编辑 ---------- */
 .pl-layout { display: grid; grid-template-columns: 238px 1fr; gap: 16px; }
