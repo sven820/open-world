@@ -19,6 +19,17 @@ const fitOptions = (sel) => Object.entries(FIT_MODES)
 const audioOptions = (sel) => Object.entries(AUDIO_MODES)
   .map(([id, label]) => `<option value="${id}"${id === sel ? " selected" : ""}>${label}</option>`).join("");
 
+/* 3D 内容地址的就地提示，规则与运行时 content3d.js 的 plan3dLoad 一致。
+ * 只提示、不拦截保存；builtin:// 是内置内容标识，其余一律按 GLB 地址处理。 */
+const model3dWarn = (url) => {
+  const u = String(url || "").trim();
+  if (!u || u === "builtin://demo1") return "";
+  if (/^builtin:\/\/(demo2|calib)$/i.test(u)) return "";
+  if (/^builtin:\/\//i.test(u)) return "未知内置 3D 内容：可用 builtin://demo1 / demo2 / calib，请检查拼写";
+  if (!/^https?:\/\//i.test(u) && !u.startsWith("/")) return "地址无效：请填 http(s) 或 /media/ 的 GLB 地址，或 builtin:// 内置内容";
+  return "";
+};
+
 /** @param {object|null} content 当前 params.content（null = 默认节目单）
  *  @param {(cfg: object) => void} onSave 保存回调 */
 export function openBillboardContent(content, onSave) {
@@ -87,9 +98,12 @@ export function openBillboardContent(content, onSave) {
       } else if (it.type === "clock") {
         fields = `<label class="bbc-f">右侧文案<input class="bbc-note" value="${esc(it.note || "晴 24°C")}" placeholder="晴 24°C" /></label>`;
       } else if (it.type === "model3d") {
-        fields = `<label class="bbc-f">模型地址 GLB URL（留空 = 内置 3D 演示）<input class="bbc-url" value="${esc(it.url || "")}" placeholder="https://… /model.glb" /></label>
+        // 兼容性警告紧跟输入框显示：保存前就能看到该地址在本渲染分支会退化成什么
+        const warn = model3dWarn(it.url);
+        fields = `<label class="bbc-f">模型地址 GLB URL（留空 = 内置 3D 演示1；builtin://demo2 = 演示2 · builtin://calib = 几何校准）<input class="bbc-url" value="${esc(it.url || "")}" placeholder="https://… /model.glb 或 builtin://demo1" /></label>
                   <label class="bbc-f">出屏深度（米，0~10，模型中心到屏面距离）<input class="bbc-depth" type="number" min="0" max="10" step="0.5" value="${it.depth ?? 2.5}" /></label>
-                  <span class="bbc-desc">经离轴投影呈现 3D 裸眼效果，仅 3D转角包柱屏生效；显示模式对本类型无效。</span>`;
+                  <span class="bbc-desc">经离轴投影呈现 3D 裸眼效果，仅 3D转角包柱屏生效；显示模式对本类型无效。遛眼参数 / 显示开关请在后台「屏位绑定 → 3D 配置」里调。</span>
+                  ${warn ? `<span class="bbc-desc" style="color:#ffb86b">注意：${esc(warn)}</span>` : ""}`;
       } else if (meta.media) {
         fields = `<label class="bbc-f">地址 URL<input class="bbc-url" value="${esc(it.url || "")}" placeholder="https://… / .mp4 / .m3u8" /></label>
                   <label class="bbc-f">备用海报（加载失败时显示）<input class="bbc-fallback" value="${esc(it.fallback || "")}" placeholder="https://… / 图片 URL" /></label>
@@ -119,6 +133,12 @@ export function openBillboardContent(content, onSave) {
   overlay.addEventListener("change", (e) => {
     if (e.target.classList.contains("bbc-type")) { collect(); render(); }
     else if (e.target.id === "bbc-fit") collect();
+    else if (e.target.classList.contains("bbc-url")) {
+      // model3d 的 URL 变了要重算兼容性警告；其它类型不重建 DOM，避免输入焦点丢失
+      const i = +(e.target.closest(".bbc-row")?.dataset.i ?? -1);
+      collect();
+      if (state.items[i] && state.items[i].type === "model3d") render();
+    }
     else collect();
   });
   overlay.addEventListener("input", () => collect());

@@ -36,31 +36,40 @@ function screenMaterial() {
   return m;
 }
 
-/** 交叉淡入控制器：过渡期间保持旧 map，用 uNext+uMix 混合，结束后换 map */
+/** 交叉淡入控制器：过渡期间保持旧 map，用 uNext+uMix 混合，结束后换 map。
+ *  纹理一律按面展开为 [面0, 面1, ...]（3D 裸眼 = 各面离轴 RT，普通内容 = 每面同张）；
+ *  每块材质的 shader 各有自己的 uNext/uMix uniform，必须逐面写入 —— 此前只写
+ *  mats[0]，第二面永不混合；而把数组原样塞进 uNext / map 会绑到无效采样单元，
+ *  GPU 保留旧绑定 → 上一条内容（如 3D 演示1）的冻结帧永远残留在屏面上。 */
 function createFade(mats, duration) {
-  let next = null, mix = 0;
+  let nextTexs = null, mix = 0;
+  const shOf = (m) => m.userData.fadeShader;
+  const sameTexs = (a, b) => a === b || (!!a && !!b && a.length === b.length && a.every((t, i) => t === b[i]));
   const commit = () => {
-    for (const m of mats) m.map = next;
-    const sh = mats[0].userData.fadeShader;
-    if (sh) sh.uniforms.uMix.value = 0;
-    next = null; mix = 0;
+    mats.forEach((m, mi) => {
+      m.map = nextTexs ? nextTexs[mi] : null;
+      const sh = shOf(m);
+      if (sh) sh.uniforms.uMix.value = 0;
+    });
+    nextTexs = null; mix = 0;
   };
   return {
     /** @returns {boolean} true = 交给过渡处理，调用方不要立刻换 map */
     begin(prev, tex) {
-      if (next) commit(); // 上一轮过渡尚未结束又被切：先落定
-      const sh = mats[0].userData.fadeShader;
-      if (duration <= 0 || !prev || prev === tex || !sh) return false;
-      next = tex; mix = 0;
-      sh.uniforms.uNext.value = tex;
-      sh.uniforms.uMix.value = 0;
+      if (nextTexs) commit(); // 上一轮过渡尚未结束又被切：先落定
+      const shs = mats.map(shOf);
+      if (duration <= 0 || !prev || sameTexs(prev, tex) || shs.some((s) => !s)) return false;
+      nextTexs = tex; mix = 0;
+      shs.forEach((sh, mi) => {
+        sh.uniforms.uNext.value = tex[mi];
+        sh.uniforms.uMix.value = 0;
+      });
       return true;
     },
     advance(dt) {
-      if (!next) return;
+      if (!nextTexs) return;
       mix = Math.min(1, mix + dt / duration);
-      const sh = mats[0].userData.fadeShader;
-      if (sh) sh.uniforms.uMix.value = mix;
+      for (const sh of mats.map(shOf)) if (sh) sh.uniforms.uMix.value = mix;
       if (mix >= 1) commit();
     },
   };
@@ -113,19 +122,25 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
 
     let applied = false;
     let fade = createFade(faceMats, (pool.cfg && pool.cfg.transition) || 0);
-    // 数组纹理（3D 裸眼）= [面A RT, 面B RT] 按面分配；普通纹理分配到所有面
-    const applyTex = (tex) => {
+    // 当前上屏纹理：按面展开（数组纹理 = [面A RT, 面B RT] 按面分配；普通纹理每面同张）
+    let curTexs = null;
+    const toFaceTexs = (tex) => {
       const arr = Array.isArray(tex) ? tex : null;
+      return faceMats.map((_, mi) => (arr ? (arr[mi] || arr[0] || null) : tex));
+    };
+    const applyTex = (tex) => {
+      const texs = toFaceTexs(tex);
       faceMats.forEach((m, mi) => {
-        m.map = arr ? (arr[mi] || arr[0]) : tex;
+        m.map = texs[mi];
         if (!applied) m.needsUpdate = true; // 首次 null→texture 需重编译 program
       });
+      curTexs = texs;
       applied = true;
     };
     const onSwap = (tex) => {
-      const prev = faceMats[0].map;
-      if (fade.begin(prev, tex)) return; // 过渡中：保持旧 map，由 shader 混合新图
-      applyTex(tex);
+      const texs = toFaceTexs(tex);
+      if (fade.begin(curTexs, texs)) return; // 过渡中：保持旧 map，由 shader 混合新图
+      applyTex(texs);
     };
     const playlist = new Playlist(pool, schedule, onSwap, phaseFor(item.id + suffixes[i], basePhase), fade);
 

@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { makeCanvas, canvasTexture } from "../textures.js";
 import { SHOP_NAMES, SHOP_SUBS } from "../../data/cityData.js";
 import { defaultContent, normalizeContent, DEFAULT_TEXT } from "./contentConfig.js";
-import { makeModel3D } from "./content3d.js";
+import { make3dContent, make3dPlaceholder } from "./content3d.js";
 
 /* ---------------- 广告大屏内容源 ----------------
  * 文字类（内置广告 / 滚动字幕 / 时钟）按屏比重新排版，字号按可用宽度收缩，不会裁切。
@@ -414,16 +414,24 @@ export function createContentPool(aspect = 1.75, rawContent = null, ctx = null) 
   const cfg = normalizeContent(rawContent) || defaultContent();
   const H = BASE_H;
   const W = Math.max(384, Math.round(H * aspect));
-  const pool = cfg.items.map((it) => {
+  // 平贴退化（d3.flat）：3D 屏也直接贴平面纹理，跳过离轴管线（实验台 flat 档同款）
+  const flat3d = !!(ctx && cfg.d3 && cfg.d3.flat);
+  const make2d = (it) => {
     switch (it.type) {
       case "text": return makeTicker(it, W, H);
       case "clock": return makeClock(it, W, H);
       case "image": return makeImage(it, W, H);
       case "video":
       case "stream": return makeVideo(it, W, H, aspect);
-      case "model3d": return makeModel3D(it, W, H, ctx);
+      case "model3d": return null; // 3D 原生内容，没有平面版
       default: return makeAd(it, W, H);
     }
+  };
+  const pool = cfg.items.map((it) => {
+    // 3D转角包柱屏且未平贴：全部内容源进离轴管线（实验台「内容源」全量迁移）
+    if (ctx && !flat3d) return make3dContent(it, W, H, aspect, ctx, cfg.d3, () => make2d(it));
+    if (it.type === "model3d") return make3dPlaceholder(it, W, H); // 非 3D 屏 / 平贴模式：占位
+    return make2d(it);
   });
   pool.cfg = cfg;
   pool.hasVideo = pool.some((c) => c.isVideo);

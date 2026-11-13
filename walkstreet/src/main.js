@@ -33,6 +33,8 @@ const loader = document.getElementById("loader");
 const ldFill = document.getElementById("ld-fill");
 const ldPct = document.getElementById("ld-pct");
 const ldStage = document.getElementById("ld-stage");
+const ldBusyHint = document.querySelector("#loader .ld-hint"); // 加载页右下角提示语
+const LD_HINT_DEFAULT = ldBusyHint ? ldBusyHint.textContent : "";
 const hudEl = document.getElementById("hud");
 const menuEl = document.getElementById("menu");
 const clickPlay = document.getElementById("click-to-play");
@@ -53,6 +55,26 @@ function setProgress(p, stage) {
   ldFill.style.width = Math.round(p * 100) + "%";
   ldPct.textContent = Math.round(p * 100) + "%";
   if (stage) ldStage.textContent = stage;
+  // 新一轮加载开始：清掉上一次失败留下的红色文案和「重试」提示
+  ldStage.style.color = "";
+  if (ldBusyHint) ldBusyHint.textContent = LD_HINT_DEFAULT;
+}
+
+/* ---------------- 启动 / 重建的容错提示 ----------------
+ * 城市构建、地图重建都是异步链路。以前抛错只进 window.__errs / console，
+ * 用户看到的是进度条停在某一格，分不清「还在加载」还是「已经失败」。
+ * 这里统一把异常显示到加载页：保留进度条、给出原因与可执行的下一步。
+ * 注意只处理启动链路；内容加载（GLB / 视频）失败由屏面提示板负责，不弹加载页。 */
+function showFatal(stage, err) {
+  const msg = String((err && (err.message || err.reason)) || err || "未知错误");
+  console.error("[walkstreet]", stage, err);
+  window.__errs.push(`${stage}: ${msg}`);
+  loader.classList.remove("hidden");
+  menuEl.classList.add("hidden");
+  hudEl.classList.add("hidden");
+  ldStage.textContent = `${stage}失败：${msg.slice(0, 140)}`; // 截断，避免长堆栈撑破加载页
+  ldStage.style.color = "#ff9b8a";
+  if (ldBusyHint) ldBusyHint.textContent = "请刷新页面重试；若持续失败请检查控制台 / 后台地址";
 }
 
 // 主菜单「选择地图」按钮上的当前地图名
@@ -158,28 +180,38 @@ async function rebuildWorld(stage, showMenu = true) {
   menuEl.classList.add("hidden");
   hudEl.classList.add("hidden");
   setProgress(0.12, stage || "正在加载地图…");
-  disposeWorld();
-  await new Promise((r) => setTimeout(r, 40));
-  const mapData = resolveActiveMap();
-  await buildWorld(mapData, getActiveMapId());
-  worldStale = false;
-  setProgress(1.0, "就绪");
-  await new Promise((r) => setTimeout(r, 200));
-  loader.classList.add("hidden");
-  updateMapButton();
-  if (showMenu) menuEl.classList.remove("hidden");
+  try {
+    disposeWorld();
+    await new Promise((r) => setTimeout(r, 40));
+    const mapData = resolveActiveMap();
+    await buildWorld(mapData, getActiveMapId());
+    worldStale = false;
+    setProgress(1.0, "就绪");
+    await new Promise((r) => setTimeout(r, 200));
+    loader.classList.add("hidden");
+    updateMapButton();
+    if (showMenu) menuEl.classList.remove("hidden");
+  } catch (err) {
+    // 重建失败时把原因留在加载页，不要静默吞掉后让调用方继续按「成功」往下走
+    showFatal(stage || "地图重建", err);
+  }
 }
 
 async function boot() {
   setProgress(0.08, "正在对齐街区坐标…");
-  const mapData = resolveActiveMap();
-  await buildWorld(mapData, getActiveMapId());
-  setProgress(1.0, "就绪");
-  await new Promise((r) => setTimeout(r, 250));
-  loader.classList.add("hidden");
-  updateMapButton();
-  menuEl.classList.remove("hidden");
-  engine.start();
+  try {
+    const mapData = resolveActiveMap();
+    await buildWorld(mapData, getActiveMapId());
+    setProgress(1.0, "就绪");
+    await new Promise((r) => setTimeout(r, 250));
+    loader.classList.add("hidden");
+    updateMapButton();
+    menuEl.classList.remove("hidden");
+    engine.start();
+  } catch (err) {
+    // 启动链路失败：菜单和 HUD 都还没就绪，加载页是唯一能告诉用户发生了什么的地方
+    showFatal("城市构建", err);
+  }
 }
 
 /* ---------------- UI wiring ---------------- */
@@ -448,7 +480,7 @@ engine.onUpdate((dt, time) => {
     w.city.update(dt, time, env.night, focus);
     w.traffic.update(dt, focus);
     w.peds.update(dt, focus);
-    w.billboards.update(dt, time, focus);
+    w.billboards.update(dt, time, focus, engine.camera); // camera = 3D 裸眼虚拟眼睛
   }
   if (started && w) {
     if (input.pressed("KeyM")) { bigOpen ? closeBigMap() : openBigMap(); }
