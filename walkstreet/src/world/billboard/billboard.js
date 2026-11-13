@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import { texture as tslTexture, uniform as tslUniform, materialColor, mix as tslMix } from "three/tsl";
+import { texture as tslTexture, uniform as tslUniform, mix as tslMix } from "three/tsl";
 import { buildBillboardGroup, normalizeSpec } from "./mounts.js";
 import { Playlist } from "./playlist.js";
 import { DEBUG_3D } from "./content3d.js";
@@ -35,26 +35,31 @@ function makeDebugFaceTex(i) {
  * 并经承载形式注册表（mounts.js）构建；没有记录就不建屏。
  */
 
-/* 共享 1×1 白色占位纹理：TSL 纹理节点首次编译时不能是空值 */
-let _whiteTex = null;
+/* 白色占位纹理：TSL 纹理节点首次编译时不能是空值。
+ * 注意必须每次新建：TextureNode 的 uniform hash = value.uuid，cur/nxt 若共用
+ * 同一张占位纹理会被合并成一个纹理绑定，交叉淡入就永远只有一张图在生效。 */
 function whiteTex() {
-  if (!_whiteTex) {
-    const c = document.createElement("canvas");
-    c.width = c.height = 2;
-    const x = c.getContext("2d");
-    x.fillStyle = "#fff";
-    x.fillRect(0, 0, 2, 2);
-    _whiteTex = new THREE.CanvasTexture(c);
-    _whiteTex.colorSpace = THREE.SRGBColorSpace;
-  }
-  return _whiteTex;
+  const c = document.createElement("canvas");
+  c.width = c.height = 2;
+  const x = c.getContext("2d");
+  x.fillStyle = "#fff";
+  x.fillRect(0, 0, 2, 2);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
 }
 
 /** 屏幕材质：TSL 节点混合（cur → next 按 uMix 交叉淡入），替代 WebGL 版
  *  的 onBeforeCompile GLSL 注入（WebGPU 不走 onBeforeCompile）。
- *  保留 MeshBasicMaterial 的 toneMapped:false / 色彩空间 / Bloom 行为。 */
+ *  保留 MeshBasicMaterial 的 toneMapped:false / 色彩空间 / Bloom 行为。
+ *
+ *  必须用 MeshBasicNodeMaterial：普通 MeshBasicMaterial 的 customProgramCacheKey()
+ *  只看 onBeforeCompile + 材质属性，两块参数相同的屏面材质会算出同一个 key，
+ *  WebGPU 的 NodeBuilderState 缓存因此复用同一份已编译节点图（连同 cur 纹理绑定），
+ *  导致 3D转角屏两面采样同一张 RT —— 画面变成分开的左右两块。
+ *  NodeMaterial 的 key 含 colorNode 节点图哈希，每块材质独立，绑定才各自生效。 */
 function screenMaterial() {
-  const m = new THREE.MeshBasicMaterial({
+  const m = new THREE.MeshBasicNodeMaterial({
     // 白色纯亮度会吃满夜景 Bloom（main.js 夜间 strength≈0.92）导致近景过曝
     color: 0xc4c4c4,
     toneMapped: false,
@@ -69,8 +74,10 @@ function screenMaterial() {
   const nxt = tslTexture(whiteTex());
   const uMix = tslUniform(0);
   m.userData.fadeTex = { cur, nxt, uMix };
-  const base = cur.rgb.mul(materialColor);
-  m.colorNode = tslMix(base, base.mul(nxt.rgb), uMix);
+  // 亮度系数直接取 material.color：不能用 materialColor 节点 —— 它内部会把
+  // material.map 一起采样，而 map 正是 cur 指向的那张图，画面会被平方压暗。
+  // 与 WebGL 版 onBeforeCompile 一致：mix(旧图, 新图, uMix) * 材质色。
+  m.colorNode = tslMix(cur.rgb, nxt.rgb, uMix).mul(tslUniform(m.color));
   return m;
 }
 

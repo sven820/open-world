@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { uniform, positionWorld, normalWorld, uv, mix, vec3 } from "three/tsl";
 import { makeCanvas } from "../textures.js";
 import { parseGLB } from "../../data/assetStore.js";
 
@@ -21,7 +22,8 @@ import { parseGLB } from "../../data/assetStore.js";
  *   2. 每块 3D 屏独占一个 layer（1~30），多块 3D 屏互不串扰；主相机默认只开 layer 0。
  *
  * 内容条目 type:"model3d"：
- *   url    GLB 模型地址（空 / "builtin://demo1" = 实验台 makeDemo() 同款内置 3D 演示1）
+ *   url    GLB 模型地址；空 / "builtin://demo1" = 实验台 makeDemo() 同款内置 3D 演示1；
+ *          "builtin://demo2" = 实验台 §6b 原版品牌广告（12 秒循环时间轴，自带深度，忽略通用 depth）
  *   depth  出屏深度（米，0~10）：contentRoot.position = VC + OUT·depth（同实验台滑杆）
  ---------------------------------------------------------------------- */
 
@@ -166,8 +168,9 @@ export function makeModel3D(it, W, H, ctx) {
 
   const depth = Math.min(10, Math.max(0, Number(it.depth) || 2.5));
   const url = String(it.url || "").trim();
-  const builtin = !url || url === "builtin://demo1";
-  let dead = false, failed = false, active = true;
+  const builtinDemo1 = !url || url === "builtin://demo1";
+  const builtinDemo2 = url === "builtin://demo2";
+  let dead = false, failed = false;
 
   /* —— 场地常量（实验台 §1 的世界坐标版） —— */
   const layer = allocLayer();
@@ -222,8 +225,8 @@ export function makeModel3D(it, W, H, ctx) {
   adSun.target.layers.set(layer);
   scene.add(adSun, adSun.target);
 
-  /* —— 内容：实验台 makeDemo() 逐字复刻，或 GLB 模型（实验台 parseGLB 同款归一化） —— */
-  let demoKnot = null, mixer = null, loadBoard = null, disposeModel = null;
+  /* —— 内容：实验台 makeDemo() 逐字复刻，或 3D 演示 2（实验台 §6b），或 GLB 模型 —— */
+  let demoKnot = null, mixer = null, loadBoard = null, disposeModel = null, demo2Tick = null;
 
   const showBoard = (line) => {
     if (loadBoard) { contentRoot.remove(loadBoard); disposeTree(loadBoard); }
@@ -240,7 +243,168 @@ export function makeModel3D(it, W, H, ctx) {
     showBoard(line);
   };
 
-  if (builtin) {
+  if (builtinDemo2) {
+    /* —— 3D 演示 2：实验台 §6b 原版品牌广告（461-600 行）逐字复刻 ——
+     * 12 秒循环时间轴（0-2 汇聚 / 2-6 飞近 / 6-10 破屏 / 10-12 回收），自带深度。
+     * 仅有两处适配（不改变效果）：
+     *   1. GLSL ShaderMaterial → TSL 节点材质（WebGPU 后端编译不了 GLSL，environment.js 同款处理）；
+     *   2. 实验台 Points 粒子 → 同 seed 的实例化小球（WebGPU 后端 Points 只有 1px）。
+     * 隧道水平方向用屏面实际方向替代实验台固定对角线 (.7071,0,-.7071)。 */
+    const s = Math.min(faceH / 8, 2.5);   // 实验台按 12×8 屏设计；按实际屏高等比折算（同 demo1）
+    const RIGHT = _va.copy(faces[0].pb).sub(faces[0].pa).normalize().clone(); // 屏面水平方向
+    const U2 = {
+      eye: uniform(new THREE.Vector3()),
+      time: uniform(0),
+      alpha: uniform(1),
+    };
+    // 金属罐体（metalVS/metalFS 逐式 TSL 化）
+    const N = normalWorld.normalize();
+    const V = U2.eye.sub(positionWorld).normalize();
+    const L = vec3(0.45, 0.85, 0.65).normalize();
+    const d = N.dot(L).max(0);
+    const rim = V.dot(N).max(0).oneMinus().pow(2.1);
+    const band = uv().y.mul(26).add(U2.time.mul(0.9)).sin().mul(0.5).add(0.5);
+    const base = mix(vec3(0.12, 0.16, 0.22), vec3(0.88, 0.95, 1.0), d.mul(0.66).add(0.34)).add(band.mul(0.045));
+    const metalMat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, transparent: true, fog: false });
+    metalMat.toneMapped = false;   // 原 ShaderMaterial 输出不经 tone mapping
+    metalMat.colorNode = base.add(rim.mul(vec3(0.0, 0.82, 1.0).mul(1.9))).add(rim.mul(rim).mul(vec3(1.0, 0.14, 0.58).mul(0.85)));
+    metalMat.opacityNode = U2.alpha;
+    const can = new THREE.Mesh(new THREE.CylinderGeometry(2.8, 2.8, 7.4, 48, 1, false), metalMat);
+    // 罐体标签（labelTex() 逐字）
+    const q = makeCanvas(1024, 512), x = q.getContext("2d");
+    const g = x.createLinearGradient(0, 0, 1024, 512);
+    g.addColorStop(0, "#062033"); g.addColorStop(0.5, "#0d4a63"); g.addColorStop(1, "#1d0b33");
+    x.fillStyle = g; x.fillRect(0, 0, 1024, 512);
+    x.strokeStyle = "rgba(53,232,255,.65)"; x.lineWidth = 14;
+    for (let i = -512; i < 1536; i += 96) { x.beginPath(); x.moveTo(i, 512); x.lineTo(i + 300, 0); x.stroke(); }
+    x.fillStyle = "rgba(4,12,22,.82)"; x.fillRect(90, 150, 844, 212);
+    x.fillStyle = "#eafcff"; x.font = "bold 150px Arial"; x.textAlign = "center"; x.textBaseline = "middle";
+    x.fillText("PULSE", 512, 256);
+    x.fillStyle = "#35e8ff"; x.font = "bold 30px Arial"; x.fillText("E N E R G Y   /   3 D   C I T Y", 512, 420);
+    const labelTex = new THREE.CanvasTexture(q);
+    labelTex.colorSpace = THREE.SRGBColorSpace;
+    const label = new THREE.Mesh(
+      new THREE.CylinderGeometry(2.815, 2.815, 4.5, 48, 1, true),
+      new THREE.MeshBasicMaterial({ map: labelTex, side: THREE.DoubleSide, transparent: true, fog: false }),
+    );
+    const demo2Root = new THREE.Group();
+    demo2Root.add(can, label);
+    // 上下金属沿口
+    const rimMat = new THREE.MeshBasicMaterial({ color: 0xbfe6f2, fog: false });
+    for (const y of [-3.75, 3.75]) {
+      const r = new THREE.Mesh(new THREE.TorusGeometry(2.8, 0.12, 8, 48), rimMat);
+      r.rotation.x = Math.PI / 2; r.position.y = y; demo2Root.add(r);
+    }
+    // 三道轨道光环
+    const rings = [];
+    [[5.2, 0x35e8ff], [7.0, 0xff3d9a], [8.8, 0x3aa0ff]].forEach(([rr, col], i) => {
+      const m = new THREE.MeshBasicMaterial({
+        color: col, transparent: true, opacity: 0.95,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+      });
+      const o = new THREE.Mesh(new THREE.TorusGeometry(rr, 0.12, 6, 80), m);
+      o.rotation.x = Math.PI / 2 + (i - 1) * 0.42;
+      demo2Root.add(o); rings.push({ o, m, i });
+    });
+    // 水花（实验台 InstancedMesh 同款）
+    const DN = 140;
+    const dropMat = new THREE.MeshBasicMaterial({
+      color: 0x8ff4ff, transparent: true, opacity: 1.0,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+    });
+    const drops = new THREE.InstancedMesh(new THREE.SphereGeometry(0.19, 7, 5), dropMat, DN);
+    const dropSeed = [];
+    for (let di = 0; di < DN; di++) {
+      dropSeed.push({
+        a: di * 2.39996, rad: 2.4 + Math.random() * 7.4,
+        y: (Math.random() - 0.5) * 9, vy: 0.4 + Math.random() * 1.6, s: 0.5 + Math.random() * 1.8,
+      });
+    }
+    demo2Root.add(drops);
+    // 环境粒子（实验台 THREE.Points → 实例化小球，同 seed 同运动）
+    const PN = 700;
+    const sparkMat = new THREE.MeshBasicMaterial({
+      color: 0x35e8ff, transparent: true, opacity: 0.95,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+    });
+    const sparks = new THREE.InstancedMesh(new THREE.SphereGeometry(0.16, 6, 4), sparkMat, PN);
+    const pseed = [];
+    for (let pp = 0; pp < PN; pp++) {
+      pseed.push({ a: Math.random() * Math.PI * 2, r: 3 + Math.random() * 13, y: (Math.random() - 0.5) * 14, s: 0.4 + Math.random() * 1.6 });
+    }
+    demo2Root.add(sparks);
+    demo2Root.scale.setScalar(s);
+    scene.add(demo2Root);
+    setLayer(demo2Root, layer);   // 必须在所有子对象添加完毕后再设置图层（实验台 548 行同款）
+    // 透视隧道固定在世界空间，不随罐体位移（实验台 533-547 行；dep/tscale 同乘 s 折算）
+    const tunnelMat = new THREE.LineBasicMaterial({ color: 0x1a7f9e, transparent: true, opacity: 0.28, fog: false });
+    const tp = [];
+    for (let ti = 0; ti < 9; ti++) {
+      const dep = (-18 + ti * 3.2) * s, tscale = (5 + ti * 1.35) * s;
+      const tc = VC.clone().addScaledVector(OUT, dep);
+      const dx = RIGHT.clone().multiplyScalar(tscale), dy = new THREE.Vector3(0, tscale, 0);
+      const c1 = tc.clone().sub(dx).sub(dy), c2 = tc.clone().add(dx).sub(dy),
+        c3 = tc.clone().add(dx).add(dy), c4 = tc.clone().sub(dx).add(dy);
+      for (const [p1, p2] of [[c1, c2], [c2, c3], [c3, c4], [c4, c1]]) {
+        tp.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
+      }
+    }
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute("position", new THREE.Float32BufferAttribute(tp, 3));
+    const tunnel = new THREE.LineSegments(tg, tunnelMat);
+    scene.add(tunnel);
+    setLayer(tunnel, layer);
+    disposeModel = () => {
+      scene.remove(demo2Root, tunnel);
+      disposeTree(demo2Root);
+      tunnel.geometry.dispose(); tunnelMat.dispose();
+    };
+    // 实验台 updateDemo2()（566-600 行）逐字复刻；t = 12 秒循环时间轴
+    const dummy = new THREE.Object3D();
+    const clamp01 = (v) => Math.min(1, Math.max(0, v));
+    const lerp = (a, b, k) => a + (b - a) * k;
+    demo2Tick = (t) => {
+      const depth2 = t < 2 ? lerp(-15, -9, t / 2)
+        : t < 6 ? lerp(-9, 0.5, (t - 2) / 4)
+        : t < 10 ? lerp(0.5, 4.6, (t - 6) / 4)
+        : lerp(4.6, -15, (t - 10) / 2);
+      demo2Root.position.copy(VC).addScaledVector(OUT, depth2 * s);
+      const appear = clamp01(t / 1.2) * (t > 10.6 ? clamp01((12 - t) / 1.4) : 1);
+      U2.alpha.value = appear;
+      dropMat.opacity = appear;
+      sparkMat.opacity = 0.95 * appear;
+      tunnelMat.opacity = 0.42 * appear;
+      can.rotation.y = t * 0.62; label.rotation.y = can.rotation.y;
+      can.rotation.z = Math.sin(t * 0.5) * 0.12; label.rotation.z = can.rotation.z;
+      demo2Root.rotation.y = Math.sin(t * 0.35) * 0.10;
+      rings.forEach((o, i) => {
+        o.o.rotation.z = t * (0.35 + i * 0.22) * (i % 2 ? -1 : 1);
+        o.o.rotation.x = Math.PI / 2 + (i - 1) * 0.42 + Math.sin(t * 0.6 + i) * 0.16;
+        o.m.opacity = 0.95 * appear * (0.6 + 0.4 * Math.sin(t * 1.1 + i));
+      });
+      const burst = clamp01((t - 3) / 4) * (t > 10 ? clamp01((12 - t) / 2) : 1);
+      for (let i = 0; i < DN; i++) {
+        const dd = dropSeed[i], a = dd.a + t * 0.55 * dd.vy, r = dd.rad * (0.6 + burst * 1.15);
+        dummy.position.set(Math.cos(a) * r, dd.y + Math.sin(t * 1.3 + i) * 0.5 + burst * dd.vy * 1.8, Math.sin(a) * r);
+        dummy.scale.setScalar(dd.s * appear * (0.5 + burst * 0.8));
+        dummy.updateMatrix(); drops.setMatrixAt(i, dummy.matrix);
+      }
+      drops.instanceMatrix.needsUpdate = true;
+      for (let j = 0; j < PN; j++) {
+        const p = pseed[j], a2 = p.a + t * 0.12 * p.s;
+        dummy.position.set(
+          Math.cos(a2) * p.r * (1 - burst * 0.25),
+          p.y + Math.sin(t * 0.8 + j) * 0.35,
+          Math.sin(a2) * p.r * (1 - burst * 0.25),
+        );
+        dummy.scale.setScalar(appear);
+        dummy.updateMatrix(); sparks.setMatrixAt(j, dummy.matrix);
+      }
+      sparks.instanceMatrix.needsUpdate = true;
+      U2.time.value = t;
+      U2.eye.value.copy(_eye);
+    };
+  } else if (builtinDemo1) {
     /* 实验台 makeDemo()（667-680 行）逐字：纽结 + 三道轨道光环 */
     const g = new THREE.Group();
     demoKnot = new THREE.Mesh(
@@ -315,11 +479,16 @@ export function makeModel3D(it, W, H, ctx) {
       contentRoot.position.copy(VC).addScaledVector(OUT, depth);
       contentRoot.rotation.y = Math.sin(time * 0.35) * 0.12;
       if (demoKnot) demoKnot.rotation.y = time * 0.55;
-      if (dead || failed || !active) return;
+      // 不提供 setActive：池级 setActive 是「视频解码并发配额」开关（画面设置可调），
+      // 混合节目单里只要带一个视频条目，3D 池排到配额之外就会被整池停用，
+      // RT 不再重绘、屏面定格。3D 内容本就不解码视频，交给管理器的近距调度即可
+      // （离得远时 update 根本不会被调用）。failed 时仍继续渲染，让提示板能上屏。
+      if (dead) return;
       // 虚拟眼睛 = 观看者真实位置（实验台 state.track ? camera.position : HERO 的"跟随"档）
       if (DEBUG_3D === 3) _eye.copy(VC).addScaledVector(OUT, 20).setY(VC.y * 0.4);
       else if (focus && Number.isFinite(focus.x)) _eye.set(focus.x, EYE_H, focus.z);
       else _eye.copy(VC).addScaledVector(OUT, 20).setY(VC.y * 0.4);
+      if (demo2Tick) demo2Tick(time % 12);   // 3D 演示 2：12 秒循环时间轴（实验台 state.time=(state.time+dt)%12 同款）
       // 992-1000 行同款：临时替换背景/雾 → 双路离轴渲染 → 还原
       const savedBg = scene.background, savedFog = scene.fog;
       scene.background = AD_BG; scene.fog = null;
@@ -358,7 +527,6 @@ export function makeModel3D(it, W, H, ctx) {
       renderer.shadowMap.autoUpdate = savedShadow;
       scene.background = savedBg; scene.fog = savedFog;
     },
-    setActive(on) { active = !!on; },
     dispose() {
       dead = true;
       clearBoard();
