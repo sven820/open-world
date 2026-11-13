@@ -148,7 +148,7 @@ export function makeModel3D(it, W, H, ctx) {
   const depth = Math.min(10, Math.max(0, Number(it.depth) || 2.5));
   const url = String(it.url || "").trim();
   const builtin = !url || url === "builtin://demo1";
-  let dead = false, failed = false, active = true;
+  let dead = false, failed = false;
 
   /* —— 场地常量（实验台 §1 的世界坐标版） —— */
   const layer = allocLayer();
@@ -292,7 +292,11 @@ export function makeModel3D(it, W, H, ctx) {
       contentRoot.position.copy(VC).addScaledVector(OUT, depth);
       contentRoot.rotation.y = Math.sin(time * 0.35) * 0.12;
       if (demoKnot) demoKnot.rotation.y = time * 0.55;
-      if (dead || failed || !active) return;
+      // 不提供 setActive：池级 setActive 是「视频解码并发配额」开关（画面设置可调），
+      // 混合节目单里只要带一个视频条目，3D 池排到配额之外就会被整池停用，
+      // RT 不再重绘、屏面定格。3D 内容本就不解码视频，交给管理器的近距调度即可
+      // （离得远时 update 根本不会被调用）。failed 时仍继续渲染，让提示板能上屏。
+      if (dead) return;
       // 虚拟眼睛 = 观看者真实位置（实验台 state.track ? camera.position : HERO 的"跟随"档）
       if (focus && Number.isFinite(focus.x)) _eye.set(focus.x, EYE_H, focus.z);
       else _eye.copy(VC).addScaledVector(OUT, 20).setY(VC.y * 0.4);
@@ -313,7 +317,6 @@ export function makeModel3D(it, W, H, ctx) {
       renderer.shadowMap.autoUpdate = savedShadow;
       scene.background = savedBg; scene.fog = savedFog;
     },
-    setActive(on) { active = !!on; },
     dispose() {
       dead = true;
       clearBoard();

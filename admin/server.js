@@ -49,6 +49,7 @@ function defaultState() {
       { id: "m-video-ext", name: "示例视频（外链 · 需联网）", type: "video", url: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4", createdAt: now },
       { id: "m-live-ext", name: "示例直播流（外链 · 需联网）", type: "stream", url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", createdAt: now },
       { id: "m-3d-demo1", name: "3D演示1（内置环形装置）", type: "model3d", url: "builtin://demo1", createdAt: now },
+      { id: "m-3d-demo2", name: "3D演示2（品牌广告 · 12秒）", type: "model3d", url: "builtin://demo2", createdAt: now },
     ],
     playlists: [
       {
@@ -108,6 +109,10 @@ function ensureBuiltin(state) {
   if (!Array.isArray(state.media)) state.media = [];
   if (!state.media.some((m) => m.id === "m-3d-demo1")) {
     state.media.push({ id: "m-3d-demo1", name: "3D演示1（内置环形装置）", type: "model3d", url: "builtin://demo1", createdAt: now });
+    changed = true;
+  }
+  if (!state.media.some((m) => m.id === "m-3d-demo2")) {
+    state.media.push({ id: "m-3d-demo2", name: "3D演示2（品牌广告 · 12秒）", type: "model3d", url: "builtin://demo2", createdAt: now });
     changed = true;
   }
   if (!Array.isArray(state.playlists)) state.playlists = [];
@@ -367,7 +372,7 @@ async function handleApi(req, res, u) {
 
   // 素材库：新增（URL 或 base64 上传）
   if (p === "/api/media" && method === "POST") {
-    const type = ["image", "video", "stream"].includes(body.type) ? body.type : "image";
+    const type = ["image", "video", "stream", "model3d"].includes(body.type) ? body.type : "image";
     let url = String(body.url || "").trim();
     if (body.dataUrl && /^data:([^;]+);base64,/.test(body.dataUrl)) {
       const mime = /^data:([^;]+);base64,/.exec(body.dataUrl)[1];

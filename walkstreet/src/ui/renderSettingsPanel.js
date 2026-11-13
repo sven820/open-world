@@ -34,6 +34,13 @@ const SCHEMA = [
     ],
   },
   {
+    group: "广告大屏",
+    items: [
+      { key: "billboardRadius", label: "屏幕激活半径", hint: "超出半径的屏完全定格（不轮播不重绘）；调大让更远的屏恢复更新，也加大解码竞争", type: "range", min: 50, max: 1200, step: 10, fmt: (v) => `${v} m` },
+      { key: "videoDecode", label: "视频解码并发", hint: "半径内同时解码的视频内容池上限；0 = 全部暂停，调大更流畅但更耗 CPU / 带宽（直播流尤其）", type: "range", min: 0, max: 8, step: 1, fmt: (v) => (v === 0 ? "全部暂停" : `${v} 路`) },
+    ],
+  },
+  {
     group: "界面",
     items: [
       { key: "hudFps", label: "HUD 刷新率", hint: "小地图 / 仪表 / 时钟的重绘频率", type: "range", min: 5, max: 30, step: 1, fmt: (v) => `${v} Hz` },

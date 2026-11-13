@@ -3,6 +3,7 @@ import { createContentPool, disposeContentPool } from "./contentSource.js";
 import { buildPlacedBillboard, phaseFor } from "./billboard.js";
 import { normalizeSpec, corner3dWorldFaces } from "./mounts.js";
 import { defaultContent, normalizeContent, contentKey, scheduleFrom } from "./contentConfig.js";
+import { getRenderSettings } from "../../config/renderSettings.js";
 
 /* ---------------- 广告大屏管理器 ----------------
  * 唯一来源：编辑器手动放置（map.objects 里 type==="billboard"）。
@@ -13,13 +14,13 @@ import { defaultContent, normalizeContent, contentKey, scheduleFrom } from "./co
  *
  * 性能调度：
  *  - 内容池按 (屏比, 配置哈希) 缓存，相同配置的屏共享同一视频元素与纹理；
- *  - 全局最多 MAX_VIDEO_DECODE 路同时解码，按玩家距离优先，其余 video.pause()；
- *  - 离开 ACTIVE_RADIUS 的屏暂停轮播/重绘/解码；
+ *  - 屏幕轮播/重绘/解码只在激活半径内进行（画面设置 billboardRadius，默认 300m），
+ *    超出半径的屏零成本定格；
+ *  - 半径内再按视频解码并发（画面设置 videoDecode，默认 2）以玩家距离优先放行，
+ *    其余 video.pause()；
  *  - 音频策略：off 全静音（默认） / nearest 仅最近一块屏出声 / on 全部出声。
  */
 
-const ACTIVE_RADIUS = 300;   // 屏幕轮播/重绘/视频解码的激活半径（米）
-const MAX_VIDEO_DECODE = 2;  // 全局同时解码的视频路数上限
 const ASPECT_STEP = 0.05;
 
 export class BillboardManager {
@@ -194,9 +195,11 @@ export class BillboardManager {
     return { applied, changed, screens: this.screens.length };
   }
 
-  /** 每帧更新：轮播 / 动画 / 视频并发调度 / 音频策略 */
+  /** 每帧更新：轮播 / 动画 / 视频并发调度 / 音频策略（半径与解码路数都是画面设置热调） */
   update(dt, time, focus) {
     if (!this.screens.length) return;
+    // 屏幕激活半径（画面设置，每帧读取，改完立即生效）
+    const activeRadius = Math.max(1, Math.round(getRenderSettings().billboardRadius ?? 300));
     for (const pool of this._pools.values()) {
       pool._wanted = false;
       pool._dist = Infinity;
@@ -204,7 +207,7 @@ export class BillboardManager {
     for (const s of this.screens) {
       const dx = s.x - focus.x, dz = s.z - focus.z;
       const d2 = dx * dx + dz * dz;
-      const near = d2 < ACTIVE_RADIUS * ACTIVE_RADIUS;
+      const near = d2 < activeRadius * activeRadius;
       if (near && !s._near) s.playlist.wake();
       s._near = near;
       if (!near || !s.pool) continue;
@@ -215,11 +218,13 @@ export class BillboardManager {
       for (const item of s.pool) if (item.kind === "animated") item.update(dt, time, focus);
     }
 
-    // 视频解码并发上限：按最近使用屏的距离排序，只放行前 MAX_VIDEO_DECODE 路
+    // 视频解码并发上限（画面设置热调，每帧读取，改完立即生效）：
+    // 按最近使用屏的距离排序，只放行前 videoDecode 路
+    const maxDecode = Math.max(0, Math.round(getRenderSettings().videoDecode ?? 2));
     const videoPools = [...this._pools.values()].filter((p) => p.hasVideo);
     videoPools.sort((a, b) => a._dist - b._dist);
     videoPools.forEach((p, i) => {
-      const on = p._wanted && i < MAX_VIDEO_DECODE;
+      const on = p._wanted && i < maxDecode;
       if (p._active !== on) { p.setActive(on); p._active = on; }
     });
 

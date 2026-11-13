@@ -17,7 +17,7 @@ const TYPES = {
   image: { label: "图片", media: true, hint: "http(s) 或 /media/ 地址" },
   video: { label: "视频", media: true, hint: "mp4 / webm 直链，远离屏幕自动暂停解码" },
   stream: { label: "直播流", media: true, hint: "HLS(m3u8)，游戏端 hls.js 低延迟播放" },
-  model3d: { label: "3D裸眼模型", media: true, hint: "GLB 经离轴投影呈现 3D 裸眼，仅 3D转角包柱屏生效；URL 填 builtin://demo1 或留空 = 内置 3D 演示1" },
+  model3d: { label: "3D裸眼模型", media: true, hint: "GLB 经离轴投影呈现 3D 裸眼，仅 3D转角包柱屏生效；URL 填 builtin://demo1（内置 3D 演示1）、builtin://demo2（3D 演示2 · 12秒品牌广告）或 GLB 地址，留空 = 内置 3D 演示1" },
 };
 const FITS = { auto: "自适应（完整显示）", contain: "完整显示（留黑边）", cover: "铺满裁切", stretch: "拉伸铺满" };
 const AUDIOS = { off: "静音（推荐）", nearest: "仅最近一块屏出声", on: "全部出声" };
@@ -235,7 +235,7 @@ function viewMedia() {
         <div class="spacer"></div>
         <select id="m-filter" class="inp" style="width:140px">
           <option value="all">全部类型</option>
-          <option value="image">图片</option><option value="video">视频</option><option value="stream">直播流</option>
+          <option value="image">图片</option><option value="video">视频</option><option value="stream">直播流</option><option value="model3d">3D裸眼模型</option>
         </select>
         <input id="m-search" class="inp" placeholder="搜索名称或地址" style="width:220px" />
         <button id="m-add" class="btn primary">＋ 新增素材</button>
@@ -306,8 +306,8 @@ function openMediaForm() {
     <div class="modal-head"><h3>新增素材</h3><button class="btn sm" data-x>✕</button></div>
     <div class="form-grid">
       <label class="field"><span>素材名称</span><input id="f-name" class="inp" placeholder="例如：秋季新品主视觉" /></label>
-      <label class="field"><span>类型</span><select id="f-type" class="inp">${opts({ image: "图片", video: "视频", stream: "直播流" }, "image")}</select></label>
-      <label class="field full"><span>外链 URL（http(s)，或以 /media/ 开头的本地素材）</span><input id="f-url" class="inp" placeholder="https://.../ad.png" /></label>
+      <label class="field"><span>类型</span><select id="f-type" class="inp">${opts({ image: "图片", video: "视频", stream: "直播流", model3d: "3D裸眼模型" }, "image")}</select></label>
+      <label class="field full"><span>外链 URL（http(s)、/media/ 本地素材；3D裸眼模型填 builtin://demo1 / demo2 或 GLB 地址）</span><input id="f-url" class="inp" placeholder="https://.../ad.png 或 builtin://demo1 / demo2" /></label>
       <label class="field full"><span>或上传本地文件（图片 / mp4 / webm，≤32MB）</span><input id="f-file" type="file" class="inp" accept="image/*,video/mp4,video/webm" /></label>
     </div>
     <p class="desc" style="margin:12px 0 0">上传优先于 URL。视频与直播建议同时准备一张备用海报，节目单里可配置「备用海报」实现失败降级。</p>
@@ -376,7 +376,7 @@ function itemRow(it, i, total) {
     fields = `<label class="field"><span>广告随机种子</span><input type="number" ${f("seed")} value="${esc(it.seed ?? 1)}" /></label>`;
   } else if (it.type === "model3d") {
     fields = `
-      <label class="field full"><span>模型地址 GLB URL（builtin://demo1 或留空 = 内置 3D 演示1）</span><input ${f("url")} list="media-urls" value="${esc(it.url || "")}" placeholder="builtin://demo1 / https://...glb" /></label>
+      <label class="field full"><span>模型地址 GLB URL（builtin://demo1 = 3D 演示1 · builtin://demo2 = 3D 演示2 · 留空 = 演示1）</span><input ${f("url")} list="media-urls" value="${esc(it.url || "")}" placeholder="builtin://demo1 / builtin://demo2 / https://...glb" /></label>
       <label class="field"><span>出屏深度（米）</span><input type="number" min="0" max="10" step="0.5" ${f("depth")} value="${esc(it.depth ?? 2.5)}" /></label>`;
   } else {
     fields = `

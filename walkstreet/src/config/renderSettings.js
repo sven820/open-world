@@ -1,5 +1,6 @@
 // 渲染性能配置（单一数据源）
-// 只放"影响渲染负载"的参数：分辨率、视距、阴影、泛光、行人/车流规模、帧率上限。
+// 只放"影响渲染负载"的参数：分辨率、视距、阴影、泛光、行人/车流规模、帧率上限、
+// 广告大屏的激活半径与视频解码并发。
 // 世界生成（路网/建筑）不属于这里，改它需要重建地图。
 // 用户可整体切档位，也可单独拖动某一项；改动即时生效并写入 localStorage。
 
@@ -27,6 +28,8 @@ export const PRESETS = {
     traffic: 14,
     trafficDistance: 140,
     hudFps: 8,
+    videoDecode: 1,
+    billboardRadius: 200,
   },
   medium: {
     label: "均衡",
@@ -43,6 +46,8 @@ export const PRESETS = {
     traffic: 28,
     trafficDistance: 200,
     hudFps: 12,
+    videoDecode: 2,
+    billboardRadius: 300,
   },
   high: {
     label: "高清",
@@ -59,6 +64,8 @@ export const PRESETS = {
     traffic: 40,
     trafficDistance: 280,
     hudFps: 15,
+    videoDecode: 2,
+    billboardRadius: 300,
   },
   ultra: {
     label: "极致",
@@ -75,6 +82,8 @@ export const PRESETS = {
     traffic: 54,
     trafficDistance: 420,
     hudFps: 20,
+    videoDecode: 4,
+    billboardRadius: 500,
   },
 };
 
@@ -91,7 +100,12 @@ const LIMITS = {
   trafficDistance: [60, 800],
   fpsCap: [0, 144],
   hudFps: [5, 30],
+  videoDecode: [0, 8],
+  billboardRadius: [50, 1200],
 };
+
+// 整数项：滑杆步长 1，外部写入 / localStorage 脏值统一取整
+const INTEGER_KEYS = new Set(["videoDecode", "billboardRadius"]);
 
 const presetValues = (name) => {
   const { label, hint, ...rest } = PRESETS[name];
@@ -123,7 +137,7 @@ function sanitize(raw) {
     const def = DEFAULT_SETTINGS[key];
     if (typeof def === "number") {
       const n = Number(raw[key]);
-      if (Number.isFinite(n)) out[key] = clamp(key, n);
+      if (Number.isFinite(n)) out[key] = INTEGER_KEYS.has(key) ? Math.round(clamp(key, n)) : clamp(key, n);
     } else if (typeof def === "boolean") {
       out[key] = !!raw[key];
     } else if (key === "preset") {
