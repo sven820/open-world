@@ -50,11 +50,18 @@ SHOTS = [
     ("19_demo2_西侧偏角",    "src=demo2&clean=1&v=west&time=8.2",     True),
     ("20_demo2_实时追踪",    "src=demo2&clean=1&v=south&track=1&time=8.2", True),
     ("21_demo2_平贴对照",    "src=demo2&clean=1&flat=1",              True),
+    # 整屏平面：两面屏展开成一张 24 × 8 m 画布
+    ("26_整屏平面_文字_带界面", "src=text&plane=1",                     False),
+    ("27_整屏平面_文字_最佳视点", "src=text&plane=1&clean=1",           True),
+    ("28_整屏平面_图片_偏角",   "src=image&plane=1&clean=1&az=-2.05&el=0.02&dist=36", True),
+    ("29_整屏平面_图片_俯瞰",   "src=image&plane=1&clean=1&v=aerial",   True),
+    ("30_整屏平面_视频",        "src=video&plane=1&clean=1",            True),
 ]
 
 # 对最容易出运行时问题的几种源做 DOM 体检
 for check in ("src=glb", "src=video", "src=hls", "src=demo2",
-              "src=calib", "src=demo2&t=day&time=8.2"):
+              "src=calib", "src=demo2&t=day&time=8.2",
+              "src=text&plane=1", "src=image&plane=1&v=south"):
     dom = subprocess.run(
         [CHROME] + ARGS + ["--dump-dom", URL + "?" + check],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=180,

@@ -17,32 +17,31 @@ html,body{margin:0;height:100%;overflow:hidden;background:#070d18;color:#e8f4fa;
 #brand h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.5px;color:#eafcff}
 #brand h1 em{font-style:normal;color:#35e8ff}
 #brand p{margin:4px 0 0;font-size:11px;color:#8fb2c4;line-height:1.5}
-#ctrl{left:18px;top:88px;width:320px;max-height:calc(100vh - 104px);padding:12px 14px;overflow-y:auto}
+#ctrl{left:18px;top:82px;width:320px;max-height:calc(100vh - 96px);padding:11px 14px;overflow-y:auto}
 #ctrl::-webkit-scrollbar{width:6px}
 #ctrl::-webkit-scrollbar-thumb{background:rgba(90,190,220,.3);border-radius:3px}
 #meta{right:18px;top:18px;width:258px;padding:13px 15px}
 #tip{bottom:14px;left:50%;transform:translateX(-50%);font-size:11px;color:#a9c8d8;
   padding:8px 16px;white-space:nowrap}
-h3{margin:10px 0 6px;font-size:12px;font-weight:600;color:#7fd8ee;letter-spacing:.4px}
+h3{margin:8px 0 5px;font-size:12px;font-weight:600;color:#7fd8ee;letter-spacing:.4px}
 h3:first-child{margin-top:0}
 .sub{font-size:11px;color:#8fb2c4;line-height:1.5;margin:0 0 7px}
-.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:8px}
+.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:6px}
 .tabs button,.views button,.btnrow button,.mini{padding:6px 3px;font-size:11px;color:#a9c8d8;cursor:pointer;
   background:rgba(255,255,255,.045);border:1px solid rgba(90,190,220,.18);border-radius:7px;
   font-family:inherit;transition:.15s}
 .tabs button:hover,.views button:hover,.btnrow button:hover,.mini:hover{border-color:rgba(90,190,220,.5);color:#eafcff}
 .tabs button.on,.views button.on,.btnrow button.on{background:rgba(53,232,255,.16);border-color:#35e8ff;color:#eafcff}
-.btnrow button.act,.mini.act{background:rgba(255,61,154,.13);border-color:rgba(255,61,154,.5);color:#ffd7e8}
-.grp{margin-top:9px;padding-top:8px;border-top:1px dashed rgba(90,190,220,.14)}
-.lbl{font-size:11px;font-weight:600;color:#7fd8ee;letter-spacing:.4px;margin-bottom:7px}
+.grp{margin-top:7px;padding-top:6px;border-top:1px dashed rgba(90,190,220,.14)}
+.lbl{font-size:11px;font-weight:600;color:#7fd8ee;letter-spacing:.4px;margin-bottom:5px}
 .btnrow{display:grid;gap:5px}
 .btnrow.g4{grid-template-columns:repeat(4,1fr)}
 .btnrow.g3{grid-template-columns:repeat(3,1fr)}
 .btnrow.g2{grid-template-columns:repeat(2,1fr)}
 #rangeTime{width:100%;accent-color:#35e8ff;height:5px;margin:2px 0 0}
-.note{font-size:10px;color:#8fb2c4;line-height:1.65;margin:8px 0 0}
+.note{font-size:10px;color:#8fb2c4;line-height:1.5;margin:6px 0 0}
 .note b{color:#35e8ff;font-weight:600}
-.pane{display:none;padding:7px 9px;background:rgba(255,255,255,.035);border-radius:8px;
+.pane{display:none;padding:6px 8px;background:rgba(255,255,255,.035);border-radius:8px;
   border:1px solid rgba(90,190,220,.12)}
 .pane.on{display:block}
 .row{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:11px;color:#b9d6e4}
@@ -54,7 +53,7 @@ h3:first-child{margin-top:0}
 .row textarea{resize:vertical;min-height:52px;line-height:1.4}
 .row input[type=color]{padding:2px;height:26px}
 .val{flex:0 0 38px;text-align:right;color:#35e8ff;font-family:Consolas,monospace}
-.chk{display:flex;align-items:center;gap:7px;margin:5px 0;font-size:11px;color:#b9d6e4;cursor:pointer}
+.chk{display:flex;align-items:center;gap:7px;margin:4px 0;font-size:11px;color:#b9d6e4;cursor:pointer}
 .chk input,.row input[type=checkbox]{appearance:none;-webkit-appearance:none;
   width:13px;height:13px;flex:0 0 13px;margin:0;position:relative;cursor:pointer;
   border:1px solid rgba(90,190,220,.5);border-radius:3px;background:rgba(0,0,0,.35)}
@@ -64,6 +63,12 @@ h3:first-child{margin-top:0}
   border:solid #06121e;border-width:0 2px 2px 0;transform:rotate(42deg)}
 .views{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:6px}
 .mini{width:100%;margin-top:5px}
+.opt-plane{margin:9px 0 10px;padding:8px 9px;background:rgba(53,232,255,.055);
+  border:1px solid rgba(53,232,255,.24);border-radius:8px}
+.opt-plane .chk{margin:0 0 5px;color:#eafcff}
+.opt-plane .sub{font-size:10px;line-height:1.45;margin:0}
+.opt-plane.unavailable{background:rgba(255,255,255,.03);border-color:rgba(90,190,220,.14)}
+#commonParams.dis{opacity:.34;pointer-events:none;filter:grayscale(.6)}
 .kv{display:flex;justify-content:space-between;font-size:11px;padding:4px 0;
   border-bottom:1px dashed rgba(90,190,220,.12)}
 .kv:last-child{border-bottom:0}
@@ -149,11 +154,18 @@ h3:first-child{margin-top:0}
     <p class="sub">几何校准片：立方体 / 球线框 / 正圆环 / 地面网格。用于检查两面屏拼缝对位与离轴像素映射是否跑偏。</p>
   </div>
 
+  <div class="opt-plane" id="planeBox">
+    <label class="chk"><input type="checkbox" id="ckPlane"> 整屏平面展示（两面拼成一张图）</label>
+    <p class="sub" id="planeHint">纯 2D 画布：两面屏沿拐角展开成 24 × 8 m 一张完整图，不做离轴预扭曲；勾选后下方通用参数禁用。</p>
+  </div>
+
   <h3>通用参数</h3>
-  <div class="row"><label>出屏深度</label><input type="range" id="depth" min="-8" max="8" step="0.2" value="2.5"><span class="val" id="depthV">2.5</span></div>
-  <div class="row"><label>尺寸</label><input type="range" id="scale" min="0.4" max="2" step="0.05" value="1"><span class="val" id="scaleV">1.0</span></div>
-  <label class="chk"><input type="checkbox" id="spin" checked> 轻微摆动 / 自转</label>
-  <label class="chk"><input type="checkbox" id="flat"> 平贴退化（对照：直接贴屏）</label>
+  <div id="commonParams">
+    <div class="row"><label>出屏深度</label><input type="range" id="depth" min="-8" max="8" step="0.2" value="2.5"><span class="val" id="depthV">2.5</span></div>
+    <div class="row"><label>尺寸</label><input type="range" id="scale" min="0.4" max="2" step="0.05" value="1"><span class="val" id="scaleV">1.0</span></div>
+    <label class="chk"><input type="checkbox" id="spin" checked> 轻微摆动 / 自转</label>
+    <label class="chk"><input type="checkbox" id="flat"> 平贴退化（对照：直接贴屏）</label>
+  </div>
 
   <div class="grp">
     <div class="lbl">观察视点</div>
@@ -214,6 +226,7 @@ h3:first-child{margin-top:0}
   <div class="kv"><span>立体错觉强度</span><b id="rdScore">100 %</b></div>
   <div id="bar"><div id="barfill"></div></div>
   <div class="kv" style="margin-top:8px"><span>屏幕 / 每面</span><b>12 × 8 m</b></div>
+  <div class="kv"><span>逻辑画布</span><b id="rdCanvas">离轴双路</b></div>
   <div class="kv"><span>片源 / 每面</span><b>768 × 512</b></div>
   <div class="kv"><span>最佳视点距离</span><b id="rdDist">31.1 m</b></div>
   <p id="rdNote">站在最佳视点，两路预扭曲片源才拼成有纵深的立体空间。</p>
@@ -268,7 +281,7 @@ var CX=-0.30,CZ=-0.30;                       // 两面屏共享的拐角外棱
 var HERO=new T.Vector3(-22,1.7,-22),TARGET=new T.Vector3(2,10,2);
 var VC=new T.Vector3(2.5,10,2.5),OUT=new T.Vector3(-0.7071068,0,-0.7071068);
 var RTW=768,RTH=512;
-var state={src:'demo1',depth:2.5,scale:1,spin:true,flat:false,hud:true,playing:true,
+var state={src:'demo1',depth:2.5,scale:1,spin:true,flat:false,planeFull:false,hud:true,playing:true,
   tod:'night',track:false,helper:false,
   time:0,az:0,el:0,dist:32,tAz:0,tEl:0,tDist:32,dragging:false,lastX:0,lastY:0};
 
@@ -368,7 +381,7 @@ for(var fi=0;fi<2;fi++){
    format:T.RGBAFormat,depthBuffer:true,stencilBuffer:false});
  var mat=new T.MeshBasicMaterial({map:rt.texture,side:T.DoubleSide,fog:false});
  var mesh=new T.Mesh(quadGeom(f.pa,f.pb,f.pc,f.pd),mat);mesh.layers.set(0);scene.add(mesh);
- faces.push({name:f.name,pa:f.pa,pb:f.pb,pc:f.pc,rt:rt,mat:mat});
+ faces.push({name:f.name,pa:f.pa,pb:f.pb,pc:f.pc,rt:rt,mat:mat,mesh:mesh});
 }
 
 /* ========== 4b. 时段 / 环境光（旧版控制项） ========== */
@@ -752,7 +765,12 @@ function syncQuick(){
 }
 function setSource(type,skipDefault){
  if(type==='demo')type='demo1';        // 兼容旧链接参数
+ // 平面素材默认不摆动：板子一旦绕 Y 轴转，离轴投影就会把它拉成梯形
+ if((type==='image'||type==='text'||type==='video'||type==='hls')&&state.spin){
+  state.spin=false;$('spin').checked=false;
+ }
  state.src=type;
+ syncPlaneAvailable();
  Array.prototype.forEach.call($('tabs').children,function(b){b.classList.toggle('on',b.dataset.src===type);});
  Array.prototype.forEach.call(document.querySelectorAll('.pane'),function(p){p.classList.remove('on');});
  var pane=$('pane-'+type);if(pane)pane.classList.add('on');
@@ -795,14 +813,62 @@ function loadFile(f){
   showErr('.gltf 是分离式格式（贴图 / .bin 是外部文件），请改拖 .glb 单文件。');
  }else showErr('不支持的文件类型：'+f.name);
 }
+/* ---- 整屏平面：把 L 形两面沿拐角展开成一块 24 × 8 m 画布 ---- */
+function planeSourceOK(){
+ return ['image','text','video','hls'].indexOf(state.src)>=0;
+}
+function uvRange(geo,u0,u1){
+ var attr=geo.getAttribute('uv');
+ if(!geo.userData.uv0)geo.userData.uv0=Float32Array.from(attr.array);
+ var o=geo.userData.uv0;
+ for(var i=0;i<o.length;i+=2)attr.array[i]=u0+o[i]*(u1-u0);
+ attr.needsUpdate=true;
+}
+function applyPlaneUv(){
+ var on=state.planeFull;
+ faces.forEach(function(f,i){
+  uvRange(f.mesh.geometry,on?(i===1?.5:0):0,on?(i===1?1:.5):1);
+ });
+ hudQuads.forEach(function(q,i){
+  uvRange(q.geometry,on?(i===1?.5:0):0,on?(i===1?1:.5):1);
+ });
+}
+function setPlaneMode(on){
+ state.planeFull=!!on;
+ var box=$('commonParams');
+ box.classList.toggle('dis',state.planeFull);
+ Array.prototype.forEach.call(box.querySelectorAll('input'),function(el){el.disabled=state.planeFull;});
+ $('ckPlane').checked=state.planeFull;
+ applyMode();
+}
+function syncPlaneAvailable(){
+ var ok=planeSourceOK(),ck=$('ckPlane');
+ ck.disabled=!ok;
+ $('planeBox').classList.toggle('unavailable',!ok);
+ if(!ok){
+  $('planeHint').textContent='当前是 3D 内容源，没有平面片源；切到图片 / 文字 / 视频 / 直播流后可用。';
+  if(state.planeFull)setPlaneMode(false);
+ }else{
+  $('planeHint').textContent='纯 2D 画布：两面屏沿拐角展开成 24 × 8 m 一张完整图，不做离轴预扭曲；勾选后下方通用参数禁用。';
+ }
+}
 function applyMode(){
- var useFlat=state.flat,tf=activeTexture||flatFallback();
+ var plane=state.planeFull,useFlat=plane||state.flat,tf=activeTexture||flatFallback();
  faces.forEach(function(f){f.mat.map=useFlat?tf:f.rt.texture;f.mat.needsUpdate=true;});
  hudQuads.forEach(function(q,i){q.material.map=useFlat?tf:faces[i].rt.texture;q.material.needsUpdate=true;});
- $('rdMode').textContent=useFlat?'平贴退化':'离轴投影';
- $('rdNote2').textContent=useFlat
-  ?'素材直接贴到屏幕材质，离开视点也不变形，但立体感消失。'
-  :'素材进入虚拟场景，两台离轴相机各取一半。';
+ applyPlaneUv();
+ $('rdMode').textContent=plane?'整屏平面':(state.flat?'平贴退化':'离轴投影');
+ $('rdCanvas').textContent=plane?'24 × 8 m（3:1）':'离轴双路';
+ $('rdNote').textContent=plane
+  ?'纯 2D 展示：不做离轴预扭曲，任何视点都不穿帮；45° 角平分线两面等宽。'
+  :(state.src==='demo2'?'原版 12 秒破屏动画；拖动时间轴可逐帧评审分镜。'
+    :'站在最佳视点，两路预扭曲片源才拼成有纵深的立体空间。');
+ $('rdNote2').textContent=plane
+  ?'两面展开成一张 24 × 8 m 画布：A 面取左半 u[0,0.5]，B 面取右半 u[0.5,1]，同源同帧。'
+  :(state.flat?'素材直接贴到屏幕材质，离开视点也不变形，但立体感消失。'
+              :'素材进入虚拟场景，两台离轴相机各取一半。');
+ $('labA').textContent=plane?'A 面 · 画布左半':'A 路片源 · 南立面';
+ $('labB').textContent=plane?'B 面 · 画布右半':'B 路片源 · 西立面';
  syncQuick();
 }
 
@@ -875,6 +941,7 @@ bindRange('fsize','fsizeV',function(v){return String(v);},function(){if(state.sr
  $(id).addEventListener('input',function(){if(state.src==='text')applyTexture(textTexture(),'Canvas 文字','文字');});});
 $('spin').addEventListener('change',function(){state.spin=this.checked;});
 $('flat').addEventListener('change',function(){state.flat=this.checked;applyMode();});
+$('ckPlane').addEventListener('change',function(){setPlaneMode(this.checked);});
 $('hud').addEventListener('change',function(){state.hud=this.checked;layoutHud();});
 $('ckHelper').addEventListener('change',function(){state.helper=this.checked;helper.visible=this.checked;});
 $('ckTrack').addEventListener('change',function(){state.track=this.checked;
@@ -886,7 +953,8 @@ Array.prototype.forEach.call($('modes').children,function(b){
     var m=b.dataset.m;
     if(m==='ad')setSource('demo2');
     else if(m==='calib')setSource('calib');
-    else{state.flat=true;$('flat').checked=true;applyMode();}
+    else{if(state.planeFull)setPlaneMode(false);
+         state.flat=true;$('flat').checked=true;applyMode();}
   });});
 function setPlaying(on){
   state.playing=on;
@@ -956,6 +1024,11 @@ window.addEventListener('resize',function(){
    applyCam();
  }
  if(qs('clean','')==='1'){document.body.classList.add('clean');state.hud=false;layoutHud();}
+ if(qs('plane','')==='1'){
+  if(!planeSourceOK())setSource('image');
+  $('ckPlane').checked=true;
+  setPlaneMode(true);
+ }
  applyMode();layoutHud();syncQuick();
  $('rdDist').textContent=HERO.distanceTo(new T.Vector3(0,1.7,0)).toFixed(1)+' m';
 })();
@@ -981,15 +1054,16 @@ function frame(){
  if(state.src==='calib'){calibRoot.rotation.y=t*.32;calibRoot.rotation.x=Math.sin(t*.4)*.08;}
  var v1=camera.position.clone().sub(TARGET).normalize(),v2=HERO.clone().sub(TARGET).normalize();
  var ang=T.MathUtils.radToDeg(Math.acos(clamp(v1.dot(v2),-1,1)));
- var score=clamp(100-ang/55*100,0,100);
+ var score=state.planeFull?0:clamp(100-ang/55*100,0,100);
  $('rdPos').textContent='('+camera.position.x.toFixed(1)+', '+camera.position.y.toFixed(1)+', '+camera.position.z.toFixed(1)+')';
  $('rdAngle').textContent=ang.toFixed(1)+' °';
  $('rdScore').textContent=score.toFixed(0)+' %';
- $('rdDepth').textContent=state.src==='demo2'?'12 s 动画'
+ $('rdDepth').textContent=state.planeFull?'不适用'
+  :state.src==='demo2'?'12 s 动画'
    :(state.depth>=0?'+':'')+state.depth.toFixed(1)+' m';
  $('barfill').style.width=score+'%';
  $('barfill').style.filter=score<45?'grayscale(.7)':'none';
- if(!state.flat){
+ if(!state.flat&&!state.planeFull){
   var savedBg=scene.background,savedFog=scene.fog;
   scene.background=adBg;scene.fog=null;
   for(var i=0;i<2;i++){
