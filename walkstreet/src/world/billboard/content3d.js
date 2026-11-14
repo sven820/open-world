@@ -43,6 +43,31 @@ const BUILTINS = ["demo1", "demo2", "calib"]; // dev 分支可用的内置 3D �
 const clampN = (v, min, max, def) =>
   (typeof v === "number" && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def);
 
+/* -------- 片源渲染优化（与 PULSE 内容源实验台同款，按开放世界适配） --------
+ * 1) 独立内容场景 adScene：原来两路离轴相机渲的是「整座城市」主 scene，靠
+ *    layers 隔离只画 layer N 的内容层。three 的 projectObject 仍会递归遍历
+ *    整棵场景树，且每帧把主 scene 的 background/fog 改掉再还原（fog 变化会让
+ *    所有 fog 材质走 program 变更检查）。开放世界下这是迁移后变卡的主因。
+ *    改为一张只装十几个内容对象的独立 Scene，世界坐标不变，画面等价。
+ * 2) 脏标记缓存 rtNeedsRender：静态素材（图片/广告/文字/静态 GLB）片源不再
+ *    每帧重渲两路 RT；眼位、纹理新帧、内容动画、状态变化才标脏。
+ * 3) 视频 rVFC 驱动：requestVideoFrameCallback 按视频真实帧率标脏，带看门狗
+ *    与不支持时回退每帧（实验台同款）。
+ * 4) 视锥剔除：屏体不在取景相机视锥内时整帧不生成片源（HUD 预览开启时豁免）。
+ * 说明：本项目 d3.track 默认 true（虚拟眼睛跟随真实相机），眼位变化必须重算
+ *    离轴投影，这是物理必需；因此用「眼位差」而非实验台的无条件 true ——
+ *    玩家静止时仍可命中缓存。要吃满缓存收益可在后台关掉「片源跟随当前视点」。
+ ---------------------------------------------------------------------- */
+const EYE_EPS2 = 0.02 * 0.02;          // 眼位变化阈值 2cm，超过才重算离轴矩阵
+const VIDEO_WATCHDOG_MS = 600;         // rVFC 长时间无新帧的兜底重渲
+const _frustum = new THREE.Frustum();  // 模块级复用，避免每帧分配
+const _projScreen = new THREE.Matrix4();
+
+/* 诊断计数（与 main.js 的 window.__frames / __calls 同款，方便实测 pass 收益）。
+ * 不参与渲染逻辑，可在控制台随时查看：__rt3d.renders / skips / videoFrames。 */
+const RT_STATS = { renders: 0, skips: 0, videoFrames: 0 };
+if (typeof window !== "undefined") window.__rt3d = RT_STATS;
+
 /* 实验台 §5 离轴投影（逐字同款，仅改 three 引用名） */
 const _vr = new THREE.Vector3(), _vu = new THREE.Vector3(), _vn = new THREE.Vector3();
 const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vector3();
@@ -429,10 +454,26 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
   noticeCam.position.set(0, 0, 2);
   noticeCam.lookAt(0, 0, 0);
 
-  /* —— 内容层：直接放主场景，主相机（layer 0）看不到 —— */
+  /* —— 独立内容场景（性能关键）——
+   * 旧实现直接把整座城市主 scene 交给 projCam 渲两遍，靠 layers 过滤。
+   * three 的 projectObject 会无条件递归整棵场景树，几千个分块/建筑/行人
+   * 每帧被遍历 2 次；而且每帧把主 scene 的 background/fog 改掉再还原，
+   * fog 变化会让所有 fog 材质走 program 变更检查甚至重编译。
+   * 这里改用一张只装内容层的 Scene：世界坐标不变、adScene 无变换、
+   * offAxis 投影矩阵完全不变，画面等价，但遍历量从「整城」降到十几个对象，
+   * 也彻底不用再碰主场景的背景/雾。 */
+  const adScene = new THREE.Scene();
+  adScene.background = AD_BG;
+  adScene.fog = null;
+  // 保持与主场景一致的 IBL 设置：游戏主场景目前未用 environment，
+  // 但将来若接入 PMREM，金属材质（demo1 / GLB）的反射观感不会与原实现分叉。
+  adScene.environment = scene.environment || null;
+  adScene.environmentIntensity = scene.environmentIntensity ?? 1;
+
+  /* —— 内容层：挂在独立场景，主相机（layer 0）看不到 —— */
   const contentRoot = new THREE.Group();
   contentRoot.scale.setScalar(scale);
-  scene.add(contentRoot);
+  adScene.add(contentRoot);
   setLayer(contentRoot, layer);
 
   // 实验台 §6 bgBoard：内腔背板，内容后 19m，双面
@@ -442,21 +483,21 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
   );
   bgBoard.position.copy(VC).addScaledVector(OUT, -19);
   bgBoard.lookAt(_look.copy(VC).addScaledVector(OUT, 30));
-  scene.add(bgBoard);
+  adScene.add(bgBoard);
   setLayer(bgBoard, layer);
 
   // 内容层灯光：环境光 1.15 + 广告主光 1.6（实验台 addLight 同款）
   const ambient = new THREE.AmbientLight(0xffffff, 1.15);
   ambient.layers.set(layer);
-  scene.add(ambient);
+  adScene.add(ambient);
   const adSun = new THREE.DirectionalLight(0xffffff, 1.6);
   adSun.position.copy(VC).add(new THREE.Vector3(-10.5, 10, -10.5));
   adSun.target.position.copy(VC);
   adSun.layers.set(layer);
   adSun.target.layers.set(layer);
-  scene.add(adSun, adSun.target);
+  adScene.add(adSun, adSun.target);
 
-  /* —— 视线/眼位辅助线（layer 0，主相机可见；每帧从虚拟眼睛拉到两面屏角） —— */
+  /* —— 视线/眼位辅助线（layer 0，主相机可见；留在主场景）—— */
   const helper = new THREE.Group();
   helper.visible = false;
   const helperMat = new THREE.LineBasicMaterial({ color: 0x35e8ff, transparent: true, opacity: 0.55, depthTest: false });
@@ -479,15 +520,67 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
   let demoKnot = null, mixer = null, loadBoard = null, dead = false;
   let demo2 = null, t2 = 0, innerUpdate = null, innerItem = null;
   let calibObj = null;
+  let boardTex = null;                    // 平面素材纹理：用 version 捕捉异步加载/重绘
   const disposers = [];
+
+  /* ---- 片源缓存状态（实验台 rtDirty / videoFrameDriven 同款） ---- */
+  let rtDirty = true;                     // 首帧必渲
+  let videoActive = false, videoFrameDriven = false, lastVideoFrame = 0;
+  let videoCbId = 0, videoEl = null;
+  let lastTexVersion = -1;
+  const lastRtEye = new THREE.Vector3(Infinity, Infinity, Infinity);
+  // 视频判定以 2D 工厂为准（占位/海报降级时 isVideo 仍为 true，但不会误判静态素材）
+
+  const markRtDirty = () => { rtDirty = true; };
+  const hasVideo = () => !!(innerItem && innerItem.isVideo);
+  function rtNeedsRender() {
+    if (rtDirty) return true;
+    if (loadBoard) return false;           // 加载/失败提示板是静态的：只在标脏时画一次
+    // 自带动画的内容（含内容根节点摆动）每帧都在变
+    if (demo2 || demoKnot || calibObj || mixer || spin) return true;
+    if (hasVideo()) {
+      if (!videoActive) return false;      // 远距暂停解码 / 未连流：缓存最后一帧
+      if (!videoFrameDriven) return true; // 浏览器不支持 rVFC：回退每帧
+      return performance.now() - lastVideoFrame > VIDEO_WATCHDOG_MS; // 看门狗兜底
+    }
+    return false;                          // 静态图片 / 广告 / 文字 / 静态 GLB：靠事件标脏
+  }
+  /** 绑定视频真实帧回调：只有解码出新帧才重渲两路 RT，而不是跟着显示器刷新率 */
+  function bindVideoFrames(v) {
+    videoEl = v;
+    videoFrameDriven = false;
+    if (!v || typeof v.requestVideoFrameCallback !== "function") return;
+    videoFrameDriven = true;
+    lastVideoFrame = performance.now();
+    const cb = () => {
+      lastVideoFrame = performance.now();
+      RT_STATS.videoFrames++;
+      markRtDirty();
+      try { videoCbId = v.requestVideoFrameCallback(cb); } catch { videoFrameDriven = false; }
+    };
+    try { videoCbId = v.requestVideoFrameCallback(cb); } catch { videoFrameDriven = false; }
+  }
+
+  /* —— 屏体视锥包围球（世界坐标）：屏不在取景视野内就不生成片源 —— */
+  const hudOn = !!(d3 && d3.hud);
+  let wasInView = true;
+  const cullSphere = new THREE.Sphere();
+  {
+    const box = new THREE.Box3();
+    for (const f of faces) for (const p of [f.pa, f.pb, f.pc, f.pd]) box.expandByPoint(p);
+    box.getBoundingSphere(cullSphere);
+    cullSphere.radius = cullSphere.radius * 1.3 + 8; // 屏体外沿 + 出屏内容 + 转身一帧余量
+  }
 
   const showBoard = (message) => {
     if (loadBoard) { noticeScene.remove(loadBoard); disposeTree(loadBoard); }
     loadBoard = noticeBoard(message, 2.6, 2.6 * 288 / 512);
     noticeScene.add(loadBoard);
+    markRtDirty();
   };
   const clearBoard = () => {
     if (loadBoard) { noticeScene.remove(loadBoard); disposeTree(loadBoard); loadBoard = null; }
+    markRtDirty();
   };
   const fail = (message) => { if (!dead) showBoard(message); };
 
@@ -501,11 +594,11 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
       disposers.push(() => disposeTree(demo.group));
     } else if (load.kind === "demo2") {
       demo2 = buildDemo2(VC, OUT, gScale);
-      scene.add(demo2.root, demo2.tunnel);
+      adScene.add(demo2.root, demo2.tunnel);
       setLayer(demo2.root, layer);
       setLayer(demo2.tunnel, layer);
       disposers.push(() => {
-        scene.remove(demo2.root, demo2.tunnel);
+        adScene.remove(demo2.root, demo2.tunnel);
         disposeTree(demo2.root);
         demo2.tunnel.geometry.dispose(); demo2.tunnel.material.dispose();
       });
@@ -513,10 +606,10 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
       const calib = buildCalib();
       calib.position.copy(VC);
       calib.scale.setScalar(gScale);
-      scene.add(calib);
+      adScene.add(calib);
       setLayer(calib, layer);
       calibObj = calib; // 实验台同款：绕 Y 慢转 + 轻微俯仰摆动
-      disposers.push(() => { scene.remove(calib); disposeTree(calib); });
+      disposers.push(() => { adScene.remove(calib); disposeTree(calib); });
     } else if (load.kind === "glb") {
       showBoard("3D 模型加载中…");
       fetch(load.url, { mode: "cors" })
@@ -552,6 +645,7 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
             for (const clip of gltf.animations) mixer.clipAction(clip).play();
           }
           disposers.push(() => disposeTree(wrap));
+          markRtDirty();              // 异步加载完成：片源内容变了，必须重渲两路 RT
         })
         .catch(() => fail("3D 模型加载失败｜检查地址、跨域 CORS 与文件格式（.glb）"));
     } else {
@@ -584,6 +678,9 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
     disposers.push(() => { disposeTree(board); if (inner.dispose) try { inner.dispose(); } catch { /* 已释放 */ } });
     if (inner.kind === "animated" && inner.update) innerUpdate = inner.update.bind(inner);
     innerItem = inner;
+    boardTex = tex;
+    // 视频/直播：按真实帧率标脏（rVFC）；图片/文字的异步加载与重绘则靠 texture.version
+    if (inner.isVideo) bindVideoFrames(inner.video || null);
     }
   }
 
@@ -601,16 +698,18 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
     helper,
     isVideo: !!(it.type !== "model3d" && innerItem && innerItem.isVideo),
     video: it.type !== "model3d" && innerItem ? innerItem.video : undefined,
-    setActive(on) { if (innerItem && innerItem.setActive) innerItem.setActive(on); },
+    /** 池调度：远距暂停解码 / 恢复播放。恢复时必须重渲，否则片源停在旧帧 */
+    setActive(on) {
+      videoActive = !!on;
+      if (on) markRtDirty();
+      if (innerItem && innerItem.setActive) innerItem.setActive(on);
+    },
     setAudio(on) { if (innerItem && innerItem.setAudio) innerItem.setAudio(on); },
-    /** 主循环：内容动画 + 双路离轴渲染（实验台 frame() 同款） */
+    /** 外部强制刷新片源（后台热更新 / 屏重新进入视野） */
+    invalidate() { markRtDirty(); },
+    /** 主循环：内容动画 + 双路离轴渲染（实验台 frame() 同款 + 片源缓存） */
     update(dt, time, focus, camera) {
       if (dead) return;
-      if (mixer) mixer.update(dt);
-      if (innerUpdate) innerUpdate(dt, time);
-      if (demo2) { t2 = (t2 + dt) % 12; }
-      contentRoot.position.copy(VC).addScaledVector(OUT, depth);
-      contentRoot.rotation.y = spin ? Math.sin(time * 0.35) * 0.12 : 0;
 
       // 虚拟眼睛：实时追踪 = 取景相机位置；固定 = 屏前最佳视点（实验台 HERO 档）
       if (track && camera && camera.position && Number.isFinite(camera.position.x)) {
@@ -641,47 +740,83 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
         eyeBall.position.copy(_eye);
       }
 
+      /* ---- 视锥剔除：屏不在取景视野内就完全不生成片源 ----
+       * 开放世界里一块屏可能长期在 300m 激活半径内、却始终背对玩家；
+       * 提前 return 连 demo2 的 140 实例矩阵 / 700 点重算都省掉。
+       * HUD 双路预览或辅助线开着时豁免（调试视图需要活着）。 */
+      let inView = true;
+      if (!hudOn && !helper.visible && camera && camera.isPerspectiveCamera) {
+        camera.updateMatrixWorld();
+        _projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        _frustum.setFromProjectionMatrix(_projScreen);
+        inView = _frustum.intersectsSphere(cullSphere);
+      }
+      if (inView && !wasInView) markRtDirty(); // 重新进入视野：立刻用最新眼位重建片源
+      wasInView = inView;
+      if (!inView) { RT_STATS.skips++; return; }
+
+      // 2D 画布 / 视频帧刷新（clock、ticker、慢路径视频内部自带节流）
+      if (innerUpdate) innerUpdate(dt, time);
+      if (demo2) t2 = (t2 + dt) % 12;
+      if (mixer) mixer.update(dt);
+
+      /* ---- 脏标记：内容 / 眼位 / 纹理新帧 ---- */
+      // 离轴投影矩阵随眼位变化，玩家走动时静态素材也必须跟着重算（物理必需）；
+      // 站着不动则命中缓存。比实验台的「track 就无条件每帧渲」更精细。
+      if (_eye.distanceToSquared(lastRtEye) > EYE_EPS2) markRtDirty();
+      // texture.version 捕捉：图片异步加载完成、Canvas 重绘、VideoTexture 新帧、失败海报
+      if (boardTex && boardTex.version !== lastTexVersion) {
+        lastTexVersion = boardTex.version;
+        markRtDirty();
+      }
+
+      if (!rtNeedsRender()) { RT_STATS.skips++; return; }
+      RT_STATS.renders++;
+
+      // 只有真正要渲 RT 的帧才更新 3D 内容变换（demo2 有 140 实例矩阵 + 700 点重算）
+      contentRoot.position.copy(VC).addScaledVector(OUT, depth);
+      contentRoot.rotation.y = spin ? Math.sin(time * 0.35) * 0.12 : 0;
       if (demo2) demo2.update(t2, _eye);
       else if (demoKnot) demoKnot.rotation.y = time * 0.55;
       // 几何校准片：绕 Y 慢转 + 轻微俯仰摆动（实验台 frame() 同款）
       if (calibObj) { calibObj.rotation.y = time * 0.32; calibObj.rotation.x = Math.sin(time * 0.4) * 0.08; }
 
-      // 提示态：两面 RT 都画同一张正视提示图，跳过离轴渲染；加载成功后自动恢复
+      const savedShadow = renderer.shadowMap.autoUpdate;
+      renderer.shadowMap.autoUpdate = false; // RT 渲染不重复生成阴影贴图
+      const prevRT = renderer.getRenderTarget();
       if (loadBoard) {
-        const savedShadow = renderer.shadowMap.autoUpdate;
-        renderer.shadowMap.autoUpdate = false;
-        const prevRT = renderer.getRenderTarget();
+        // 提示态：两面 RT 都画同一张正视提示图（静态，只在标脏时画一次）
         for (const r of rts) {
           renderer.setRenderTarget(r.rt);
           renderer.render(noticeScene, noticeCam);
         }
-        renderer.setRenderTarget(prevRT);
-        renderer.shadowMap.autoUpdate = savedShadow;
-        return;
-      }
-      // 实验台 frame() 同款：临时替换背景/雾 → 双路离轴渲染 → 还原
-      const savedBg = scene.background, savedFog = scene.fog;
-      scene.background = AD_BG; scene.fog = null;
-      const savedShadow = renderer.shadowMap.autoUpdate;
-      renderer.shadowMap.autoUpdate = false; // RT 渲染不重复生成阴影贴图
-      const prevRT = renderer.getRenderTarget();
-      for (const r of rts) {
-        const M = offAxis(r.f.pa, r.f.pb, r.f.pc, _eye, NEAR, FAR);
-        projCam.projectionMatrix.copy(M);
-        projCam.projectionMatrixInverse.copy(M).invert();
-        renderer.setRenderTarget(r.rt);
-        renderer.render(scene, projCam);
+      } else {
+        // 双路离轴：渲独立 adScene，不再碰主场景（背景/雾/整城遍历都省掉）
+        for (const r of rts) {
+          const M = offAxis(r.f.pa, r.f.pb, r.f.pc, _eye, NEAR, FAR);
+          projCam.projectionMatrix.copy(M);
+          projCam.projectionMatrixInverse.copy(M).invert();
+          renderer.setRenderTarget(r.rt);
+          renderer.render(adScene, projCam);
+        }
       }
       renderer.setRenderTarget(prevRT);
       renderer.shadowMap.autoUpdate = savedShadow;
-      scene.background = savedBg; scene.fog = savedFog;
+      lastRtEye.copy(_eye);
+      rtDirty = false;
     },
     dispose() {
       dead = true;
+      videoActive = false;
+      if (videoEl && videoCbId && typeof videoEl.cancelVideoFrameCallback === "function") {
+        try { videoEl.cancelVideoFrameCallback(videoCbId); } catch { /* 已取消 */ }
+      }
+      videoCbId = 0;
       clearBoard();
       if (mixer) mixer.stopAllAction();
       for (const fn of disposers) { try { fn(); } catch { /* 已释放则忽略 */ } }
-      scene.remove(contentRoot, bgBoard, ambient, adSun, adSun.target, helper);
+      adScene.remove(contentRoot, bgBoard, ambient, adSun, adSun.target);
+      scene.remove(helper);
       disposeTree(contentRoot);
       bgBoard.geometry.dispose(); bgBoard.material.map.dispose(); bgBoard.material.dispose();
       helperLines.geometry.dispose(); helperMat.dispose();
