@@ -3,6 +3,8 @@ import { createContentPool, disposeContentPool } from "./contentSource.js";
 import { buildPlacedBillboard, phaseFor } from "./billboard.js";
 import { normalizeSpec, corner3dWorldFaces } from "./mounts.js";
 import { defaultContent, normalizeContent, contentKey, scheduleFrom } from "./contentConfig.js";
+import { getRenderSettings } from "../../config/renderSettings.js";
+import { rtFlipNeeded } from "./content3d.js";
 
 /* ---------------- 广告大屏管理器 ----------------
  * 唯一来源：编辑器手动放置（map.objects 里 type==="billboard"）。
@@ -13,13 +15,13 @@ import { defaultContent, normalizeContent, contentKey, scheduleFrom } from "./co
  *
  * 性能调度：
  *  - 内容池按 (屏比, 配置哈希) 缓存，相同配置的屏共享同一视频元素与纹理；
- *  - 全局最多 MAX_VIDEO_DECODE 路同时解码，按玩家距离优先，其余 video.pause()；
- *  - 离开 ACTIVE_RADIUS 的屏暂停轮播/重绘/解码；
+ *  - 屏幕轮播/重绘/解码只在激活半径内进行（画面设置 billboardRadius，默认 300m），
+ *    超出半径的屏零成本定格；
+ *  - 半径内再按视频解码并发（画面设置 videoDecode，默认 2）以玩家距离优先放行，
+ *    其余 video.pause()；
  *  - 音频策略：off 全静音（默认） / nearest 仅最近一块屏出声 / on 全部出声。
  */
 
-const ACTIVE_RADIUS = 300;   // 屏幕轮播/重绘/视频解码的激活半径（米）
-const MAX_VIDEO_DECODE = 2;  // 全局同时解码的视频路数上限
 const ASPECT_STEP = 0.05;
 
 export class BillboardManager {
@@ -194,9 +196,14 @@ export class BillboardManager {
     return { applied, changed, screens: this.screens.length };
   }
 
-  /** 每帧更新：轮播 / 动画 / 视频并发调度 / 音频策略 */
-  update(dt, time, focus) {
+  /**
+   * 每帧更新：轮播 / 动画 / 视频并发调度 / 音频策略（半径与解码路数都是画面设置热调）
+   * @param {THREE.Camera|null} camera 取景相机 —— 3D 裸眼虚拟眼睛（实时追踪档）与双路预览布局用
+   */
+  update(dt, time, focus, camera = null) {
     if (!this.screens.length) return;
+    // 屏幕激活半径（画面设置，每帧读取，改完立即生效）
+    const activeRadius = Math.max(1, Math.round(getRenderSettings().billboardRadius ?? 300));
     for (const pool of this._pools.values()) {
       pool._wanted = false;
       pool._dist = Infinity;
@@ -204,22 +211,38 @@ export class BillboardManager {
     for (const s of this.screens) {
       const dx = s.x - focus.x, dz = s.z - focus.z;
       const d2 = dx * dx + dz * dz;
-      const near = d2 < ACTIVE_RADIUS * ACTIVE_RADIUS;
+      const near = d2 < activeRadius * activeRadius;
       if (near && !s._near) s.playlist.wake();
       s._near = near;
       if (!near || !s.pool) continue;
+      s.playlist.focus = focus;
+      s.playlist.eye = camera; // 换页 / 唤醒刷新同样用最新眼睛
       s.playlist.update(dt, true);
-      s.playlist.focus = focus; // 3D 裸眼内容源据此取虚拟眼睛（翻页刷新也用）
       s.pool._wanted = true;
       if (d2 < s.pool._dist * s.pool._dist) s.pool._dist = Math.sqrt(d2);
-      for (const item of s.pool) if (item.kind === "animated") item.update(dt, time, focus);
+      // 3D 条目（离轴双路 RT）渲染开销大：只有当前轮播条目重绘；
+      // 视线/眼位辅助线也只跟随当前条目
+      const slot = s.playlist.schedule[s.playlist.cur];
+      const curIdx = slot ? slot.idx : 0;
+      for (let ii = 0; ii < s.pool.length; ii++) {
+        const item = s.pool[ii];
+        if (item.is3d) {
+          if (item.helper) {
+            item.helper.visible = ii === curIdx && !!(s.pool.cfg.d3 && s.pool.cfg.d3.helper);
+          }
+          if (ii !== curIdx || item.kind !== "animated") continue;
+        }
+        if (item.kind === "animated") item.update(dt, time, focus, camera);
+      }
     }
 
-    // 视频解码并发上限：按最近使用屏的距离排序，只放行前 MAX_VIDEO_DECODE 路
+    // 视频解码并发上限（画面设置热调，每帧读取，改完立即生效）：
+    // 按最近使用屏的距离排序，只放行前 videoDecode 路
+    const maxDecode = Math.max(0, Math.round(getRenderSettings().videoDecode ?? 2));
     const videoPools = [...this._pools.values()].filter((p) => p.hasVideo);
     videoPools.sort((a, b) => a._dist - b._dist);
     videoPools.forEach((p, i) => {
-      const on = p._wanted && i < MAX_VIDEO_DECODE;
+      const on = p._wanted && i < maxDecode;
       if (p._active !== on) { p.setActive(on); p._active = on; }
     });
 
@@ -231,6 +254,75 @@ export class BillboardManager {
       const on = p._active && (mode === "on" || (mode === "nearest" && p === nearest));
       if (p._audio !== on) { p.setAudio(on); p._audio = on; }
     }
+
+    this._updateHud(camera);
+  }
+
+  _ensureHud(camera) {
+    const g = new THREE.Group();
+    // HUD 直接贴离轴 RT 纹理：WebGL 回退后端下 TSL TextureNode 会对 RT 多做一次
+    // flipY，这里把 quad 的 UV 预先翻一次抵消（与 billboard.js 屏面同款补偿）。
+    const flipUV = rtFlipNeeded();
+    for (let i = 0; i < 4; i++) {
+      const geo = new THREE.PlaneGeometry(1, 1);
+      if (flipUV) {
+        const a = geo.attributes.uv;
+        for (let k = 1; k < a.array.length; k += 2) a.array[k] = 1 - a.array[k];
+        a.needsUpdate = true;
+      }
+      const q = new THREE.Mesh(
+        geo,
+        new THREE.MeshBasicMaterial({ depthTest: false, depthWrite: false, toneMapped: false, fog: false }),
+      );
+      q.renderOrder = 999;
+      q.frustumCulled = false;
+      q.visible = false;
+      g.add(q);
+    }
+    g.visible = false;
+    camera.add(g);
+    this._hud = g;
+    this._hudCam = camera;
+  }
+
+  /** 右下角双路预览（实验台 hudScene 同款）：最多两块 3D 屏，各显示 A/B 两路离轴 RT */
+  _updateHud(camera) {
+    const wants = [];
+    for (const s of this.screens) {
+      const pool = s.pool;
+      if (!pool || !pool.cfg || !pool.cfg.d3 || !pool.cfg.d3.hud) continue;
+      const slot = s.playlist.schedule[s.playlist.cur];
+      const it = slot ? pool[slot.idx] : null;
+      if (it && it.is3d && Array.isArray(it.texture)) wants.push(it.texture);
+      if (wants.length >= 2) break;
+    }
+    if (!wants.length) { if (this._hud) this._hud.visible = false; return; }
+    if (!this._hud) this._ensureHud(camera);
+    if (this._hudCam !== camera) { // 世界重建后换了相机实例：重新挂载
+      if (this._hud.parent) this._hud.parent.remove(this._hud);
+      camera.add(this._hud);
+      this._hudCam = camera;
+    }
+    const quads = this._hud.children;
+    wants.forEach((texs, si) => {
+      for (let fi = 0; fi < 2; fi++) {
+        const q = quads[si * 2 + fi];
+        q.visible = !!texs[fi];
+        if (q.visible && q.material.map !== texs[fi]) { q.material.map = texs[fi]; q.material.needsUpdate = true; }
+      }
+    });
+    for (let i = wants.length * 2; i < quads.length; i++) quads[i].visible = false;
+    this._hud.visible = true;
+    // 布局：右下角，每块屏两路并排，第二块屏叠在上方（按相机 fov / 宽高比换算）
+    const hh = Math.tan((camera.fov / 2) * Math.PI / 180);
+    const hw = hh * camera.aspect;
+    const qw = hw * 0.17, qh = qw * (512 / 768), mx = hw * 0.025, my = hh * 0.035;
+    quads.forEach((q, i) => {
+      if (!q.visible) return;
+      const si = Math.floor(i / 2), fi = i % 2;
+      q.scale.set(qw, qh, 1);
+      q.position.set(hw - mx - qw / 2 - fi * (qw + mx), -hh + my + qh / 2 + si * (qh + my), -1);
+    });
   }
 
   dispose() {
@@ -240,5 +332,14 @@ export class BillboardManager {
     this._refs = new WeakMap();
     this.external = null;
     this.screens = [];
+    if (this._hud) { // 双路预览挂在相机上，随世界一起释放
+      if (this._hud.parent) this._hud.parent.remove(this._hud);
+      this._hud.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) o.material.dispose();
+      });
+      this._hud = null;
+      this._hudCam = null;
+    }
   }
 }

@@ -221,6 +221,7 @@ h3:first-child{margin-top:0}
   <div class="kv"><span>相机坐标</span><b id="rdPos">—</b></div>
   <div class="kv"><span>出屏深度</span><b id="rdDepth">+2.5 m</b></div>
   <div class="kv"><span>渲染模式</span><b id="rdMode">离轴投影</b></div>
+  <div class="kv"><span>片源渲染</span><b id="rdRt">—</b></div>
   <div class="kv"><span>虚拟相机</span><b id="rdEye">固定</b></div>
   <div class="kv"><span>偏离最佳视点</span><b id="rdAngle">0.0 °</b></div>
   <div class="kv"><span>立体错觉强度</span><b id="rdScore">100 %</b></div>
@@ -56128,6 +56129,30 @@ var state={src:'demo1',depth:2.5,scale:1,spin:true,flat:false,planeFull:false,hu
   tod:'night',track:false,helper:false,
   time:0,az:0,el:0,dist:32,tAz:0,tEl:0,tDist:32,dragging:false,lastX:0,lastY:0};
 
+/* ========== 2b. 片源缓存：两路 RT 只在内容真的变化时重渲 ========== */
+var rtDirty=true,videoActive=false,videoFrameDriven=false,lastVideoFrame=0,lastRtMsg='';
+function markRtDirty(){rtDirty=true;}
+function rtNeedsRender(){
+ if(rtDirty)return true;
+ if(state.track||state.spin)return true;          // 眼位跟随 / 摆动：每帧都在变
+ var s=state.src;
+ if(s==='demo1'||s==='demo2'||s==='calib')return true;  // 自带动画
+ if(s==='video'||s==='hls'){
+   if(!videoActive)return false;                 // 占位图 / 未连流：静态缓存
+   if(!videoFrameDriven)return true;            // 浏览器不支持 RVFC：回退每帧
+   return performance.now()-lastVideoFrame>600; // 看门狗：长时间无新帧则兜底
+ }
+ return false;                                    // 图片 / 文字 / GLB：静态，靠事件标脏
+}
+function bindVideoFrames(v){
+ videoActive=true;videoFrameDriven=false;
+ if(typeof v.requestVideoFrameCallback!=='function')return;  // 不支持则回退每帧
+ videoFrameDriven=true;lastVideoFrame=performance.now();
+ var cb=function(){lastVideoFrame=performance.now();markRtDirty();
+  try{v.requestVideoFrameCallback(cb);}catch(e){}};
+ try{v.requestVideoFrameCallback(cb);}catch(e){videoFrameDriven=false;}
+}
+
 /* ========== 2. 渲染器 / 场景 ========== */
 var renderer=new T.WebGLRenderer({canvas:$('c'),antialias:true,preserveDrawingBuffer:true});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
@@ -56232,7 +56257,7 @@ var TIME={day:{a:1.15,s:1.75,fog:0xbccbd4,emi:.06,screen:.78,sky:'day'},
           dusk:{a:.68,s:.85,fog:0x5b5468,emi:.38,screen:.92,sky:'dusk'},
           night:{a:.34,s:.22,fog:0x0e1428,emi:1.0,screen:1.15,sky:'night'}};
 function applyTimeOfDay(k){
-  var c=TIME[k];if(!c)return;state.tod=k;
+  var c=TIME[k];if(!c)return;state.tod=k;markRtDirty();
   scene.background=SKY[c.sky];scene.fog.color.setHex(c.fog);
   ambient.intensity=c.a;sun.intensity=c.s;
   facadeMats.forEach(function(m){m.emissiveIntensity=c.emi;});
@@ -56463,6 +56488,7 @@ function clearContent(){
 }
 function addToContent(o){contentRoot.add(o);setLayer(o,1);return o;}
 function stopMedia(){
+ videoActive=false;videoFrameDriven=false;
  var v=$('media');try{v.pause();}catch(e){}
  v.removeAttribute('src');try{v.load();}catch(e){}
  if(activeHls){try{activeHls.destroy();}catch(e){}activeHls=null;}
@@ -56508,6 +56534,7 @@ function demoImageTexture(){
 function flatFallback(){return placeholderTexture('当前是 3D 内容，平贴模式用占位图代替');}
 
 function applyTexture(t,label,kind){
+ markRtDirty();
  clearContent();activeTexture=t;
  var aspect=16/9,img=t.image;
  if(img){var w=img.videoWidth||img.width||0,h=img.videoHeight||img.height||0;
@@ -56547,6 +56574,7 @@ function parseGLB(ab,label){
   var box=new T.Box3().setFromObject(obj),size=new T.Vector3(),center=new T.Vector3();
   box.getSize(size);box.getCenter(center);
   var maxDim=Math.max(size.x,size.y,size.z)||1,s=9.5/maxDim;
+  markRtDirty();
   clearContent();activeTexture=null;
   obj.scale.setScalar(s);
   obj.position.set(-center.x*s,-center.y*s,-center.z*s);
@@ -56576,6 +56604,7 @@ function setupVideo(url,label){
  var t=new T.VideoTexture(v);
  t.minFilter=T.LinearFilter;t.magFilter=T.LinearFilter;t.generateMipmaps=false;
  applyTexture(t,label,'视频纹理');
+ bindVideoFrames(v);           // 只在视频解码出新帧时重渲两路 RT
  var p=v.play();if(p&&p.catch)p.catch(function(e){showErr('视频播放被拦截：'+e.message);});
 }
 function setupHls(url){
@@ -56588,7 +56617,9 @@ function setupHls(url){
  activeHls.loadSource(url);activeHls.attachMedia(v);
  activeHls.on(Hls.Events.MANIFEST_PARSED,function(){
   var t=new T.VideoTexture(v);t.minFilter=T.LinearFilter;t.magFilter=T.LinearFilter;
+  t.generateMipmaps=false;
   applyTexture(t,'HLS 直播流','直播纹理');
+  bindVideoFrames(v);
   var p=v.play();if(p&&p.catch)p.catch(function(e){showErr('直播播放被拦截：'+e.message);});
  });
  activeHls.on(Hls.Events.ERROR,function(_,d){
@@ -56612,7 +56643,7 @@ function setSource(type,skipDefault){
  if((type==='image'||type==='text'||type==='video'||type==='hls')&&state.spin){
   state.spin=false;$('spin').checked=false;
  }
- state.src=type;
+ state.src=type;markRtDirty();
  syncPlaneAvailable();
  Array.prototype.forEach.call($('tabs').children,function(b){b.classList.toggle('on',b.dataset.src===type);});
  Array.prototype.forEach.call(document.querySelectorAll('.pane'),function(p){p.classList.remove('on');});
@@ -56696,6 +56727,7 @@ function syncPlaneAvailable(){
  }
 }
 function applyMode(){
+ markRtDirty();                 // 从平贴切回离轴时，两路 RT 必须重新生成
  var plane=state.planeFull,useFlat=plane||state.flat,tf=activeTexture||flatFallback();
  faces.forEach(function(f){f.mat.map=useFlat?tf:f.rt.texture;f.mat.needsUpdate=true;});
  hudQuads.forEach(function(q,i){q.material.map=useFlat?tf:faces[i].rt.texture;q.material.needsUpdate=true;});
@@ -56777,17 +56809,17 @@ Array.prototype.forEach.call($('tabs').children,function(b){
 function bindRange(id,vid,fmt,fn){
  $(id).addEventListener('input',function(){var v=parseFloat(this.value);
   $(vid).textContent=fmt(v);fn(v);});}
-bindRange('depth','depthV',function(v){return v.toFixed(1);},function(v){state.depth=v;});
-bindRange('scale','scaleV',function(v){return v.toFixed(2);},function(v){state.scale=v;});
+bindRange('depth','depthV',function(v){return v.toFixed(1);},function(v){state.depth=v;markRtDirty();});
+bindRange('scale','scaleV',function(v){return v.toFixed(2);},function(v){state.scale=v;markRtDirty();});
 bindRange('fsize','fsizeV',function(v){return String(v);},function(){if(state.src==='text')applyTexture(textTexture(),'Canvas 文字','文字');});
 ['txt','fcolor','fbg','fbold'].forEach(function(id){
  $(id).addEventListener('input',function(){if(state.src==='text')applyTexture(textTexture(),'Canvas 文字','文字');});});
-$('spin').addEventListener('change',function(){state.spin=this.checked;});
+$('spin').addEventListener('change',function(){state.spin=this.checked;markRtDirty();});
 $('flat').addEventListener('change',function(){state.flat=this.checked;applyMode();});
 $('ckPlane').addEventListener('change',function(){setPlaneMode(this.checked);});
 $('hud').addEventListener('change',function(){state.hud=this.checked;layoutHud();});
 $('ckHelper').addEventListener('change',function(){state.helper=this.checked;helper.visible=this.checked;});
-$('ckTrack').addEventListener('change',function(){state.track=this.checked;
+$('ckTrack').addEventListener('change',function(){state.track=this.checked;markRtDirty();
   $('rdEye').textContent=this.checked?'实时跟随':'固定';});
 Array.prototype.forEach.call($('tods').children,function(b){
   b.addEventListener('click',function(){applyTimeOfDay(b.dataset.t);});});
@@ -56906,7 +56938,8 @@ function frame(){
    :(state.depth>=0?'+':'')+state.depth.toFixed(1)+' m';
  $('barfill').style.width=score+'%';
  $('barfill').style.filter=score<45?'grayscale(.7)':'none';
- if(!state.flat&&!state.planeFull){
+ var needRt=!state.flat&&!state.planeFull&&rtNeedsRender();
+ if(needRt){
   var savedBg=scene.background,savedFog=scene.fog;
   scene.background=adBg;scene.fog=null;
   for(var i=0;i<2;i++){
@@ -56915,7 +56948,11 @@ function frame(){
    renderer.setRenderTarget(f.rt);renderer.render(scene,projCam);
   }
   renderer.setRenderTarget(null);scene.background=savedBg;scene.fog=savedFog;
+  rtDirty=false;
  }
+ var rtMsg=(state.flat||state.planeFull)?'平贴 / 整屏平面（无 RT）'
+   :(needRt?'本帧重渲 2 路 RT':'片源已缓存 · 跳过 2 路 RT');
+ if(rtMsg!==lastRtMsg){$('rdRt').textContent=rtMsg;lastRtMsg=rtMsg;}
  renderer.autoClear=true;renderer.render(scene,camera);
  if(state.hud){renderer.autoClear=false;renderer.clearDepth();
   renderer.render(hudScene,hudCam);renderer.autoClear=true;}

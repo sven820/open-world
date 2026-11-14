@@ -56,6 +56,8 @@ SHOTS = [
     ("28_整屏平面_图片_偏角",   "src=image&plane=1&clean=1&az=-2.05&el=0.02&dist=36", True),
     ("29_整屏平面_图片_俯瞰",   "src=image&plane=1&clean=1&v=aerial",   True),
     ("30_整屏平面_视频",        "src=video&plane=1&clean=1",            True),
+    # 片源缓存生效后的带界面读数：右侧「片源渲染」应显示「跳过 2 路 RT」
+    ("31_片源缓存_静态图片",    "src=image",                            False),
 ]
 
 # 对最容易出运行时问题的几种源做 DOM 体检

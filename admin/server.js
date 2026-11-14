@@ -48,7 +48,10 @@ function defaultState() {
       { id: "m-live-1", name: "演示直播流 HLS（本地离线）", type: "stream", url: "/media/live/live.m3u8", createdAt: now },
       { id: "m-video-ext", name: "示例视频（外链 · 需联网）", type: "video", url: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4", createdAt: now },
       { id: "m-live-ext", name: "示例直播流（外链 · 需联网）", type: "stream", url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", createdAt: now },
-      { id: "m-3d-demo1", name: "3D演示1（内置环形装置）", type: "model3d", url: "builtin://demo1", createdAt: now },
+      { id: "m-3d-demo1", name: "3D演示1（内置环形装置）", type: "model3d", url: "builtin://demo1", is3d: true, depth: 2.5, createdAt: now },
+      { id: "m-3d-demo2", name: "3D演示2（品牌广告 · 12秒）", type: "model3d", url: "builtin://demo2", is3d: true, depth: 2.5, createdAt: now },
+      { id: "m-3d-calib", name: "几何校准片（内置线框）", type: "model3d", url: "builtin://calib", is3d: true, depth: 2.5, createdAt: now },
+      { id: "m-3d-glb", name: "3D示例模型（GLB 文件）", type: "model3d", url: "/media/demo_pulse.glb", is3d: true, depth: 2.5, createdAt: now },
     ],
     playlists: [
       {
@@ -106,8 +109,24 @@ function ensureBuiltin(state) {
   let changed = false;
   const now = new Date().toISOString();
   if (!Array.isArray(state.media)) state.media = [];
+  // 3D 属性迁移：出屏深度属于素材（旧数据 model3d 素材默认勾选 3D 展示 + 2.5 米）
+  for (const m of state.media) {
+    if (m.type === "model3d" && m.is3d === undefined) { m.is3d = true; m.depth = m.depth ?? 2.5; changed = true; }
+  }
   if (!state.media.some((m) => m.id === "m-3d-demo1")) {
-    state.media.push({ id: "m-3d-demo1", name: "3D演示1（内置环形装置）", type: "model3d", url: "builtin://demo1", createdAt: now });
+    state.media.push({ id: "m-3d-demo1", name: "3D演示1（内置环形装置）", type: "model3d", url: "builtin://demo1", is3d: true, depth: 2.5, createdAt: now });
+    changed = true;
+  }
+  if (!state.media.some((m) => m.id === "m-3d-demo2")) {
+    state.media.push({ id: "m-3d-demo2", name: "3D演示2（品牌广告 · 12秒）", type: "model3d", url: "builtin://demo2", is3d: true, depth: 2.5, createdAt: now });
+    changed = true;
+  }
+  if (!state.media.some((m) => m.id === "m-3d-calib")) {
+    state.media.push({ id: "m-3d-calib", name: "几何校准片（内置线框）", type: "model3d", url: "builtin://calib", is3d: true, depth: 2.5, createdAt: now });
+    changed = true;
+  }
+  if (!state.media.some((m) => m.id === "m-3d-glb")) {
+    state.media.push({ id: "m-3d-glb", name: "3D示例模型（GLB 文件）", type: "model3d", url: "/media/demo_pulse.glb", is3d: true, depth: 2.5, createdAt: now });
     changed = true;
   }
   if (!Array.isArray(state.playlists)) state.playlists = [];
@@ -165,25 +184,67 @@ const baseOf = (req) => `http://${req.headers.host || `127.0.0.1:${PORT}`}`;
 function absolutize(url, base) {
   return typeof url === "string" && url.startsWith("/media/") ? base + url : url;
 }
-function playlistToContent(pl, base) {
+/** 素材级 3D 属性（是否 3D 展示 / 出屏深度 / 平贴退化）：非法值丢弃交给游戏端兜底 */
+function sanitize3dAttrs(type, is3d, depth, flat) {
+  const on = typeof is3d === "boolean" ? is3d : type === "model3d"; // 3D裸眼模型默认勾选
+  const d = Number(depth);
+  return {
+    is3d: on,
+    depth: on && Number.isFinite(d) ? Math.min(10, Math.max(0, Math.round(d * 10) / 10)) : 2.5,
+    flat: on && flat === true, // 平贴退化：仅勾选 3D 展示时有意义，默认不勾选
+  };
+}
+function playlistToContent(pl, base, media = []) {
+  // 出屏深度是素材属性而非节目单属性：发布时按地址把素材的 3D 属性合并进条目，
+  // 游戏端据此在轮播切换时实时调整该条目的显示模式（3D 离轴 / 平面平贴）
+  const byUrl = new Map(media.map((m) => [m.url, m]));
   return {
     fit: pl.fit || "auto",
     transition: Number(pl.transition) || 0,
     audio: pl.audio || "off",
     items: (pl.items || []).map((it) => {
       const o = { ...it };
+      const m = o.url ? byUrl.get(o.url) : null;
+      if (m && typeof m.is3d === "boolean") {
+        o.is3d = m.is3d;
+        if (m.is3d) {
+          o.depth = Number(m.depth) || 2.5;
+          // 平贴退化属于素材：勾选后该条目在 3D 屏上跳过离轴渲染，按普通平面贴图显示
+          if (m.flat === true) o.flat = true; else delete o.flat;
+        } else {
+          delete o.depth;
+          delete o.flat;
+        }
+      }
       if (o.url) o.url = absolutize(o.url, base);
       if (o.fallback) o.fallback = absolutize(o.fallback, base);
       return o;
     }),
   };
 }
+
+/** 屏位级 3D 参数（遛眼参数 / 显示开关）：只保留白名单字段，非法值丢弃交给游戏端兜底 */
+function sanitizeD3(raw) {
+  const out = {};
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v * 100) / 100 : undefined);
+  const depth = num(raw.depth); if (depth !== undefined) out.depth = depth;
+  const scale = num(raw.scale); if (scale !== undefined) out.scale = scale;
+  for (const k of ["spin", "track", "hud", "helper"]) {
+    if (typeof raw[k] === "boolean") out[k] = raw[k];
+  }
+  return out;
+}
+
 /** 当前工作区（未发布）快照；base="" 时保留 /media/ 相对地址便于持久化 */
 function buildPublished(state, base) {
   const screens = {};
   for (const sc of state.screens) {
     const pl = state.playlists.find((p) => p.id === sc.playlistId);
-    if (pl) screens[sc.id] = playlistToContent(pl, base);
+    if (!pl) continue;
+    const cfg = playlistToContent(pl, base, state.media);
+    // 3D转角包柱屏：屏位上配的遛眼参数 / 显示开关合并进发布快照（d3）
+    if (sc.mount === "corner3d" && sc.d3 && Object.keys(sc.d3).length) cfg.d3 = sc.d3;
+    screens[sc.id] = cfg;
   }
   return { version: state.published.version, publishedAt: state.published.publishedAt, screens };
 }
@@ -355,6 +416,7 @@ async function handleApi(req, res, u) {
     if (typeof body.playlistId === "string") sc.playlistId = body.playlistId;
     if (typeof body.w === "number") sc.w = body.w;
     if (typeof body.h === "number") sc.h = body.h;
+    if (body.d3 && typeof body.d3 === "object") sc.d3 = sanitizeD3(body.d3); // 3D 屏遛眼参数
     saveState(state);
     return json(res, 200, sc);
   }
@@ -367,7 +429,7 @@ async function handleApi(req, res, u) {
 
   // 素材库：新增（URL 或 base64 上传）
   if (p === "/api/media" && method === "POST") {
-    const type = ["image", "video", "stream"].includes(body.type) ? body.type : "image";
+    const type = ["image", "video", "stream", "model3d"].includes(body.type) ? body.type : "image";
     let url = String(body.url || "").trim();
     if (body.dataUrl && /^data:([^;]+);base64,/.test(body.dataUrl)) {
       const mime = /^data:([^;]+);base64,/.exec(body.dataUrl)[1];
@@ -377,13 +439,40 @@ async function handleApi(req, res, u) {
       url = `/media/${name}`;
     }
     if (!url) return json(res, 400, { error: "缺少 URL 或上传内容" });
-    const item = { id: uid("m"), name: String(body.name || "未命名素材").slice(0, 80), type, url, createdAt: new Date().toISOString() };
+    const d3 = sanitize3dAttrs(type, body.is3d, body.depth, body.flat);
+    const item = { id: uid("m"), name: String(body.name || "未命名素材").slice(0, 80), type, url, is3d: d3.is3d, depth: d3.depth, flat: d3.flat, createdAt: new Date().toISOString() };
     state.media.push(item);
     saveState(state);
     return json(res, 200, item);
   }
 
   m = /^\/api\/media\/([^/]+)$/.exec(p);
+  // 素材编辑（改名 / 换地址 / 重传替换）：与新增同一套表单，ID 不变。
+  // 注意：节目单条目记录的是素材地址字符串，地址变更后需重新发布才会上屏；
+  // 旧的本地上传文件保留不删 —— 已发布的节目单可能仍引用旧地址。
+  if (m && method === "PUT") {
+    const item = state.media.find((x) => x.id === decodeURIComponent(m[1]));
+    if (!item) return json(res, 404, { error: "素材不存在" });
+    if (typeof body.name === "string" && body.name.trim()) item.name = body.name.trim().slice(0, 80);
+    if (typeof body.type === "string" && ["image", "video", "stream", "model3d"].includes(body.type)) item.type = body.type;
+    if (typeof body.is3d === "boolean" || body.depth !== undefined || body.flat !== undefined || item.is3d === undefined) {
+      const d3 = sanitize3dAttrs(item.type, typeof body.is3d === "boolean" ? body.is3d : item.is3d, body.depth ?? item.depth, body.flat ?? item.flat);
+      item.is3d = d3.is3d; item.depth = d3.depth; item.flat = d3.flat;
+    }
+    if (body.dataUrl && /^data:([^;]+);base64,/.test(body.dataUrl)) {
+      const mime = /^data:([^;]+);base64,/.exec(body.dataUrl)[1];
+      const ext = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/svg+xml": ".svg", "video/mp4": ".mp4", "video/webm": ".webm" }[mime] || ".bin";
+      const fname = `${uid("up")}${ext}`;
+      fs.writeFileSync(path.join(MEDIA, fname), Buffer.from(body.dataUrl.split(",")[1], "base64"));
+      item.url = `/media/${fname}`;
+    } else if (typeof body.url === "string") {
+      item.url = body.url.trim();
+    }
+    if (!item.url) return json(res, 400, { error: "缺少 URL 或上传内容" });
+    item.updatedAt = new Date().toISOString();
+    saveState(state);
+    return json(res, 200, item);
+  }
   if (m && method === "DELETE") {
     const id = decodeURIComponent(m[1]);
     const item = state.media.find((x) => x.id === id);

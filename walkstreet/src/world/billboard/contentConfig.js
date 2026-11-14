@@ -40,7 +40,17 @@ export const CONTENT_TYPES = {
   image: { label: "图片", media: true, hint: "http(s) 图片地址；跨域图片需服务端允许 CORS" },
   video: { label: "视频", media: true, hint: "mp4 / webm 直链；远离屏幕时自动暂停解码" },
   stream: { label: "直播流", media: true, hint: "HLS(m3u8) 经 hls.js 低延迟播放；失败自动切备用海报" },
-  model3d: { label: "3D裸眼模型", media: true, hint: "GLB 模型经离轴投影呈现 3D 裸眼；仅 3D转角包柱屏生效，其他屏显示占位提示；URL 留空 = 内置 3D 演示" },
+  model3d: { label: "3D裸眼模型", media: true, hint: "GLB 经离轴投影呈现 3D 裸眼；仅 3D转角包柱屏生效，其他屏显示占位提示。留空 / builtin://demo1 = 内置演示1；builtin://demo2 = 演示2（12秒品牌广告）；builtin://calib = 几何校准片；也可填 http(s) 或 /media/ 的 GLB 地址" },
+};
+
+/** 屏位级 3D 参数默认值（实验台「遛眼参数 / 显示开关」同款，后台屏位绑定可改） */
+export const D3_DEFAULTS = {
+  depth: 2.5,   // 出屏深度（米，0~10）：contentRoot.position = VC + OUT·depth
+  scale: 1,     // 尺寸（0.4~2）：contentRoot.scale
+  spin: true,   // 轻微摆动/自转（平面素材板不受此开关影响，永远不转）
+  track: true,  // 片源跟随当前视点（实时追踪）；关闭则固定最佳视点
+  hud: false,   // 右下角双路预览（管理器叠加层）
+  helper: false, // 视线 / 眼位辅助线
 };
 
 export const DEFAULT_TEXT = "潮汇坊 · 中央大道商圈 今日营业至 22:00   ◆   新品上市 全场 8 折起   ◆   周末街头市集 · 梧桐街广场   ◆   ";
@@ -69,6 +79,18 @@ const clamp = (v, min, max, def) =>
 /** 规整配置：过滤未知类型/非法字段，保证运行时不会拿到脏数据 */
 export function normalizeContent(raw) {
   if (!raw || !Array.isArray(raw.items) || !raw.items.length) return null;
+  // 屏位级 3D 参数（仅 3D转角包柱屏消费；后台屏位绑定发布时合并进快照）
+  let d3 = null;
+  if (raw.d3 && typeof raw.d3 === "object") {
+    d3 = {
+      depth: clamp(Math.round((+raw.d3.depth || 0) * 10) / 10, 0, 10, D3_DEFAULTS.depth),
+      scale: clamp(Math.round((+raw.d3.scale || 0) * 100) / 100, 0.4, 2, D3_DEFAULTS.scale),
+      spin: raw.d3.spin !== false,
+      track: raw.d3.track !== false,
+      hud: !!raw.d3.hud,
+      helper: !!raw.d3.helper,
+    };
+  }
   const items = raw.items
     .filter((it) => it && CONTENT_TYPES[it.type])
     .slice(0, 16)
@@ -80,7 +102,15 @@ export function normalizeContent(raw) {
       if (it.type === "text") out.text = String(it.text || DEFAULT_TEXT).slice(0, 400);
       if (it.type === "clock") out.note = String(it.note || "晴 24°C").slice(0, 40);
       if (it.type === "ad") out.seed = clamp(it.seed, 0, 99999, 1);
-      if (it.type === "model3d") out.depth = clamp(Math.round((+it.depth || 0) * 10) / 10, 0, 10, 2.5);
+      // 条目级 3D 属性（来自素材库勾选，发布时合并）：是否 3D 展示 + 出屏深度（米，0~10）。
+      // model3d 天然是 3D 内容；普通素材勾选 is3d 也会进离轴管线，游戏端按条目实时切换显示模式。
+      const is3d = it.type === "model3d" || it.is3d === true;
+      if (it.type === "model3d" || it.is3d !== undefined) out.is3d = is3d;
+      if (is3d) {
+        out.depth = clamp(Math.round((+it.depth || 0) * 10) / 10, 0, 10, 2.5);
+        // 平贴退化（素材属性）：勾选后该条目跳过离轴渲染，按普通平面贴图直接贴屏
+        out.flat = it.flat === true;
+      }
       if (CONTENT_TYPES[it.type].media) {
         out.url = String(it.url || "").slice(0, 4000).trim();
         out.fallback = String(it.fallback || "").slice(0, 4000).trim();
@@ -93,13 +123,14 @@ export function normalizeContent(raw) {
     fit: FIT_MODES[raw.fit] ? raw.fit : "auto",
     transition: clamp(raw.transition, 0, 2, 0.6),
     audio: AUDIO_MODES[raw.audio] ? raw.audio : "off",
+    d3,
     items,
   };
 }
 
-/** 稳定哈希：相同配置 + 相同屏比 → 共享同一内容池 */
+/** 稳定哈希：相同配置 + 相同屏比 → 共享同一内容池（d3 参与：3D 参数不同 = 内容不同） */
 export function contentKey(cfg, aspect) {
-  const s = JSON.stringify([cfg.items, cfg.fit, cfg.audio]);
+  const s = JSON.stringify([cfg.items, cfg.fit, cfg.audio, cfg.d3 || 0]);
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0;
   return `${aspect.toFixed(2)}|${cfg.fit}|${h.toString(36)}`;

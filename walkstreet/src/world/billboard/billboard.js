@@ -1,12 +1,13 @@
 import * as THREE from "three/webgpu";
-import { texture as tslTexture, uniform as tslUniform, mix as tslMix } from "three/tsl";
+import { texture as tslTexture, uniform as tslUniform, mix as tslMix, uv, select } from "three/tsl";
 import { buildBillboardGroup, normalizeSpec } from "./mounts.js";
 import { Playlist } from "./playlist.js";
-import { DEBUG_3D } from "./content3d.js";
+import { DEBUG_3D, rtFlipNeeded } from "./content3d.js";
 
 /* 诊断模式 1：两面屏直接上测试图案（不经过 RT 内容），验证两面屏几何/UV/
  * 纹理分配是否正常。图案含网格（看变形/偏移）、"▲ TOP"（看上下颠倒）、
- * FACE A/B 大字（看两面分配）。 */
+ * FACE A/B 大字（看两面分配）。只创建一次并缓存：早期版本每次 onSwap 都新建
+ * CanvasTexture 且从不 dispose，换页会持续累积显存。 */
 function makeDebugFaceTex(i) {
   const is3d = i >= 0; // 0/1 = RT 数组两面的测试图；2 = 普通 2D 内容（两面同图）
   const c = document.createElement("canvas");
@@ -29,6 +30,11 @@ function makeDebugFaceTex(i) {
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
+let _debugFaceTexs = null;
+function debugFaceTexs() {
+  if (!_debugFaceTexs) _debugFaceTexs = [makeDebugFaceTex(0), makeDebugFaceTex(1), makeDebugFaceTex(2)];
+  return _debugFaceTexs;
+}
 
 /* ---------------- 大屏构建（运行时） ----------------
  * 只处理编辑器手动放置的 objects 记录 { type:"billboard", pos, rot, params:{mount,w,h,y} }
@@ -49,9 +55,9 @@ function whiteTex() {
   return t;
 }
 
-/** 屏幕材质：TSL 节点混合（cur → next 按 uMix 交叉淡入），替代 WebGL 版
+/** 屏幕材质：TSL 节点混合（cur → next 按 uMix 交叉淡入），替代 dev 版
  *  的 onBeforeCompile GLSL 注入（WebGPU 不走 onBeforeCompile）。
- *  保留 MeshBasicMaterial 的 toneMapped:false / 色彩空间 / Bloom 行为。
+ *  保留 toneMapped:false / 色彩空间 / Bloom 行为。
  *
  *  必须用 MeshBasicNodeMaterial：普通 MeshBasicMaterial 的 customProgramCacheKey()
  *  只看 onBeforeCompile + 材质属性，两块参数相同的屏面材质会算出同一个 key，
@@ -64,55 +70,89 @@ function screenMaterial() {
     color: 0xc4c4c4,
     toneMapped: false,
     // 只渲染面片正面：独立广告牌/转角屏各有朝外的面片，
-    // 立面屏贴墙单面，背面不显示内容（放反时也不会露出镜像文字），
     // 背面由 mounts.js 的实心机箱挡住，不会出现"看穿整块屏"
     side: THREE.FrontSide,
     map: null,
   });
-  // 纹理节点换图 = 换 .value（uniform 更新，不触发管线重编）
-  const cur = tslTexture(whiteTex());
-  const nxt = tslTexture(whiteTex());
+  // 纹理节点换图 = 换 .value（uniform 更新，不触发管线重编）。
+  // 离轴 RT 纹理在 WebGL 回退后端会被 TextureNode 自动 flipY 一次（GLSL 的
+  // isFlipY()===true），但 RT 内容本身方向正确，多翻这一下会让整幅画面上下颠倒。
+  // 这里用两个动态 uniform 选择 UV：命中 RT 时预先翻一次 Y，与 TextureNode 的
+  // 自动翻转抵消；普通 Canvas / VideoTexture 走原 UV。select 是静态节点图 +
+  // uniform 切换，不触发管线重编译；cur / nxt 各自独立，支持过渡期两类纹理混用。
+  const curRT = tslUniform(0), nxtRT = tslUniform(0);
+  const uvFor = (isRT) => select(isRT.greaterThan(0.5), uv().flipY(), uv());
+  const cur = tslTexture(whiteTex(), uvFor(curRT));
+  const nxt = tslTexture(whiteTex(), uvFor(nxtRT));
   const uMix = tslUniform(0);
-  m.userData.fadeTex = { cur, nxt, uMix };
+  m.userData.fadeTex = { cur, nxt, uMix, curRT, nxtRT };
   // 亮度系数直接取 material.color：不能用 materialColor 节点 —— 它内部会把
   // material.map 一起采样，而 map 正是 cur 指向的那张图，画面会被平方压暗。
-  // 与 WebGL 版 onBeforeCompile 一致：mix(旧图, 新图, uMix) * 材质色。
   m.colorNode = tslMix(cur.rgb, nxt.rgb, uMix).mul(tslUniform(m.color));
   return m;
 }
 
+/** 当前纹理是否需要屏面 UV 反向补偿：仅「离轴 RT 纹理 + WebGL 回退后端」 */
+function rtCompensation(t) {
+  return (t && t.isRenderTargetTexture === true && rtFlipNeeded()) ? 1 : 0;
+}
+
+/** 整屏平面展示 UV：两面拼成一张画布（实验台 applyPlaneUv 同款）。
+ *  A 面取画布左半 u[0,0.5]，B 面取右半 u[0.5,1]；half=null 恢复整幅 u[0,1]。
+ *  纯几何属性，与渲染后端无关。原始 UV 缓存在 mesh.userData.uv0。 */
+function applyPlaneUV(mesh, half) {
+  if (!mesh || !mesh.geometry || !mesh.geometry.attributes.uv) return;
+  const attr = mesh.geometry.attributes.uv;
+  if (!mesh.userData.uv0) mesh.userData.uv0 = attr.array.slice();
+  const src = mesh.userData.uv0, dst = attr.array;
+  for (let k = 0; k < src.length; k += 2) {
+    const u = src[k];
+    dst[k] = half === 0 ? u * 0.5 : half === 1 ? 0.5 + u * 0.5 : u;
+    dst[k + 1] = src[k + 1];
+  }
+  attr.needsUpdate = true;
+}
+
 /** 交叉淡入控制器：过渡期间保持旧图（cur），按 uMix 混入新图（nxt），结束后换 map。
- *  mats 可为多块材质（3D转角包柱屏两面共用一份节目单）——uniform 同步推进。
- *  数组纹理（3D 裸眼各面 RT）不支持 shader 混合，直接硬切。 */
+ *  纹理一律按面展开为 [面0, 面1, ...]（3D 裸眼 = 各面离轴 RT，普通内容 = 每面同张）；
+ *  每块材质各有自己的 cur/nxt/uMix 节点，必须逐面写入 —— 此前只写 mats[0] 会让
+ *  第二面永不混合；而把数组原样塞进 TSL 纹理节点会绑到无效采样单元，
+ *  GPU 保留旧绑定 → 上一条内容的冻结帧永远残留在屏面上。 */
 function createFade(mats, duration) {
-  let next = null, mix = 0;
-  const fades = () => mats.map((m) => m.userData.fadeTex).filter(Boolean);
+  let nextTexs = null, mix = 0;
+  const fadeOf = (m) => m.userData.fadeTex;
+  const sameTexs = (a, b) => a === b || (!!a && !!b && a.length === b.length && a.every((t, i) => t === b[i]));
   const commit = () => {
-    for (const m of mats) {
-      m.map = next;
-      const f = m.userData.fadeTex;
-      if (f) f.cur.value = next;
-    }
-    for (const f of fades()) f.uMix.value = 0;
-    next = null; mix = 0;
+    mats.forEach((m, mi) => {
+      const t = nextTexs ? nextTexs[mi] : null;
+      m.map = t;
+      const f = fadeOf(m);
+      if (f) {
+        if (t) f.cur.value = t;
+        f.curRT.value = rtCompensation(t);
+        f.uMix.value = 0;
+      }
+    });
+    nextTexs = null; mix = 0;
   };
   return {
     /** @returns {boolean} true = 交给过渡处理，调用方不要立刻换 map */
-    begin(prev, tex) {
-      if (next) commit(); // 上一轮过渡尚未结束又被切：先落定
-      if (Array.isArray(tex)) return false; // 3D RT 数组：硬切
-      if (duration <= 0 || !prev || prev === tex || !fades().length) return false;
-      next = tex; mix = 0;
-      for (const f of fades()) {
-        f.nxt.value = tex;
+    begin(prev, tex, canFade = true) {
+      if (nextTexs) commit(); // 上一轮过渡尚未结束又被切：先落定
+      const fs = mats.map(fadeOf);
+      if (!canFade || duration <= 0 || !prev || sameTexs(prev, tex) || fs.some((f) => !f)) return false;
+      nextTexs = tex; mix = 0;
+      fs.forEach((f, mi) => {
+        f.nxt.value = tex[mi];
+        f.nxtRT.value = rtCompensation(tex[mi]);
         f.uMix.value = 0;
-      }
+      });
       return true;
     },
     advance(dt) {
-      if (!next) return;
+      if (!nextTexs) return;
       mix = Math.min(1, mix + dt / duration);
-      for (const f of fades()) f.uMix.value = mix;
+      for (const f of mats.map(fadeOf)) if (f) f.uMix.value = mix;
       if (mix >= 1) commit();
     },
   };
@@ -120,10 +160,10 @@ function createFade(mats, duration) {
 
 /**
  * 构建一块（或多块）可播放的大屏：承载形式几何 + 内容轮播 + 过渡。
- * 转角包柱屏（corner）拆成两面，返回两个独立 screen（id 带 ::A / ::B 后缀），
- * 各自有独立材质与节目单，可分别绑定不同内容。
+ * 转角包柱屏（corner）拆成两面，返回两个独立 screen（id 带 ::A / ::B 后缀）。
  * 3D转角包柱屏（corner3d）是一体屏：单 screen + 两块材质，一份节目单；
- * onSwap 收到数组纹理（各面离轴 RT）时按面分配，普通纹理两面共用。
+ * onSwap 收到数组纹理（各面离轴 RT）时按面分配，普通纹理两面共用；
+ * 勾选「整屏平面展示」的素材带 planeFull 标记，两面 UV 各取半幅。
  * @returns {Array} screen 数组
  */
 export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
@@ -163,27 +203,50 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
       city.colliders.add(minX, minZ, maxX, maxZ, c.top);
     }
 
-    let applied = false;
     let fade = createFade(faceMats, (pool.cfg && pool.cfg.transition) || 0);
-    // 数组纹理（3D 裸眼）= [面A RT, 面B RT] 按面分配；普通纹理分配到所有面
-    const applyTex = (tex) => {
+    // 当前上屏纹理：按面展开（数组纹理 = [面A RT, 面B RT] 按面分配；普通纹理每面同张）
+    let curTexs = null;
+    // 整屏平面展示状态：true = 两面拼一张图（UV 对半拆），null = 尚未初始化
+    let curPlane = null;
+    // 3D转角屏的两面 mesh（整屏平面模式要改 UV），其余形式为空数组。
+    // 注意 corner3d 的 faceGroups 只有 1 个组、两面 mesh 都在里面 —— 必须按材质跨组查找
+    const faceMeshes = isCorner3d
+      ? faceMats.map((m) => built.faceGroups
+          .flatMap((g) => g.children)
+          .find((c) => c.isMesh && c.material === m) || null)
+      : [];
+    const setPlaneUV = (on) => faceMeshes.forEach((fm, fi) => applyPlaneUV(fm, on ? fi : null));
+    const toFaceTexs = (tex) => {
       const arr = Array.isArray(tex) ? tex : null;
+      return faceMats.map((_, mi) => (arr ? (arr[mi] || arr[0] || null) : tex));
+    };
+    const applyTex = (texs) => {
       faceMats.forEach((m, mi) => {
-        const t = arr ? (arr[mi] || arr[0]) : tex;
+        const t = texs[mi];
         m.map = t;
         const f = m.userData.fadeTex;
-        if (f) f.cur.value = t; // 节点混合走 fadeTex，map 仅作状态记录
+        if (f) {
+          if (t) f.cur.value = t;
+          f.curRT.value = rtCompensation(t);
+        } // 节点混合走 fadeTex，map 仅作状态记录
       });
-      applied = true;
+      curTexs = texs;
     };
     const onSwap = (tex) => {
-      const prev = faceMats[0].map;
       if (DEBUG_3D === 1) { // 诊断：测试图案替换 RT 内容（分配路径不变）
-        applyTex(Array.isArray(tex) ? [makeDebugFaceTex(0), makeDebugFaceTex(1)] : makeDebugFaceTex(2));
+        const d = debugFaceTexs();
+        applyTex(Array.isArray(tex) ? d.slice(0, 2) : toFaceTexs(d[2]));
         return;
       }
-      if (fade.begin(prev, tex)) return; // 过渡中：保持旧 map，由 shader 混合新图
-      applyTex(tex);
+      // 整屏平面 ↔ 离轴/每面整幅 模式切换时改面 UV；UV 是几何属性，交叉淡入期间
+      // 新旧纹理共用同一 UV，半幅 UV 会把旧图拉花 —— 模式不同时退化为硬切
+      const plane = !Array.isArray(tex) && !!tex && tex.planeFull === true;
+      const prevPlane = curPlane;
+      if (plane !== curPlane) setPlaneUV(plane);
+      curPlane = plane;
+      const texs = toFaceTexs(tex);
+      if (fade.begin(curTexs, texs, plane === prevPlane)) return; // 过渡中：保持旧 map，由节点混合新图
+      applyTex(texs);
     };
     const playlist = new Playlist(pool, schedule, onSwap, phaseFor(item.id + suffixes[i], basePhase), fade);
 
@@ -201,11 +264,11 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
     };
 
     /** 后台发布内容热更新：只换内容池与轮播器，不重建几何 / 不动场景节点。
-     *  过渡中的 shader uniform 先归零，避免新轮播接手后残留半透明混合。 */
+     *  过渡中的节点 uniform 先归零，避免新轮播接手后残留半透明混合。 */
     b.setContent = (newPool, newSchedule, key) => {
       for (const m of faceMats) {
         const f = m.userData.fadeTex;
-        if (f) { f.uMix.value = 0; f.nxt.value = whiteTex(); }
+        if (f) { f.uMix.value = 0; f.nxt.value = whiteTex(); f.nxtRT.value = 0; }
       }
       fade = createFade(faceMats, (newPool.cfg && newPool.cfg.transition) || 0);
       // 沿用原轮播相位，但夹在新首条时长内，避免换配置后立刻又翻页
