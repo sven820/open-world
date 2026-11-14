@@ -488,33 +488,6 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
       format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
     }),
   }));
-  // 每面预计算：面中心 / 朝外法线（与 offAxis 的 _vn 同向：eye 在前则 dot>0），
-  // 供「极端眼位正视降级」判定与降级相机定位用。
-  {
-    const _a = new THREE.Vector3(), _b = new THREE.Vector3();
-    for (const r of rts) {
-      r.center = new THREE.Vector3().add(r.f.pa).add(r.f.pb).add(r.f.pc).add(r.f.pd).multiplyScalar(0.25);
-      r.normal = new THREE.Vector3()
-        .crossVectors(_a.subVectors(r.f.pb, r.f.pa).normalize(), _b.subVectors(r.f.pc, r.f.pa).normalize())
-        .normalize();
-    }
-  }
-  /* —— 极端眼位正视降级 ——
-   * 离轴预畸变的「窗口视」只在眼睛位于屏前合理锥角内才有意义。玩家爬高俯瞰、
-   * 贴脸走过时，眼与面法线夹角过斜，从窗口望进去看到的主要是内容场景的
-   * 背景：两面 RT 一面黑屏、一面把内容压成一条弯折带（俯视变形的根源，
-   * dev / 实验台同样存在，属离轴投影物理特性而非渲染回归）。
-   * 此时改用正视相机渲两面 RT，屏面退化为普通平面屏：任何角度看都是
-   * 干净的内容画面；回到合理锥角后自动切回离轴。迟滞阈值防临界抖动。 */
-  const FRONT_ENTER_COS = 0.5;   // 与任一面法线夹角 > 60°（贴脸走过）→ 进入正视降级
-  const FRONT_EXIT_COS = 0.58;   // 全部面夹角 < ~55° → 切回离轴
-  const FRONT_TOP_ENTER = 4;     // 眼高于屏顶 4m（俯瞰）→ 进入正视降级
-  const FRONT_TOP_EXIT = 2.5;    // 降级后需降回屏顶 2.5m 以内才切回（迟滞）
-  const FRONT_DIST = 24;         // 降级相机：沿面法线退距（fov 55° 下可容纳出屏内容）
-  let frontalMode = false;
-  const frontCam = new THREE.PerspectiveCamera(55, RTW / RTH, NEAR, FAR);
-  frontCam.layers.set(layer);
-  frontCam.coordinateSystem = renderer.coordinateSystem;
 
   /* —— 提示专用正交场景（加载中 / 失败时两面 RT 都画这张正对观众的图） —— */
   const noticeScene = new THREE.Scene();
@@ -814,25 +787,6 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
         eyeBall.position.copy(_eye);
       }
 
-      /* ---- 极端眼位判定：贴脸走过 / 俯瞰则整屏切正视降级（见上方 FRONT_* 注释） ----
-       * 诊断模式 2（?bb3ddebug=2）豁免：它本身就要走离轴/透视对照路径。
-       * 注意地面 45° 斜看（corner-on 经典观赏位）不在降级之列：判定除了
-       * 夹角还要求眼睛明显高于屏顶，两个条件都带迟滞防临界抖动。 */
-      if (!dbgCam) {
-        let worstCos = 1, topY = -Infinity;
-        for (const r of rts) {
-          topY = Math.max(topY, r.f.pa.y, r.f.pb.y, r.f.pc.y, r.f.pd.y);
-          _rel.subVectors(_eye, r.center);
-          const len = _rel.length();
-          const c2 = len > 1e-3 ? _rel.divideScalar(len).dot(r.normal) : 0;
-          if (c2 < worstCos) worstCos = c2;
-        }
-        const offZone = frontalMode
-          ? (worstCos < FRONT_EXIT_COS || _eye.y > topY + FRONT_TOP_EXIT)
-          : (worstCos < FRONT_ENTER_COS || _eye.y > topY + FRONT_TOP_ENTER);
-        if (offZone !== frontalMode) { frontalMode = offZone; markRtDirty(); }
-      }
-
       /* ---- 视锥剔除：屏不在取景视野内就完全不生成片源 ----
        * 开放世界里一块屏可能长期在 300m 激活半径内、却始终背对玩家；
        * 提前 return 连 demo2 的 140 实例矩阵 / 700 点重算都省掉。
@@ -882,18 +836,6 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
         for (const r of rts) {
           renderer.setRenderTarget(r.rt);
           renderer.render(noticeScene, noticeCam);
-        }
-      } else if (frontalMode) {
-        // 极端眼位正视降级：每面从自己的法线方向正视内容，两面画面一致、
-        // 不随眼位畸变。相机固定（不随眼位），静态内容在降级期间命中缓存。
-        const contentWorld = _look.copy(VC).addScaledVector(OUT, depth);
-        for (const r of rts) {
-          frontCam.position.copy(r.center).addScaledVector(r.normal, FRONT_DIST);
-          frontCam.lookAt(contentWorld);
-          frontCam.coordinateSystem = renderer.coordinateSystem;
-          frontCam.updateProjectionMatrix();
-          renderer.setRenderTarget(r.rt);
-          renderer.render(adScene, frontCam);
         }
       } else {
         // 双路离轴：渲独立 adScene，不再碰主场景（背景/雾/整城遍历都省掉）
