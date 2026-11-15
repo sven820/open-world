@@ -12,7 +12,9 @@ param(
     [string]$Action = 'start',
     [switch]$NoBrowser,
     [switch]$Visible,
-    [switch]$Install
+    [switch]$Install,
+    # -Follow: keep tailing the service logs in this terminal after start
+    [switch]$Follow
 )
 
 $ErrorActionPreference = 'Stop'
@@ -128,6 +130,156 @@ function Wait-Ready([string]$Url, [int]$ProcId, [int]$TimeoutSec) {
     return $false
 }
 
+# --- live log tailing -------------------------------------------------------
+# The services are started detached with stdout/stderr redirected to files.
+# These helpers stream new bytes from those files into this console, so the
+# start window shows runtime logs (vite requests, errors, server output).
+
+function New-LogTail([string]$Path, [string]$Label, [string]$Color, [switch]$SkipExisting) {
+    $offset = [long]0
+    if ($SkipExisting -and (Test-Path -LiteralPath $Path)) {
+        # service was already running before this start -> skip its old history
+        $offset = [long](Get-Item -LiteralPath $Path).Length
+    }
+    [pscustomobject]@{
+        Path    = $Path
+        Label   = $Label
+        Color   = $Color
+        Offset  = $offset
+        Partial = (New-Object byte[] 0)
+    }
+}
+
+function Read-LogTail($Tail) {
+    if (-not (Test-Path -LiteralPath $Tail.Path)) { return }
+
+    $len = [long](Get-Item -LiteralPath $Tail.Path).Length
+    if ($len -lt $Tail.Offset) {          # file was truncated (service restarted)
+        $Tail.Offset  = 0
+        $Tail.Partial = (New-Object byte[] 0)
+    }
+    if ($len -eq $Tail.Offset) { return }
+
+    $fs  = $null
+    $buf = $null
+    try {
+        $fs = [System.IO.File]::Open($Tail.Path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite)
+        [void]$fs.Seek($Tail.Offset, [System.IO.SeekOrigin]::Begin)
+        $count = [int]($len - $Tail.Offset)
+        $buf   = New-Object byte[] $count
+        $read  = $fs.Read($buf, 0, $count)
+        if ($read -le 0) { return }
+        $Tail.Offset += $read
+    } catch {
+        return
+    } finally {
+        if ($fs) { $fs.Dispose() }
+    }
+
+    # prepend the never-emitted tail of the previous read (partial line / split
+    # multi-byte char), then emit only up to the last newline seen
+    $total = $Tail.Partial.Length + $read
+    $all   = New-Object byte[] $total
+    [Array]::Copy($Tail.Partial, 0, $all, 0, $Tail.Partial.Length)
+    [Array]::Copy($buf, 0, $all, $Tail.Partial.Length, $read)
+
+    $lastNl = -1
+    for ($i = $total - 1; $i -ge 0; $i--) {
+        if ($all[$i] -eq 10) { $lastNl = $i; break }
+    }
+    if ($lastNl -lt 0) {
+        $Tail.Partial = $all
+        return
+    }
+
+    $Tail.Partial = (New-Object byte[] 0)
+    if ($lastNl + 1 -lt $total) {
+        $rest = New-Object byte[] ($total - $lastNl - 1)
+        [Array]::Copy($all, $lastNl + 1, $rest, 0, $rest.Length)
+        $Tail.Partial = $rest
+    }
+
+    $text  = [System.Text.Encoding]::UTF8.GetString($all, 0, $lastNl + 1)
+    $stamp = (Get-Date).ToString('HH:mm:ss')
+    foreach ($line in ($text -split "`r?`n")) {
+        if ($line.Length -eq 0) { continue }
+        # drop ANSI colour codes (vite writes them; the legacy console shows them raw)
+        if ($line.IndexOf([char]27) -ge 0) {
+            $line = [regex]::Replace($line, "$([char]27)\[[0-9;?]*[ -/]*[@-~]", '')
+            if ($line.Length -eq 0) { continue }
+        }
+        Write-Host ("{0} [{1}] {2}" -f $stamp, $Tail.Label, $line) -ForegroundColor $Tail.Color
+    }
+}
+
+function Invoke-FollowLogs([int]$AdminPid, [int]$GamePid, [bool]$AdminFresh, [bool]$GameFresh) {
+    $adminSkip = -not $AdminFresh
+    $gameSkip  = -not $GameFresh
+    $tails = @(
+        (New-LogTail $Logs.adminOut 'admin' 'Cyan'       -SkipExisting:$adminSkip),
+        (New-LogTail $Logs.adminErr 'admin' 'DarkYellow' -SkipExisting:$adminSkip),
+        (New-LogTail $Logs.gameOut  'game'  'Green'      -SkipExisting:$gameSkip),
+        (New-LogTail $Logs.gameErr  'game'  'DarkYellow' -SkipExisting:$gameSkip)
+    )
+
+    Write-Host ''
+    Write-Host '---- live logs ----' -ForegroundColor DarkCyan
+    Write-Host '  Ctrl+C or Q : stop watching logs (services keep running)' -ForegroundColor DarkGray
+    Write-Host ''
+
+    # Swallow Ctrl+C as a normal key so the watcher exits cleanly and the
+    # underlying services are not affected by the console interrupt.
+    $keyboard = $false
+    try {
+        [Console]::TreatControlCAsInput = $true
+        $keyboard = $true
+    } catch {
+        $keyboard = $false
+    }
+
+    try {
+        while ($true) {
+            foreach ($t in $tails) { Read-LogTail $t }
+
+            if ($keyboard) {
+                try {
+                    while ([Console]::KeyAvailable) {
+                        $key = [Console]::ReadKey($true)
+                        $isCtrlC = (($key.Modifiers -band [ConsoleModifiers]::Control) -and ($key.Key -eq 'C'))
+                        if ($isCtrlC -or $key.Key -eq 'Q') {
+                            Write-Host ''
+                            Write-Host '  stopped watching logs - services are still running.' -ForegroundColor DarkGray
+                            return
+                        }
+                    }
+                } catch {
+                    $keyboard = $false
+                }
+            }
+
+            $alive = $false
+            foreach ($procId in @($AdminPid, $GamePid)) {
+                if ($procId -gt 0 -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { $alive = $true }
+            }
+            if (-not $alive) {
+                foreach ($t in $tails) { Read-LogTail $t }
+                Write-Host ''
+                Write-Host '  services exited - log watching stopped.' -ForegroundColor Yellow
+                return
+            }
+
+            Start-Sleep -Milliseconds 250
+        }
+    } finally {
+        if ($keyboard) {
+            try { [Console]::TreatControlCAsInput = $false } catch { }
+        }
+    }
+}
+
 function Invoke-Start {
     Write-Host ''
     Write-Host '== open-world local dev / start ==' -ForegroundColor Cyan
@@ -157,8 +309,10 @@ function Invoke-Start {
     }
 
     Ensure-StateDir
-    $adminPid = 0
-    $gamePid  = 0
+    $adminPid    = 0
+    $gamePid     = 0
+    $adminFresh  = $false   # true = log files were (re)created by this start
+    $gameFresh   = $false
 
     # 1) admin backend + admin UI (one process, port 8787)
     $owners = @(Get-PortOwners $AdminPort)
@@ -170,6 +324,7 @@ function Invoke-Start {
         throw "Port $AdminPort is held by another process (PID $($owners -join ', ')). Free it first."
     } else {
         Write-Host '[1/2] starting admin/server.js (backend + admin UI) ...'
+        $adminFresh = $true
         $adminPid = Start-Node $AdminDir @('server.js') $Logs.adminOut $Logs.adminErr
         if (-not (Wait-Ready "$AdminBase/api/health" $adminPid 40)) {
             throw "admin/server.js did not become ready on $AdminPort. Log: $($Logs.adminErr)"
@@ -187,6 +342,7 @@ function Invoke-Start {
         throw "Port $GamePort is held by another process (PID $($owners -join ', ')). Free it first."
     } else {
         Write-Host '[2/2] starting walkstreet vite ...'
+        $gameFresh = $true
         $quoted   = '"{0}"' -f $viteCli
         $viteArgs = @($quoted, '--host', '127.0.0.1', '--port', "$GamePort", '--strictPort')
         $gamePid  = Start-Node $GameDir $viteArgs $Logs.gameOut $Logs.gameErr
@@ -210,6 +366,13 @@ function Invoke-Start {
     if (-not $NoBrowser) {
         Start-Process $AdminUrl
         Start-Process $GameUrl
+    }
+
+    if ($Follow -and -not $Visible) {
+        Invoke-FollowLogs $adminPid $gamePid $adminFresh $gameFresh
+    } elseif ($Follow -and $Visible) {
+        Write-Host '  note: -Visible already opens a console per service; log watching is skipped.' -ForegroundColor DarkGray
+        Write-Host ''
     }
 }
 
