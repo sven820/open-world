@@ -223,12 +223,15 @@ function playlistToContent(pl, base, media = []) {
   };
 }
 
-/** 屏位级 3D 参数（遛眼参数 / 显示开关）：只保留白名单字段，非法值丢弃交给游戏端兜底 */
+/** 屏位级 3D 参数（遛眼参数 / 屏体几何 / 显示开关）：只保留白名单字段，非法值丢弃交给游戏端兜底 */
 function sanitizeD3(raw) {
   const out = {};
   const num = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v * 100) / 100 : undefined);
   const depth = num(raw.depth); if (depth !== undefined) out.depth = depth;
   const scale = num(raw.scale); if (scale !== undefined) out.scale = scale;
+  // 转角弧度（圆角半径，米）：0 = 直角共棱；游戏端还会按屏宽再夹一次上限
+  const arc = num(raw.arc);
+  if (arc !== undefined) out.arc = Math.min(5, Math.max(0, arc));
   for (const k of ["spin", "track", "hud", "helper"]) {
     if (typeof raw[k] === "boolean") out[k] = raw[k];
   }

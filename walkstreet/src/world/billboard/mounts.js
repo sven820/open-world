@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { makeCanvas } from "../textures.js";
+import { CornerArcScreen, clampArcRadius, cornerArcSamples, ARC_R_MAX } from "./cornerArc.js";
 
 /* ---------------- 广告大屏 · 承载形式注册表 ----------------
  * 每种承载形式（mount）描述屏体如何"立"在世界里：
@@ -177,25 +178,29 @@ export const MOUNTS = {
   corner3d: {
     label: "3D转角包柱屏",
     defaults: { w: 14, h: 8, y: 13 },
-    build(spec, mats) {
+    /** @param {{pos:[number,number], rot:number}} [place] 运行时定位（billboard.js 传入），
+     *  圆角屏逐帧 UV 重投影需要与 group 完全一致的 pos/rot，故在构建期就要拿到。 */
+    build(spec, mats, place) {
       const w = spec.w, h = spec.h, y = spec.y;
+      const matA = mats[0], matB = mats[1] || mats[0];
+      // 屏体几何（直角 / 圆角 1/4 圆柱）统一交给 CornerArcScreen：
+      // 半径 0 时它走的就是原来那套「方盒塔体 + 两块四边面片」，逐项一致。
+      const ctl = new CornerArcScreen(spec, [matA, matB], {
+        pos: place ? place.pos : null,
+        rot: place ? place.rot : 0,
+        refFaces: corner3dFaceDefs(spec),
+      });
       const towerW = w + 1.4;
       const totalH = y + h / 2 + 0.6;
-      const group = new THREE.Group();
-      group.add(mesh(new THREE.BoxGeometry(towerW, totalH, towerW), housingMat(), 0, totalH / 2, 0));
-      const trim = mesh(new THREE.BoxGeometry(towerW + 0.3, 0.5, towerW + 0.3), trimMat(), 0, totalH + 0.25, 0);
-      trim.castShadow = false;
-      group.add(trim);
-      // 一体屏面：corner3dFaceDefs 给出两面四边形的局部四角（转角棱线处顶点重合）
-      const matA = mats[0], matB = mats[1] || mats[0];
-      for (const f of corner3dFaceDefs(spec)) {
-        const face = new THREE.Mesh(quadGeom(f.pa, f.pb, f.pc, f.pd), f.i === 0 ? matA : matB);
-        face.castShadow = false;
-        group.add(face);
-      }
       const half = towerW / 2;
       const collider = { x0: -half, z0: -half, x1: half, z1: half, top: totalH };
-      return { faceGroups: [group], screenMats: [matA, matB], collider };
+      return {
+        faceGroups: [ctl.group],
+        screenMats: [matA, matB],
+        collider,
+        cornerArc: ctl,                        // 圆角屏控制器（半径热更新 / UV 模式 / 逐帧重投影）
+        faceMeshes: ctl.faceMeshes(),          // 每面的屏面网格（圆角时每面多段条带）
+      };
     },
   },
 };
@@ -245,18 +250,35 @@ export function corner3dWorldFaces(spec, pos, rot = 0) {
   });
 }
 
+/** corner3d 圆角屏面的世界坐标采样点（每面一圈上下沿），供 content3d.js 估算
+ *  弧段 UV 是否越出 RT 视锥、需要外扩多少。半径 0 时返回 null（直角屏无越界）。 */
+export function corner3dWorldArcSamples(spec, pos, rot = 0) {
+  const local = cornerArcSamples(spec, spec.arc);
+  if (!local) return null;
+  const cs = Math.cos(rot), sn = Math.sin(rot);
+  const out = local.map((list) => list.map((p) => new THREE.Vector3(
+    pos[0] + p.x * cs + p.z * sn, p.y, pos[1] - p.x * sn + p.z * cs,
+  )));
+  out.radius = local.radius;
+  return out;
+}
+
 export function getMount(id) { return MOUNTS[id] || MOUNTS.standalone; }
 
 /* 规整 params：缺省取承载形式默认值，数值夹取安全范围 */
 export function normalizeSpec(params = {}) {
   const known = MOUNTS[params.mount] ? params.mount : "standalone";
   const def = MOUNTS[known].defaults;
-  return {
+  const spec = {
     mount: known,
     w: clampN(params.w, 4, 40, def.w),
     h: clampN(params.h, 2, 30, def.h),
     y: clampN(params.y, 3, 120, def.y),
+    arc: 0,
   };
+  // 转角弧度只对 3D转角包柱屏 生效（其它承载形式的转角是两块独立屏，无从圆角）
+  if (known === "corner3d") spec.arc = clampArcRadius(spec, clampN(params.arc, 0, ARC_R_MAX, 0));
+  return spec;
 }
 
 /**
@@ -270,7 +292,9 @@ export function normalizeSpec(params = {}) {
  */
 export function buildBillboardGroup(item, screenMat) {
   const spec = normalizeSpec(item.params);
-  const built = getMount(spec.mount).build(spec, asMats(screenMat));
+  const built = getMount(spec.mount).build(spec, asMats(screenMat), {
+    pos: item.pos, rot: item.rot || 0,
+  });
   const group = new THREE.Group();
   for (const fg of built.faceGroups) {
     fg.position.set(0, 0, 0);

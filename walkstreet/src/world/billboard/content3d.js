@@ -68,19 +68,33 @@ const _projScreen = new THREE.Matrix4();
 const RT_STATS = { renders: 0, skips: 0, videoFrames: 0 };
 if (typeof window !== "undefined") window.__rt3d = RT_STATS;
 
+/* 离轴矩阵批次号（全局单调）：圆角屏据此判断屏面 UV 是否需要重投影。
+ * 必须全局递增，否则换条目时批次号可能撞车，导致 UV 漏更新。 */
+let _projSeqGlobal = 0;
+
 /* 实验台 §5 离轴投影（逐字同款，仅改 three 引用名） */
 const _vr = new THREE.Vector3(), _vu = new THREE.Vector3(), _vn = new THREE.Vector3();
 const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vector3();
 const _P = new THREE.Matrix4(), _R = new THREE.Matrix4(), _Tm = new THREE.Matrix4(), _M = new THREE.Matrix4();
 const _eye = new THREE.Vector3(), _look = new THREE.Vector3(), _rel = new THREE.Vector3();
 
-function offAxis(pa, pb, pc, pe, near, far) {
+/* pad = 视锥外扩比例（0 = 原样）。圆角屏的弧段顶点不在参考平面上，从斜侧看会把
+ * 超出参考四边形的画面投到 u<0 / u>1 —— 也就是 RT 视锥外。此时把视锥按米级外扩一点，
+ * 让弧段采样到的内容仍在 RT 内，否则会被 clamp 拉成一条竖带（接缝处明显）。
+ * 平面段顶点的 UV 不受影响：RT 内容同步按同一矩阵渲染，屏幕最终成像不变。 */
+function offAxis(pa, pb, pc, pe, near, far, pad) {
   _vr.subVectors(pb, pa).normalize(); _vu.subVectors(pc, pa).normalize();
   _vn.crossVectors(_vr, _vu).normalize();
   _va.subVectors(pa, pe); _vb.subVectors(pb, pe); _vc.subVectors(pc, pe);
   let d = -_vn.dot(_va); if (d < 0.05) d = 0.05;
-  const l = _vr.dot(_va) * near / d, r = _vr.dot(_vb) * near / d,
+  let l = _vr.dot(_va) * near / d, r = _vr.dot(_vb) * near / d,
     b = _vu.dot(_va) * near / d, t = _vu.dot(_vc) * near / d;
+  if (pad > 0) {   // 按视锥中心等比外扩（屏幕宽度的 pad 倍）
+    const cx = (l + r) * 0.5, cy = (b + t) * 0.5;
+    const k = 1 + pad * 2;
+    l = cx + (l - cx) * k; r = cx + (r - cx) * k;
+    b = cy + (b - cy) * k; t = cy + (t - cy) * k;
+  }
   _P.set(
     2 * near / (r - l), 0, (r + l) / (r - l), 0,
     0, 2 * near / (t - b), (t + b) / (t - b), 0,
@@ -90,6 +104,52 @@ function offAxis(pa, pb, pc, pe, near, far) {
   _R.set(_vr.x, _vr.y, _vr.z, 0, _vu.x, _vu.y, _vu.z, 0, _vn.x, _vn.y, _vn.z, 0, 0, 0, 0, 1);
   _Tm.makeTranslation(-pe.x, -pe.y, -pe.z);
   return _M.copy(_P).multiply(_R).multiply(_Tm);
+}
+
+const _padP = new THREE.Vector3();
+/** 估算弧段采样点越出参考四边形 UV 多少（0 = 完全在内）。
+ *  必须同时量 u 与 v：正对一面、另一面斜对时，弧段除了左右越界，还会因为
+ *  视点低于屏底而整体从垂直方向（v<0 / v>1）越出参考四边形 —— 只量 u 会漏掉，
+ *  表现出来就是弧段被 clamp 拉成一条竖带（画面像被撕开 / 重影）。
+ *  外扩量按 NDC 比例（中心不动，等比缩放 1/(1+2·pad)），所以 u/v 越界量直接当 pad 用；
+ *  再加 0.012 余量与 smoothstep 起步，上限 0.8 与实验台一致。 */
+function arcPad(pts, M) {
+  if (!pts || !pts.length) return 0;
+  let ux = 0, un = 1, vx = 0, vn = 1;
+  for (const p of pts) {
+    _padP.copy(p).applyMatrix4(M);
+    const u = _padP.x * 0.5 + 0.5, v = _padP.y * 0.5 + 0.5;
+    if (u > ux) ux = u;
+    if (u < un) un = u;
+    if (v > vx) vx = v;
+    if (v < vn) vn = v;
+  }
+  const over = Math.max(ux - 1, -un, vx - 1, -vn, 0);
+  if (over <= 0) return 0;
+  const k = Math.min(1, over / 0.01);
+  const sm = k * k * (3 - 2 * k);   // smoothstep：小越界几乎不外扩，避免无谓损失
+  return Math.min(0.8, over + 0.012 * sm);
+}
+
+/* ---------------- 侧对 / 背向时的「参考面回退」 ----------------
+ * 离轴投影必须从参考面前方取景：正对 A 面时 B 面的 d 会降到 0 甚至为负，
+ * offAxis 只能把 d 钳到 0.05，那一面的投影矩阵退化 —— 屏面被斜切拉花。
+ *
+ * 注意：**不能靠移动眼位来救**。两路 RT 一旦来自不同视点，共棱处的画面就不再是
+ * 同一条视线上的内容，圆角弧段（一半取 A 路、一半取 B 路）会明显错位 ——
+ * 表现就是「圆环在转角处断开 / 扭成钩子」。
+ *
+ * 正确做法：眼位永远等于真实相机，只把「退化那一面」的参考四边形换成对面那块的。
+ * 同一眼位下，任何参考平面渲染出来的都是同一条视线上的内容，所以屏面成像不变、
+ * 接缝严格连续，代价只是这一路 RT 的分辨率摊到了更大范围（该面此时接近侧对，
+ * 在屏上只占几个像素）。切换点在 d = SAFE_D，两侧内容本就一致，所以没有跳变。 */
+const SAFE_D = 2.5;          // 面法线方向的最小可取景距离（米）
+const _gN = new THREE.Vector3(), _gC = new THREE.Vector3(), _gE = new THREE.Vector3();
+/** 眼位到该面平面的有符号距离（正 = 在面外侧，可取景）。
+ *  face 四角与 offAxis 同一绕序，法线 = right(pa→pb) × up(pa→pc)。 */
+function faceDist(face, eye) {
+  _gN.subVectors(face.pb, face.pa).cross(_gC.subVectors(face.pc, face.pa)).normalize();
+  return _gN.dot(_gE.subVectors(eye, face.pa));
 }
 
 function setLayer(o, n) { o.traverse(function (c) { c.layers.set(n); }); return o; }
@@ -435,6 +495,16 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
   const VC = edge.clone().addScaledVector(OUT, -2.8 * Math.SQRT2);
   const gScale = Math.min(faceH / 8, 2.5); // 实验台原生比例按 12×8 屏设计，按屏高折算
 
+  /* —— 圆角屏（3D转角包柱屏 · 圆角半径>0）：视锥外扩估算 ——
+   * 屏面弧段顶点不在参考平面上，从斜侧看会投到 RT 视锥之外（u / v 都可能越界），
+   * 被 clamp 拉成竖带、接缝处出现明显亮/暗边。这里按实际弧段采样点算出每面
+   * 需要外扩多少，并让 RT 渲染与屏面 UV 共用同一个矩阵 —— 两者永远一致。
+   * 直角屏（ctx.arcPts 为 null）pad 恒为 0，走的还是原来数值完全相同的路径。 */
+  const arcPts = ctx && Array.isArray(ctx.arcPts) ? ctx.arcPts : null;
+  const pads = [0, 0];
+  const faceMats = [new THREE.Matrix4(), new THREE.Matrix4()];
+  let projSeq = 0;   // 本条目最近一批矩阵的批次号（取自全局序列）
+
   /* —— 每面一块 RT + projCam（只看内容层） —— */
   const projCam = new THREE.Camera();
   projCam.layers.set(layer);
@@ -696,6 +766,10 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
     is3d: true,
     rts,
     helper,
+    // 每面最近一次渲染 RT 用的离轴矩阵 + 批次号：屏面 UV 用它逐顶点重投影，
+    // 保证「RT 里画的」与「屏面上贴的」是同一套矩阵（圆角屏弧段必需）。
+    faceMatrices: faceMats,
+    get projSeq() { return projSeq; },
     isVideo: !!(it.type !== "model3d" && innerItem && innerItem.isVideo),
     video: it.type !== "model3d" && innerItem ? innerItem.video : undefined,
     /** 池调度：远距暂停解码 / 恢复播放。恢复时必须重渲，否则片源停在旧帧 */
@@ -792,13 +866,37 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
         }
       } else {
         // 双路离轴：渲独立 adScene，不再碰主场景（背景/雾/整城遍历都省掉）
-        for (const r of rts) {
-          const M = offAxis(r.f.pa, r.f.pb, r.f.pc, _eye, NEAR, FAR);
+        // 两面各自的取景距离：本面太贴近（侧对 / 背向）时借对面的参考四边形取景，
+        // 眼位保持不变 —— 两路 RT 必须来自同一视点，共棱处才严丝合缝。
+        const dists = rts.length === 2 ? [faceDist(rts[0].f, _eye), faceDist(rts[1].f, _eye)] : [SAFE_D];
+        for (let fi = 0; fi < rts.length; fi++) {
+          const r = rts[fi];
+          const other = rts.length === 2 ? rts[1 - fi] : null;
+          const ownD = dists[fi];
+          const othD = other ? dists[1 - fi] : -Infinity;
+          let ref = other && ownD < SAFE_D && othD > ownD ? other.f : r.f;
+          let fe = _eye;
+          // 临时 A/B 对照开关（旧「移动眼位」方案），仅调试用
+          if (typeof window !== "undefined" && window.__dbgGuard) {
+            const _n = new THREE.Vector3().subVectors(r.f.pb, r.f.pa).cross(new THREE.Vector3().subVectors(r.f.pc, r.f.pa)).normalize();
+            const _d = _n.dot(new THREE.Vector3().subVectors(_eye, r.f.pa));
+            let _t = Math.min(1, Math.max(0, (2 * SAFE_D - _d) / SAFE_D));
+            _t = _t * _t * (3 - 2 * _t);
+            fe = _eye.clone().addScaledVector(_n, _t * (SAFE_D - _d));
+            ref = r.f;
+          }
+          // 圆角屏：先用无外扩矩阵量弧段越界，再用外扩后的矩阵出片；
+          // 这个矩阵同时回传给屏面做逐顶点 UV 投影，两边同源，接缝必然对得上。
+          if (arcPts) pads[fi] = arcPad(arcPts[fi], offAxis(ref.pa, ref.pb, ref.pc, fe, NEAR, FAR, 0));
+          const M = offAxis(ref.pa, ref.pb, ref.pc, fe, NEAR, FAR, pads[fi]);
           projCam.projectionMatrix.copy(M);
           projCam.projectionMatrixInverse.copy(M).invert();
           renderer.setRenderTarget(r.rt);
           renderer.render(adScene, projCam);
+          faceMats[fi].copy(M);
         }
+        projSeq = ++_projSeqGlobal;   // 屏面 UV 只需在矩阵更新后重投影一次
+        if (typeof window !== "undefined") window.__dbgPads = pads.slice();
       }
       renderer.setRenderTarget(prevRT);
       renderer.shadowMap.autoUpdate = savedShadow;

@@ -43,15 +43,19 @@ export const CONTENT_TYPES = {
   model3d: { label: "3D裸眼模型", media: true, hint: "GLB 经离轴投影呈现 3D 裸眼；仅 3D转角包柱屏生效，其他屏显示占位提示。留空 / builtin://demo1 = 内置演示1；builtin://demo2 = 演示2（12秒品牌广告）；builtin://calib = 几何校准片；也可填 http(s) 或 /media/ 的 GLB 地址" },
 };
 
-/** 屏位级 3D 参数默认值（实验台「遛眼参数 / 显示开关」同款，后台屏位绑定可改） */
+/** 屏位级 3D 参数默认值（实验台「遛眼参数 / 显示开关 / 转角弧度」同款，后台屏位绑定可改） */
 export const D3_DEFAULTS = {
   depth: 2.5,   // 出屏深度（米，0~10）：contentRoot.position = VC + OUT·depth
   scale: 1,     // 尺寸（0.4~2）：contentRoot.scale
+  arc: 0,       // 圆角半径（米，0~5）：0 = 直角共棱；>0 转角过渡成 1/4 圆柱弧
   spin: true,   // 轻微摆动/自转（平面素材板不受此开关影响，永远不转）
   track: true,  // 片源跟随当前视点（实时追踪）；关闭则固定最佳视点
   hud: false,   // 右下角双路预览（管理器叠加层）
   helper: false, // 视线 / 眼位辅助线
 };
+
+/** 圆角半径上限（与 cornerArc.js ARC_R_MAX 一致；屏窄时实际上限还会取屏宽一半） */
+export const ARC_R_MAX = 5;
 
 export const DEFAULT_TEXT = "潮汇坊 · 中央大道商圈 今日营业至 22:00   ◆   新品上市 全场 8 折起   ◆   周末街头市集 · 梧桐街广场   ◆   ";
 
@@ -85,6 +89,8 @@ export function normalizeContent(raw) {
     d3 = {
       depth: clamp(Math.round((+raw.d3.depth || 0) * 10) / 10, 0, 10, D3_DEFAULTS.depth),
       scale: clamp(Math.round((+raw.d3.scale || 0) * 100) / 100, 0.4, 2, D3_DEFAULTS.scale),
+      // 转角弧度：0 / 未配置 / 非法值都走直角共棱（老快照没有该字段，行为不变）
+      arc: clamp(Math.round((+raw.d3.arc || 0) * 10) / 10, 0, ARC_R_MAX, D3_DEFAULTS.arc),
       spin: raw.d3.spin !== false,
       track: raw.d3.track !== false,
       hud: !!raw.d3.hud,

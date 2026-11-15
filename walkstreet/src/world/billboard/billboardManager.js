@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { createContentPool, disposeContentPool } from "./contentSource.js";
 import { buildPlacedBillboard, phaseFor } from "./billboard.js";
-import { normalizeSpec, corner3dWorldFaces } from "./mounts.js";
+import { normalizeSpec, corner3dWorldFaces, corner3dWorldArcSamples } from "./mounts.js";
 import { defaultContent, normalizeContent, contentKey, scheduleFrom } from "./contentConfig.js";
 import { getRenderSettings } from "../../config/renderSettings.js";
 
@@ -39,7 +39,14 @@ export class BillboardManager {
 
   /** 3D 裸眼上下文：renderer + 主场景（内容层放这里，layer 隔离）+ 两面屏世界坐标四角 */
   _ctxFor(spec, pos, rot = 0) {
-    return { renderer: this.renderer, scene: this.scene, faces: corner3dWorldFaces(spec, pos, rot) };
+    return {
+      renderer: this.renderer,
+      scene: this.scene,
+      faces: corner3dWorldFaces(spec, pos, rot),
+      // 圆角屏：弧段采样点（世界坐标），content3d 据此估算 RT 视锥外扩量；
+      // 直角屏（半径 0）为 null，离轴矩阵与移植前逐位一致。
+      arcPts: spec.arc > 0 ? corner3dWorldArcSamples(spec, pos, rot) : null,
+    };
   }
 
   _poolFor(aspect, rawContent, ctx = null, scope = "") {
@@ -180,9 +187,13 @@ export class BillboardManager {
       const cfg = normalizeContent(has ? byId[s.id] : s.localContent) || defaultContent();
       const key = this._keyFor(s.aspect, cfg);
       if (has) applied++;
+      // 转角弧度热更新：只重建屏体几何（参考平面不变 → RT 无需重渲，不会闪），
+      // 必须在下面建 ctx / 内容池之前生效，外扩估算才与新屏面对得上。
+      const arcR = cfg.d3 ? cfg.d3.arc : 0;
+      if (s.setArc) s.setArc(arcR);
       if (s.contentKey === key) continue;   // 内容没变：不重建纹理 / 不打断视频
       const is3d = s.mount === "corner3d";
-      const ctx = is3d ? this._ctxFor({ w: s.w, h: s.h, y: s.y }, [s.x, s.z], s.rot) : null;
+      const ctx = is3d ? this._ctxFor({ w: s.w, h: s.h, y: s.y, arc: arcR }, [s.x, s.z], s.rot) : null;
       const scope = is3d ? s.id : "";
       const pool = this._poolFor(s.aspect, cfg, ctx, scope);
       if (pool === s.pool) continue;
@@ -231,7 +242,14 @@ export class BillboardManager {
           }
           if (ii !== curIdx || item.kind !== "animated") continue;
         }
-        if (item.kind === "animated") item.update(dt, time, focus, camera);
+        if (item.kind === "animated") {
+          item.update(dt, time, focus, camera);
+          // 圆角屏：用这一帧 RT 渲染所用的同一组离轴矩阵重投影屏面 UV。
+          // 批次号相同则内部直接返回 —— 眼位不动 / 内容静止时零开销。
+          if (s.arc && item.is3d && item.faceMatrices) {
+            s.arc.updateProj(item.faceMatrices, item.projSeq);
+          }
+        }
       }
     }
 

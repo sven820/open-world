@@ -36,22 +36,6 @@ function screenMaterial() {
   return m;
 }
 
-/** 整屏平面展示 UV：两面拼成一张画布（实验台 applyPlaneUv 同款）。
- *  A 面取画布左半 u[0,0.5]，B 面取右半 u[0.5,1]；half=null 恢复整幅 u[0,1]。
- *  原始 UV 缓存在 mesh.userData.uv0，反复切换不会累积误差。 */
-function applyPlaneUV(mesh, half) {
-  if (!mesh || !mesh.geometry || !mesh.geometry.attributes.uv) return;
-  const attr = mesh.geometry.attributes.uv;
-  if (!mesh.userData.uv0) mesh.userData.uv0 = attr.array.slice();
-  const src = mesh.userData.uv0, dst = attr.array;
-  for (let k = 0; k < src.length; k += 2) {
-    const u = src[k];
-    dst[k] = half === 0 ? u * 0.5 : half === 1 ? 0.5 + u * 0.5 : u;
-    dst[k + 1] = src[k + 1];
-  }
-  attr.needsUpdate = true;
-}
-
 /** 交叉淡入控制器：过渡期间保持旧 map，用 uNext+uMix 混合，结束后换 map。
  *  纹理一律按面展开为 [面0, 面1, ...]（3D 裸眼 = 各面离轴 RT，普通内容 = 每面同张）；
  *  每块材质的 shader 各有自己的 uNext/uMix uniform，必须逐面写入 —— 此前只写
@@ -140,16 +124,11 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
     let fade = createFade(faceMats, (pool.cfg && pool.cfg.transition) || 0);
     // 当前上屏纹理：按面展开（数组纹理 = [面A RT, 面B RT] 按面分配；普通纹理每面同张）
     let curTexs = null;
-    // 整屏平面展示状态：true = 两面拼一张图（UV 对半拆），null = 尚未初始化
-    let curPlane = null;
-    // 3D转角屏的两面 mesh（整屏平面模式要改 UV），其余形式为空数组。
-    // 注意 corner3d 的 faceGroups 只有 1 个组、两面 mesh 都在里面 —— 必须按材质跨组查找
-    const faceMeshes = isCorner3d
-      ? faceMats.map((m) => built.faceGroups
-          .flatMap((fg) => fg.children)
-          .find((c) => c.isMesh && c.material === m) || null)
-      : [];
-    const setPlaneUV = (on) => faceMeshes.forEach((fm, fi) => applyPlaneUV(fm, on ? fi : null));
+    // 屏面 UV 模式（仅 corner3d）："proj" 离轴重投影 / "split" 两面拼一张画布 / "full" 每面整幅。
+    // 直角屏由 CornerArcScreen 内部按 radius=0 判定为恒等，圆角屏才真正改 UV。
+    let curMode = null;
+    const arcCtl = built.cornerArc || null;
+    const setUvMode = (mode) => { if (arcCtl) arcCtl.setUvMode(mode); };
     const toFaceTexs = (tex) => {
       const arr = Array.isArray(tex) ? tex : null;
       return faceMats.map((_, mi) => (arr ? (arr[mi] || arr[0] || null) : tex));
@@ -164,14 +143,19 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
       applied = true;
     };
     const onSwap = (tex) => {
-      // 整屏平面 ↔ 离轴/每面整幅 模式切换时改面 UV；UV 是几何属性，交叉淡入期间
-      // 新旧纹理共用同一 UV，半幅 UV 会把旧图拉花 —— 模式不同时退化为硬切
-      const plane = !Array.isArray(tex) && !!tex && tex.planeFull === true;
-      const prevPlane = curPlane;
-      if (plane !== curPlane) setPlaneUV(plane);
-      curPlane = plane;
+      // 屏面 UV 随内容形态切换：3D 素材 = 各面离轴 RT → "proj"；2D 素材 planeFull → "split"；
+      // 其余（平贴退化等）→ "full"。UV 是几何属性，交叉淡入期间新旧纹理共用同一 UV，
+      // 模式不同会把旧图拉花 —— 模式不同时退化为硬切。
+      const is3d = Array.isArray(tex);
+      const plane = !is3d && !!tex && tex.planeFull === true;
+      const mode = is3d ? "proj" : (plane ? "split" : "full");
+      const prevMode = curMode;
+      if (mode !== curMode) setUvMode(mode);
+      curMode = mode;
       const texs = toFaceTexs(tex);
-      if (fade.begin(curTexs, texs, plane === prevPlane)) return; // 过渡中：保持旧 map，由 shader 混合新图
+      // 圆角屏的 proj / full 两种 UV 数值不同，只有模式一致才敢淡入
+      const canFade = arcCtl && arcCtl.radius > 0 ? mode === prevMode : plane === (prevMode === "split");
+      if (fade.begin(curTexs, texs, canFade)) return; // 过渡中：保持旧 map，由 shader 混合新图
       applyTex(texs);
     };
     const playlist = new Playlist(pool, schedule, onSwap, phaseFor(item.id + suffixes[i], basePhase), fade);
@@ -187,6 +171,18 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
       // 编辑器里给这块屏单独配的内容；后台未绑定该屏位时回退到这里
       localContent: (item.params && item.params.content) || null,
       contentKey: "",
+      // corner3d 圆角控制器：半径热更新（后台配置）+ 逐帧 UV 重投影（billboardManager 驱动）
+      arc: arcCtl,
+      arcRadius: arcCtl ? arcCtl.radius : 0,
+    };
+
+    /** 后台「圆角半径」热更新：只重建屏体几何，不动场景节点 / 材质 / 轮播，
+     *  参考平面（离轴取景面）也没变 —— RT 内容无需重渲，无闪屏。 */
+    b.setArc = (r) => {
+      if (!arcCtl) return false;
+      const changed = arcCtl.setRadius(r);
+      b.arcRadius = arcCtl.radius;
+      return changed;
     };
 
     /** 后台发布内容热更新：只换内容池与轮播器，不重建几何 / 不动场景节点。

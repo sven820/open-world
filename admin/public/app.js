@@ -34,15 +34,21 @@ const FITS = { auto: "自适应（完整显示）", contain: "完整显示（留
 const AUDIOS = { off: "静音（推荐）", nearest: "仅最近一块屏出声", on: "全部出声" };
 const MOUNTS = { standalone: "独立广告牌", facade: "建筑立面屏", corner: "转角包柱屏", corner3d: "3D转角包柱屏" };
 /* 3D 转角包柱屏的屏位级参数（游戏端 contentConfig.D3_DEFAULTS 对应）：
- * 遛眼参数 + 显示开关，发布时合并进该屏位的快照 d3 字段。 */
-const D3_DEFAULTS = { depth: 2.5, scale: 1, spin: true, track: true, hud: false, helper: false };
+ * 遛眼参数 + 屏体几何 + 显示开关，发布时合并进该屏位的快照 d3 字段。 */
+const D3_DEFAULTS = { depth: 2.5, scale: 1, arc: 0, spin: true, track: true, hud: false, helper: false };
+const D3_GROUPS = [
+  ["eye", "遛眼参数"],
+  ["geo", "屏体几何 · 转角弧度"],
+  ["view", "显示开关"],
+];
 const D3_FIELDS = [
-  { k: "depth", label: "出屏深度（米，0~10）", type: "number", step: 0.5, min: 0, max: 10 },
-  { k: "scale", label: "尺寸（0.4~2）", type: "number", step: 0.05, min: 0.4, max: 2 },
-  { k: "spin", label: "轻微摆动 / 自转", type: "check", hint: "平面素材板不受此开关影响（板子一转就会被离轴投影拉成梯形）" },
-  { k: "track", label: "片源跟随当前视点（实时追踪）", type: "check", hint: "关闭则固定最佳视点（固定机位评审用）" },
-  { k: "hud", label: "右下角双路预览", type: "check", hint: "游戏画面右下角叠加两面离轴 RT 的小窗，检查预扭曲用" },
-  { k: "helper", label: "视线 / 眼位辅助线", type: "check", hint: "从虚拟眼睛拉到两面屏角的视锥线 + 眼位金球" },
+  { k: "depth", label: "出屏深度（米，0~10）", type: "number", step: 0.5, min: 0, max: 10, group: "eye" },
+  { k: "scale", label: "尺寸（0.4~2）", type: "number", step: 0.05, min: 0.4, max: 2, group: "eye" },
+  { k: "arc", label: "圆角半径（米，0~5）", type: "number", step: 0.5, min: 0, max: 5, group: "geo", hint: "0 = 直角共棱；默认 0，共棱处过渡成 1/4 圆柱弧。屏窄时实际上限取屏宽一半；两台离轴相机仍按原虚拟平面取景，弧段按透视重投影采样，最佳视点的 3D 对位不变" },
+  { k: "spin", label: "轻微摆动 / 自转", type: "check", group: "view", hint: "平面素材板不受此开关影响（板子一转就会被离轴投影拉成梯形）" },
+  { k: "track", label: "片源跟随当前视点（实时追踪）", type: "check", group: "view", hint: "关闭则固定最佳视点（固定机位评审用）" },
+  { k: "hud", label: "右下角双路预览", type: "check", group: "view", hint: "游戏画面右下角叠加两面离轴 RT 的小窗，检查预扭曲用" },
+  { k: "helper", label: "视线 / 眼位辅助线", type: "check", group: "view", hint: "从虚拟眼睛拉到两面屏角的视锥线 + 眼位金球" },
 ];
 const VIEW_META = {
   dashboard: ["概览", "内容运营总览 · 发布状态 · 演示流程"],
@@ -635,17 +641,17 @@ function openD3Config(sc) {
     <div class="modal-head"><h3>3D 裸眼参数 · ${esc(sc.name)}</h3><button class="btn sm" data-x>✕</button></div>
     <p class="desc">仅对 3D转角包柱屏生效，随该屏位发布。播放内容需绑定含 3D 裸眼内容的节目单（3D演示 / GLB / 图片 / 视频 / 直播均可上 3D 屏）。</p>
     <div class="form-grid">
-      <div class="full" style="font-weight:700;font-size:13px;margin-top:4px">遛眼参数</div>
-      ${D3_FIELDS.slice(0, 2).map((f) => `
-        <label class="field"><span>${esc(f.label)}</span>
-          <input id="d3-${f.k}" class="inp" type="number" step="${f.step}" min="${f.min}" max="${f.max}" value="${esc(cur[f.k])}" />
-        </label>`).join("")}
-      <div class="full" style="font-weight:700;font-size:13px;margin-top:4px">显示开关</div>
-      ${D3_FIELDS.slice(2).map((f) => `
+      ${D3_GROUPS.map(([gid, gtitle]) => `
+        <div class="full" style="font-weight:700;font-size:13px;margin-top:4px">${esc(gtitle)}</div>
+        ${D3_FIELDS.filter((f) => f.group === gid).map((f) => (f.type === "check" ? `
         <label class="field full"><span style="display:flex;align-items:center;gap:8px">
           <input id="d3-${f.k}" type="checkbox" ${cur[f.k] ? "checked" : ""} /> ${esc(f.label)}
         </span>
-        <span class="small muted">${esc(f.hint || "")}</span></label>`).join("")}
+        <span class="small muted">${esc(f.hint || "")}</span></label>` : `
+        <label class="field${f.hint ? " full" : ""}"><span>${esc(f.label)}</span>
+          <input id="d3-${f.k}" class="inp" type="number" step="${f.step}" min="${f.min}" max="${f.max}" value="${esc(cur[f.k])}" />
+          ${f.hint ? `<span class="small muted">${esc(f.hint)}</span>` : ""}
+        </label>`)).join("")}`).join("")}
     </div>
     <div class="modal-foot"><button class="btn" data-x>取消</button>
       <button class="btn" id="d3-reset">恢复默认</button>
