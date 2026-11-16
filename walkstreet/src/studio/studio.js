@@ -8,6 +8,7 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import {
   listAssets, getAsset, putAsset, deleteAsset,
+  listGroups, putGroup,
   importAssetFromGLB, exportAssetGLB, exportObjectGLB, renderThumb, saveAssetThumb,
   isMemoryOnly,
 } from "../data/assetStore.js";
@@ -67,14 +68,11 @@ export class ModelStudio {
       <div class="ms3-side left">
         <h4>模型资产库 <span class="ms3-badge" id="ms3-count"></span></h4>
         <div class="ms3-scroll">
-          <div class="ms3-field">
-            <button class="ms3-btn primary" id="ms3-import" style="width:100%">导入 GLB 模型</button>
-            <input type="file" id="ms3-file" accept=".glb,.gltf" style="display:none" />
+          <input type="file" id="ms3-file" accept=".glb,.gltf" style="display:none" />
+          <div style="display:flex;gap:6px;margin-bottom:8px">
+            <input id="ms3-search" placeholder="搜索资产…" class="ms3-search" style="flex:1;min-width:0;background:#14171a;color:#d8dce2;border:1px solid #343b44;border-radius:6px;padding:6px 8px;font-size:13px" />
+            <button class="ms3-btn" id="ms3-add-group" title="新增分组" style="flex:none;padding:6px 10px">＋</button>
           </div>
-          <div class="ms3-field">
-            <button class="ms3-btn" id="ms3-new" style="width:100%">＋ 新建参数模型</button>
-          </div>
-          <input id="ms3-search" placeholder="搜索资产…" class="ms3-search" style="width:100%;box-sizing:border-box;background:#14171a;color:#d8dce2;border:1px solid #343b44;border-radius:6px;padding:6px 8px;font-size:13px;margin-bottom:8px" />
           <div id="ms3-list"></div>
         </div>
       </div>
@@ -116,12 +114,16 @@ export class ModelStudio {
     this._el = el;
 
     el.querySelector("#ms3-close").addEventListener("click", () => this.close());
-    el.querySelector("#ms3-import").addEventListener("click", () => el.querySelector("#ms3-file").click());
-    el.querySelector("#ms3-file").addEventListener("change", (e) => this._onImportFile(e.target.files[0]));
-    el.querySelector("#ms3-new").addEventListener("click", () => this._newWorkspace());
+    el.querySelector("#ms3-file").addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      const cat = this._pendingImportCat;
+      e.target.value = ""; // 允许重复选同一文件
+      this._onImportFile(file, cat);
+    });
     el.querySelector("#ms3-save").addEventListener("click", () => this._save());
     el.querySelector("#ms3-export").addEventListener("click", () => this._export());
     el.querySelector("#ms3-search").addEventListener("input", () => this._refreshAssetList());
+    el.querySelector("#ms3-add-group").addEventListener("click", () => this._editGroup(null));
     for (const [id, mode] of [["#ms3-mode-w", "translate"], ["#ms3-mode-e", "rotate"], ["#ms3-mode-r", "scale"]]) {
       el.querySelector(id).addEventListener("click", () => this._setMode(mode));
     }
@@ -216,23 +218,33 @@ export class ModelStudio {
 
   async _refreshAssetList() {
     const kw = this._el.querySelector("#ms3-search").value.trim();
-    const list = await listAssets({ keyword: kw });
+    const [list, groups] = await Promise.all([listAssets({ keyword: kw }), listGroups()]);
+    this._groups = groups;
     const box = this._el.querySelector("#ms3-list");
     this._thumbUrls = this._thumbUrls || {};
     box.innerHTML = "";
     this._el.querySelector("#ms3-count").textContent = String(list.length);
     if (!list.length) {
-      box.innerHTML = `<div class="ms3-empty">还没有资产。<br>导入 GLB 或新建参数模型。</div>`;
+      box.innerHTML = `<div class="ms3-empty">还没有资产。<br>悬停分组可导入 GLB / 新建参数模型。</div>`;
       return;
     }
+    // 按用户分组归类（category = 分组 id；不在分组表里的归入「其他」）
+    const byId = new Map(groups.map((g) => [g.id, g]));
+    const buckets = new Map();
     for (const a of list) {
+      const gid = byId.has(a.category) ? a.category : "other";
+      if (!buckets.has(gid)) buckets.set(gid, []);
+      buckets.get(gid).push(a);
+    }
+    this._collapsedGroups = this._collapsedGroups || new Set();
+    const makeCard = (a, parent) => {
       const card = document.createElement("div");
       card.className = "ms3-card" + (this.workspace && this.workspace.asset.id === a.id ? " active" : "");
       const srcZh = { glb: "GLB", traced: "描边", studio: "自建" }[a.source] || a.source;
       card.innerHTML = `
         ${a.thumb ? `<img src="${this._thumbUrls[a.id] || (this._thumbUrls[a.id] = URL.createObjectURL(a.thumb))}" />` : `<img src="" style="opacity:.2" />`}
         <div class="ms3-card-info"><b>${esc(a.name || "未命名")}</b>
-        <small>${esc(a.category || "")} · ${srcZh}${a.meshCount ? " · " + a.meshCount + " mesh" : ""}</small></div>
+        <small>${srcZh}${a.meshCount ? " · " + a.meshCount + " mesh" : ""}</small></div>
         <button class="ms3-card-del" title="删除资产">×</button>`;
       card.addEventListener("click", async () => {
         const fresh = await getAsset(a.id);
@@ -242,8 +254,95 @@ export class ModelStudio {
         e.stopPropagation(); // 别触发卡片载入
         this._deleteAsset(a.id, a.name || "未命名");
       });
-      box.appendChild(card);
-    }
+      parent.appendChild(card);
+    };
+    const renderGroups = (gid) => {
+      const g = gid === "other" ? null : byId.get(gid);
+      const items = buckets.get(gid);
+      if (!items) return;
+      const collapsed = this._collapsedGroups.has(gid);
+      const header = document.createElement("div");
+      header.className = "ms3-group" + (collapsed ? " collapsed" : "");
+      header.innerHTML = `
+        <span class="ms3-group-arrow">▸</span>
+        ${g ? `<span class="ms3-group-dot" style="background:${esc(g.color || "#5d6672")}"></span>` : ""}
+        <b>${esc(g ? g.name : "其他")}</b>
+        <small>${items.length}</small>
+        ${g ? `
+        <button class="ms3-group-act" data-act="import" title="导入 GLB 到「${esc(g.name)}」">⇪</button>
+        <button class="ms3-group-act" data-act="new" title="在「${esc(g.name)}」中新建参数模型">＋</button>
+        <button class="ms3-group-edit" title="编辑分组">✎</button>` : ""}`;
+      const body = document.createElement("div");
+      body.className = "ms3-group-body";
+      if (collapsed) body.style.display = "none";
+      header.addEventListener("click", () => {
+        const willCollapse = body.style.display !== "none";
+        body.style.display = willCollapse ? "none" : "";
+        header.classList.toggle("collapsed", willCollapse);
+        if (willCollapse) this._collapsedGroups.add(gid);
+        else this._collapsedGroups.delete(gid);
+      });
+      if (g) {
+        header.querySelector(".ms3-group-edit").addEventListener("click", (e) => {
+          e.stopPropagation(); // 别触发折叠
+          this._editGroup(g);
+        });
+        header.querySelector('[data-act="import"]').addEventListener("click", (e) => {
+          e.stopPropagation(); // 别触发折叠
+          this._pendingImportCat = g.id;
+          this._el.querySelector("#ms3-file").click();
+        });
+        header.querySelector('[data-act="new"]').addEventListener("click", (e) => {
+          e.stopPropagation();
+          this._newWorkspace(g.id);
+        });
+      }
+      box.appendChild(header);
+      box.appendChild(body);
+      for (const a of items) makeCard(a, body);
+    };
+    for (const g of groups) renderGroups(g.id);
+    renderGroups("other");
+  }
+
+  // 分组新增 / 编辑属性（名称、颜色）。group 为 null 表示新增。
+  _editGroup(group) {
+    const isNew = !group;
+    const g = group ? { ...group } : { id: null, name: "", color: "#3a72b0" };
+    const ov = document.createElement("div");
+    ov.className = "ms3-dialog-mask";
+    ov.innerHTML = `
+      <div class="ms3-dialog">
+        <h4>${isNew ? "新增分组" : "编辑分组"}</h4>
+        <div class="ms3-field"><label>名称</label><input id="ms3-g-name" value="${esc(g.name)}" maxlength="16" placeholder="分组名称" /></div>
+        <div class="ms3-field"><label>颜色</label><input id="ms3-g-color" type="color" value="${esc(g.color || "#3a72b0")}" /></div>
+        <div class="ms3-row" style="justify-content:flex-end">
+          <button class="ms3-btn" id="ms3-g-cancel">取消</button>
+          <button class="ms3-btn primary" id="ms3-g-ok">保存</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    const close = () => ov.remove();
+    ov.querySelector("#ms3-g-cancel").addEventListener("click", close);
+    ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+    ov.querySelector("#ms3-g-ok").addEventListener("click", async () => {
+      const nameInput = ov.querySelector("#ms3-g-name");
+      const name = nameInput.value.trim();
+      if (!name) { nameInput.focus(); return; }
+      g.name = name;
+      g.color = ov.querySelector("#ms3-g-color").value;
+      try {
+        await putGroup(g);
+        close();
+        this._setStatus(isNew ? `已新增分组「${name}」` : `分组「${name}」已更新`);
+        await this._refreshAssetList();
+        this._renderProps(); // 右侧「分类」下拉同步新分组
+      } catch (e) {
+        console.error(e);
+        this._setStatus("分组保存失败：" + (e && e.message ? e.message : e));
+      }
+    });
+    ov.querySelector("#ms3-g-name").focus();
   }
 
   async _deleteAsset(id, name) {
@@ -264,11 +363,11 @@ export class ModelStudio {
     }
   }
 
-  async _onImportFile(file) {
+  async _onImportFile(file, category) {
     if (!file) return;
     this._setStatus(`正在导入「${file.name}」…`);
     try {
-      const asset = await importAssetFromGLB(file);
+      const asset = await importAssetFromGLB(file, { category: category || "custom" });
       this._setStatus(`已导入「${asset.name}」· ${asset.meshCount} 个网格 · 请在右侧绑定材质后保存`);
       await this._loadAsset(asset);
       // 导入即出缩略图（复用刚载入的工作台几何；否则列表卡片一直空图，
@@ -353,12 +452,12 @@ export class ModelStudio {
     this._setStatus(`已载入「${asset.name}」· 左侧场景树点选部件，右侧换材质；改完记得保存`);
   }
 
-  _newWorkspace() {
+  _newWorkspace(category) {
     this._clearWorkspace();
     const root = new THREE.Group();
     root.name = "asset-root";
     this.workspace = {
-      asset: { name: "新模型", category: "custom", source: "studio", materialBindings: {}, unitSize: { x: 0, y: 0, z: 0 } },
+      asset: { name: "新模型", category: category || "custom", source: "studio", materialBindings: {}, unitSize: { x: 0, y: 0, z: 0 } },
       root,
       bindings: {},
       geometryDirty: false,
@@ -696,10 +795,11 @@ export class ModelStudio {
            <input id="ms3-pg-strength" type="range" min="0" max="2" step="0.05" value="${st}" />
          </div>`; })()}`}`
       : `<div class="ms3-hint">点选画布中的部件或场景树条目后，可在此绑定标准材料库材质（换肤/夜间灯光全城生效）。</div>`;
-    const cats = ["building", "prop", "vehicle", "custom"];
+    const cats = (this._groups || []).slice();
+    if (a.category && !cats.some((g) => g.id === a.category)) cats.push({ id: a.category, name: a.category });
     box.innerHTML = `
       <div class="ms3-field"><label>名称</label><input id="ms3-name" value="${esc(a.name || "")}" maxlength="24" /></div>
-      <div class="ms3-field"><label>分类</label><select id="ms3-cat">${cats.map((c) => `<option value="${c}"${a.category === c ? " selected" : ""}>${{ building: "建筑", prop: "道具", vehicle: "载具", custom: "自定义" }[c]}</option>`).join("")}</select></div>
+      <div class="ms3-field"><label>分类</label><select id="ms3-cat">${cats.map((g) => `<option value="${esc(g.id)}"${a.category === g.id ? " selected" : ""}>${esc(g.name)}</option>`).join("")}</select></div>
       <div class="ms3-field"><label>来源</label><input value="${{ glb: "GLB 模型", traced: "描边建筑", studio: "参数建模" }[a.source] || a.source}" disabled /></div>
       ${a.unitSize ? `<div class="ms3-hint">包围盒：${a.unitSize.x} × ${a.unitSize.y} × ${a.unitSize.z} m（碰撞自动按放置缩放生成 AABB）</div>` : ""}
       ${this._clipNames && this._clipNames.length ? `

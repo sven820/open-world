@@ -101,6 +101,56 @@ export async function deleteAsset(id) {
   });
 }
 
+/* ---------------- 资产分组（存 meta 表，用户可增改） ---------------- */
+
+// 默认分组 id 与旧版固定 category 值一致，存量资产无需迁移
+const KEY_GROUPS = "assetGroups";
+const DEFAULT_GROUPS = [
+  { id: "building", name: "建筑", color: "#3a72b0" },
+  { id: "prop", name: "道具", color: "#3f8f5f" },
+  { id: "vehicle", name: "载具", color: "#b07a3a" },
+  { id: "custom", name: "自定义", color: "#7d5fb0" },
+];
+const _memMeta = new Map(); // 内存降级模式的 meta 存储
+
+function metaGet(key) {
+  return tx(STORE_META, "readonly", (s) => {
+    if (!s) return { result: _memMeta.get(key) };
+    return s.get(key);
+  });
+}
+
+function metaSet(key, val) {
+  return tx(STORE_META, "readwrite", (s) => {
+    if (!s) { _memMeta.set(key, val); return { result: undefined }; }
+    return s.put(val, key);
+  });
+}
+
+export async function listGroups() {
+  let groups = await metaGet(KEY_GROUPS);
+  if (!Array.isArray(groups) || !groups.length) {
+    groups = DEFAULT_GROUPS.map((g) => ({ ...g }));
+    await metaSet(KEY_GROUPS, groups);
+  }
+  return groups;
+}
+
+// group.id 为空 → 新建；否则按 id 更新属性（name/color）
+export async function putGroup(group) {
+  const groups = await listGroups();
+  if (!group.id) {
+    group.id = "grp_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    groups.push(group);
+  } else {
+    const i = groups.findIndex((g) => g.id === group.id);
+    if (i >= 0) groups[i] = { ...groups[i], ...group };
+    else groups.push(group);
+  }
+  await metaSet(KEY_GROUPS, groups);
+  return group;
+}
+
 /* ---------------- GLB 导入 ---------------- */
 
 // File/Blob → 解析场景 → 资产记录（未保存，调用方确认后 putAsset）

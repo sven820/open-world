@@ -113,6 +113,52 @@
 .ms3-scroll::-webkit-scrollbar { width: 8px; }
 .ms3-scroll::-webkit-scrollbar-thumb { background: #343b44; border-radius: 4px; }
 
+/* 资产分组 */
+.ms3-group {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 4px; margin-top: 6px; cursor: pointer; user-select: none;
+  color: #9aa5b1;
+}
+.ms3-group:hover { color: #d8dce2; }
+.ms3-group-arrow { display: inline-block; color: #5d6672; font-size: 10px; transition: transform .15s; }
+.ms3-group.collapsed .ms3-group-arrow { transform: rotate(-90deg); }
+.ms3-group-dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.ms3-group b { font-size: 12px; font-weight: 600; }
+.ms3-group small { color: #5d6672; font-size: 11px; }
+.ms3-group-edit {
+  margin-left: auto; flex: none; width: 20px; height: 20px; line-height: 18px;
+  padding: 0; border-radius: 5px; border: 1px solid #343b44; background: #14171a;
+  color: #7d8794; font-size: 11px; cursor: pointer; opacity: 0; transition: opacity .15s;
+}
+.ms3-group-act {
+  margin-left: auto; flex: none; width: 20px; height: 20px; line-height: 18px;
+  padding: 0; border-radius: 5px; border: 1px solid #343b44; background: #14171a;
+  color: #7d8794; font-size: 12px; cursor: pointer; opacity: 0; transition: opacity .15s;
+}
+.ms3-group-act + .ms3-group-act, .ms3-group-act + .ms3-group-edit, .ms3-group-edit + .ms3-group-act { margin-left: 0; }
+.ms3-group:hover .ms3-group-edit, .ms3-group:hover .ms3-group-act { opacity: 1; }
+.ms3-group-edit:hover, .ms3-group-act:hover { background: #26303a; border-color: #3a72b0; color: #d8dce2; }
+.ms3-group-body { margin-bottom: 2px; }
+
+/* 分组编辑对话框 */
+.ms3-dialog-mask {
+  position: fixed; inset: 0; z-index: 10001; background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center;
+}
+.ms3-dialog {
+  width: 280px; background: #1b2026; border: 1px solid #343b44; border-radius: 10px;
+  padding: 16px; box-shadow: 0 8px 32px rgba(0,0,0,.5);
+}
+.ms3-dialog h4 { margin: 0 0 12px; font-size: 14px; color: #d8dce2; }
+.ms3-dialog input[type="text"], .ms3-dialog input:not([type]) {
+  width: 100%; box-sizing: border-box; background: #14171a; color: #d8dce2;
+  border: 1px solid #343b44; border-radius: 6px; padding: 6px 8px; font-size: 13px;
+}
+.ms3-dialog input[type="color"] {
+  width: 100%; height: 30px; padding: 2px; box-sizing: border-box;
+  background: #14171a; border: 1px solid #343b44; border-radius: 6px; cursor: pointer;
+}
+
 /* 资产卡片 */
 .ms3-card {
   display: flex; gap: 10px; padding: 8px; border-radius: 8px; cursor: pointer;
