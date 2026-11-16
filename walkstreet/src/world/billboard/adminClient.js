@@ -4,6 +4,8 @@
  * 地址优先级：URL 参数 ?admin=… > localStorage.ws_admin_url > 默认 127.0.0.1:8787。
  * 后台不可达时静默降级：完全使用地图内自带的内容配置，不影响游戏运行。
  */
+import { setSourceCatalog } from "./contentSources.js";
+
 const DEFAULT_ENDPOINT = "http://127.0.0.1:8787";
 const POLL_MS = 5000;
 const REPORT_MS = 30000;
@@ -57,6 +59,26 @@ export class AdminSync {
     }
     this.report();
     this.poll();
+    this.fetchMedia();
+  }
+
+  /** 拉取后台素材目录 → 注入素材内容源注册表（解耦层 4：后台内容源管理）。
+   *  失败静默：素材 ID 解析不到时内容配置保留原 url，不影响播放。 */
+  async fetchMedia() {
+    if (!this.endpoint) return [];
+    try {
+      const data = await this._fetch("/api/media");
+      const list = Array.isArray(data) ? data : (data.media || []);
+      setSourceCatalog("admin", list);
+      this.media = list;
+      // 素材目录刚到：强制重建内容池，让按素材 ID 引用的条目拿到真实地址
+      if (this.billboards) {
+        this.billboards.applyExternal(this.lastPublished ? (this.lastPublished.screens || {}) : {}, true);
+      }
+      return list;
+    } catch {
+      return [];
+    }
   }
 
   detach() { this.billboards = null; }
@@ -72,6 +94,7 @@ export class AdminSync {
     if (this.endpoint) {
       this._timer = setInterval(() => this.poll(), this.pollMs);
       this.poll();
+      this.fetchMedia();
     } else {
       this.online = false;
       if (this.billboards) this.applied = this.billboards.applyExternal({});
@@ -103,6 +126,9 @@ export class AdminSync {
       x: Math.round(s.x * 10) / 10, z: Math.round(s.z * 10) / 10,
       mapId: this.meta.mapId || "default",
       mapName: this.meta.mapName || "默认街区",
+      // 屏位绑定的模型资产（解耦层 1）：后台可据此识别是哪一类广告牌
+      assetId: s.assetId || null,
+      hostId: s.hostId || null,
     }));
     this._lastReport = Date.now();
     try {

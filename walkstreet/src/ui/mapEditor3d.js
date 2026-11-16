@@ -45,8 +45,10 @@ import {
 } from "./editor3d/billboardBoundary.js";
 import { openBillboardContent } from "./editor3d/billboardContent.js";
 import { listMaterials } from "../world/materials.js";
-import { listAssets, getAsset, createAssetFromTraced } from "../data/assetStore.js";
-import { getAssetTemplateIfReady, warmAssetTemplate, assetInstance, updateAssetAnimations } from "../world/assetMesh.js";
+import { listAssets, getAsset, getAssetRecordSync, putAsset, inferPlaceSize, createAssetFromTraced } from "../data/assetStore.js";
+import { getAssetTemplateIfReady, warmAssetTemplate, assetInstance, updateAssetAnimations, tracedUnitSize, invalidateAssetTemplate } from "../world/assetMesh.js";
+import { ensureBillboardAssets, billboardParamsFor, createAssetFromBillboard } from "../data/billboardAsset.js";
+import { billboardItemFromRecord } from "../world/billboard/billboardAssetBridge.js";
 
 export class MapEditor3d {
   // opts: { map, onSave(data)=>bool, onPlay(), onClose() }
@@ -68,7 +70,9 @@ export class MapEditor3d {
     this._q = new THREE.Quaternion();
     this._snap = 5;
     this._dirty = false;
-    // 广告大屏放置：待放参数 / 路缘吸附开关 / 约束缓存 / 幽灵与边界
+    // 广告大屏放置：模型资产引用（几何来自资产库）+ 实例覆盖 + 路缘吸附 / 幽灵边界
+    this._bbAsset = null;          // 当前选中的广告牌模型资产（资产库记录）
+    this._bbAssets = [];           // 资产库里的广告牌模型列表
     this._bbDraft = { mount: "standalone", ...MOUNTS.standalone.defaults, autoSnap: true };
     this._bbSnapOn = true;
     this._bbConstraints = null;
@@ -848,9 +852,12 @@ export class MapEditor3d {
         this.status(`无法放置：占位压到${reasonText(v.reasons)}，请移到青/金色边界内（红框为冲突）`);
         return;
       }
+      // 地图只存资产引用 + 内容引用 + 实例覆盖；屏体几何从模型资产库读
       this._addObject({
-        id: uid(), type: "billboard", pos: sp.pos, rot: 0,
-        params: { ...this._bbDraft },
+        id: uid(), type: "billboard",
+        assetId: this._bbAsset ? this._bbAsset.id : null,
+        pos: sp.pos, rot: this._bbDefaultRot(),
+        params: { override: this._bbOverrides(), content: null },
       });
       this._bbConstraints = null; // 新屏也是后续放置的障碍
       this._pushUndo("放置广告大屏");
@@ -858,16 +865,12 @@ export class MapEditor3d {
     } else if (this.tool === "place-asset") {
       if (!this._placingAsset) { this.status("请先在右侧「我的模型」中选择一个资产"); return; }
       const a = this._placingAsset;
-      // 自动适配比例：GLB 建模单位不统一（同一栋楼可能是 5m 也可能是 552m），
-      // 按用户设定的"目标尺寸"（最大边，默认 30m）换算缩放，避免放置即巨物/蚁物
-      const s = a.unitSize || { x: 4, y: 4, z: 4 };
-      const maxDim = Math.max(s.x, s.y, s.z) || 1;
-      const target = this._assetTargetSize || 30;
-      const scale = clamp(+(target / maxDim).toFixed(4), 0.001, 1000);
+      // GLB 按目标尺寸自动适配；描边建筑 / 广告牌是真实米模型，原尺寸放置（scale=1）
+      const scale = this._assetPlaceScale(a);
       const sp = this._assetSnapPoint(pt); // 与幽灵预览同一吸附逻辑：所见即所得
       this._addObject({ id: uid(), type: "asset", assetId: a.id, pos: sp.pos, rot: 0, scale });
       this._pushUndo("放置模型资产");
-      this.status(`已放置「${a.name}」· 最大边适配为 ${target}m · ${sp.onRoad ? "吸附路缘" : "网格吸附"}`);
+      this.status(`已放置「${a.name}」· ${scale === 1 ? "原始尺寸" : `最大边适配为 ${this._assetPlaceTarget(a)}m`} · ${sp.onRoad ? "吸附路缘" : "网格吸附"}`);
     } else if (this.tool === "add-roadX" || this.tool === "add-roadZ") {
       const r = this.tool === "add-roadX"
         ? { id: uid(), zh: "新纵路", en: "New Rd", at: Math.round(pt.x), kind: "street", lanes: 1, median: 0, sidewalk: 3 }
@@ -1607,14 +1610,19 @@ export class MapEditor3d {
 
   _buildObjectMesh(o) {
     if (o.type === "asset") return this._buildAssetMesh(o);
-    const base = buildObjectMesh(this, o);
+    // 广告牌：模型规格从资产引用解析（老对象内联 params 原样兼容）
+    const item = (o.type === "billboard" && o.assetId)
+      ? billboardItemFromRecord(o, this._bbAssetOf(o))
+      : o;
+    const base = buildObjectMesh(this, item);
     if (o.type === "billboard" && base) {
       // 已放置的大屏常驻一条高亮占位边界：深色塔体与深蓝网格几乎同色，
       // 没有这条边框在编辑器里根本看不出它到底占了多大、有没有压到路
       const g = new THREE.Group();
       const bd = createFootprintBoundary();
       bd.userData.bbEmbedded = true;
-      updateFootprintBoundary(bd, o, BB_COLORS.idle);
+      updateFootprintBoundary(bd, item, BB_COLORS.idle);
+      bd.visible = false; // 未选中不显示边界，展示模型原样；选中态由 _updateBBSelection 打开
       g.add(base, bd);
       return g;
     }
@@ -1636,10 +1644,17 @@ export class MapEditor3d {
       }
       return null;
     }
+    // 老地图里的描边建筑存的是旧自动适配 scale（30 / 原始裸尺寸），
+    // 现在几何已在构建期归一化，旧值会让楼再放大一遍 → 自动归位为 1。
+    if (asset.source === "traced" && o.scale != null && o.scale !== 1) {
+      const raw = asset.unitSize || { x: 4, y: 4, z: 4 };
+      const oldAuto = +(30 / (Math.max(raw.x, raw.y, raw.z) || 1)).toFixed(4);
+      if (Math.abs(o.scale - oldAuto) < 0.01) { o.scale = 1; this._dirty = true; }
+    }
     const tpl = getAssetTemplateIfReady(asset.id);
-    if (tpl) return assetInstance(asset, { scale: o.scale });
+    if (tpl) return assetInstance(asset, { scale: o.scale == null ? 1 : o.scale });
     warmAssetTemplate(asset).then((t) => { if (t) this._rebuildObjects(); });
-    const s = asset.unitSize || { x: 4, y: 4, z: 4 };
+    const s = asset.source === "traced" ? tracedUnitSize(asset) : (asset.unitSize || { x: 4, y: 4, z: 4 });
     const k = o.scale == null ? 1 : o.scale;
     const ph = new THREE.Mesh(
       new THREE.BoxGeometry(Math.max(0.1, s.x * k), Math.max(0.1, s.y * k), Math.max(0.1, s.z * k)),
@@ -1671,9 +1686,11 @@ export class MapEditor3d {
     const pt = this._groundPoint(e);
     if (!pt) { this._hideAssetGhost(); return; }
     const sp = this._assetSnapPoint(pt);
-    const us = this._placingAsset.unitSize || { x: 4, y: 4, z: 4 };
-    const target = this._assetTargetSize || 30;
-    const k = target / (Math.max(us.x, us.y, us.z) || 1);
+    const us = this._placingAsset.source === "traced"
+      ? tracedUnitSize(this._placingAsset)
+      : (this._placingAsset.unitSize || { x: 4, y: 4, z: 4 });
+    // 与放置时同一套缩放：描边建筑/广告牌 = 1，GLB 按目标尺寸适配
+    const k = this._assetPlaceScale(this._placingAsset);
     this._ensureAssetGhost();
     const g = this._assetGhost;
     g.scale.set(Math.max(0.5, us.x * k), Math.max(0.5, us.y * k), Math.max(0.5, us.z * k));
@@ -1721,8 +1738,67 @@ export class MapEditor3d {
     return this._bbConstraints;
   }
 
+  /** 实例级覆盖：只存与资产默认值不同的字段，保持地图数据轻量、几何仍归资产库 */
+  _bbOverrides() {
+    const a = this._bbAsset;
+    if (!a) return { ...this._bbDraft };
+    const def = billboardParamsFor({ params: {} }, a);
+    const out = {};
+    // 弧度不放实例覆盖：只认模型资产 + 后台覆盖（见 billboardParamsFor / billboardManager）
+    for (const k of ["w", "h", "y", "autoSnap"]) {
+      if (this._bbDraft[k] !== def[k]) out[k] = this._bbDraft[k];
+    }
+    return out;
+  }
+
+  /** 资产的目标米数：用户显式设置 > 智能推断（名字/分类/原始尺寸） > 全局默认 */
+  _assetPlaceTarget(asset) {
+    if (asset && asset.placeSize != null && +asset.placeSize > 0) return +asset.placeSize;
+    if (asset && asset.source === "glb") return inferPlaceSize(asset);
+    if (asset && asset.source === "traced") return 30; // 描边资产几何在构建期归一化到 30m
+    return this._assetTargetSize || 30;
+  }
+
+  /** 放置缩放：GLB 建模单位不统一，按该资产的目标尺寸自动适配；描边建筑 / 广告牌
+   *  本身按真实米构建，必须原尺寸放置（scale=1），否则一栋楼被放大 7.5 倍。 */
+  _assetPlaceScale(asset) {
+    if (asset && (asset.source === "traced" || asset.source === "billboard")) return 1;
+    const s = (asset && asset.unitSize) || { x: 4, y: 4, z: 4 };
+    const maxDim = Math.max(s.x, s.y, s.z) || 1;
+    const target = this._assetPlaceTarget(asset);
+    return clamp(+(target / maxDim).toFixed(4), 0.001, 1000);
+  }
+
+  /** 新放广告牌的默认朝向 = 资产展示朝向（转角屏 π，让广告面朝向默认视角）。
+   *  这是写进地图对象的真实 rot，编辑器与进游戏表现一致 —— 不是编辑器单独转一下。 */
+  _bbDefaultRot() {
+    return this._bbAsset ? (+this._bbAsset.poseYaw || 0) : 0;
+  }
+
+  /** 幽灵 / 放置校验用的完整参数（资产规格 + 实例覆盖） */
   _bbDraftItem(pos) {
-    return { id: "__bb_draft__", type: "billboard", pos: pos || [0, 0], rot: 0, params: { ...this._bbDraft } };
+    const base = {
+      id: "__bb_draft__", type: "billboard",
+      assetId: this._bbAsset ? this._bbAsset.id : null,
+      pos: pos || [0, 0], rot: this._bbDefaultRot(),
+      params: { override: this._bbOverrides() },
+    };
+    return { ...base, params: billboardParamsFor(base, this._bbAsset) };
+  }
+
+  /** 取 billboard 对象引用的资产记录（同步缓存优先，缺失则异步拉一次再重绘面板） */
+  _bbAssetOf(data) {
+    if (!data || !data.assetId) return null;
+    const id = data.assetId;
+    let a = this._assetCache.get(id) || getAssetRecordSync(id);
+    if (!a && !this._assetFetchPending.has(id)) {
+      this._assetFetchPending.add(id);
+      getAsset(id).then((r) => {
+        this._assetFetchPending.delete(id);
+        if (r) { this._assetCache.set(id, r); if (!this._disposed) this._renderProps(); }
+      });
+    }
+    return a || null;
   }
 
   _disposeBBGhost() {
@@ -1789,41 +1865,64 @@ export class MapEditor3d {
     if (msg !== this._bbLastStatus) { this.status(msg); this._bbLastStatus = msg; }
   }
 
-  // 已放置的大屏都常驻显示占位边界（亮蓝），选中的那块改用合法/冲突色。
+  // 未选中的大屏不显示边界（展示模型原样）；选中的那块才显示合法/冲突色。
   // 边界是 wrapper 的子节点，随 Gizmo 平移旋转一起走，改尺寸后由重建刷新几何。
   _updateBBSelection() {
     for (const w of this._wrappers ? this._wrappers.values() : []) {
-      if (!w.bbEmbedded) continue;
-      for (const c of w.bbEmbedded.children) c.material.color.setHex(BB_COLORS.idle);
+      if (w.bbEmbedded) w.bbEmbedded.visible = false;
     }
     const sel = this.sel;
     if (!sel || !sel.bbEmbedded || sel.kind !== "object" || !sel.data || sel.data.type !== "billboard") return;
+    sel.bbEmbedded.visible = true;
     const v = validatePlacement(sel.data, this._bbGetConstraints());
     const color = v.ok ? BB_COLORS.grid : BB_COLORS.invalid;
     for (const c of sel.bbEmbedded.children) c.material.color.setHex(color);
   }
 
-  // 放置工具无选中时：先在右侧选承载形式与尺寸，幽灵/边界随之变成对应形状
-  _renderBBPicker(el) {
+  // 放置工具无选中时：先从「模型工坊 · 广告牌资产库」选模型，再调实例尺寸。
+  // 四种广告牌 = 四条资产记录；新增承载形式只需在资产库里加记录，这里自动列出。
+  async _renderBBPicker(el) {
+    let assets = await listAssets({ category: "billboard" });
+    if (!assets.length) { await ensureBillboardAssets(); assets = await listAssets({ category: "billboard" }); }
+    if (this._disposed) return;
+    assets = assets.filter((a) => a && a.billboard);
+    this._bbAssets = assets;
+    if (!this._bbAsset || !assets.some((a) => a.id === this._bbAsset.id)) {
+      this._bbAsset = assets.find((a) => a.billboard && a.billboard.mount === "standalone") || assets[0] || null;
+    }
+    if (this._bbAsset) this._bbDraft = billboardParamsFor({ params: {} }, this._bbAsset);
+    if (this._bbThumbUrls) for (const u of Object.values(this._bbThumbUrls)) URL.revokeObjectURL(u);
+    this._bbThumbUrls = {};
     const d = this._bbDraft;
-    const opts = Object.entries(MOUNTS)
-      .map(([id, m]) => `<option value="${id}"${id === d.mount ? " selected" : ""}>${m.label}</option>`).join("");
+    const cards = assets.map((a) => {
+      const sp = (a.billboard && a.billboard.spec) || {};
+      const label = MOUNTS[a.billboard && a.billboard.mount] ? MOUNTS[a.billboard.mount].label : (a.name || "广告牌");
+      const active = this._bbAsset && this._bbAsset.id === a.id;
+      return `<div class="me-asset-item${active ? " active" : ""}" data-id="${escHtml(a.id)}">
+        ${a.thumb ? `<img src="${this._bbThumbUrls[a.id] = URL.createObjectURL(a.thumb)}" alt="" />` : `<span class="me-asset-thumb-empty"></span>`}
+        <div class="me-asset-info"><b>${escHtml(a.name || label)}</b><small>${escHtml(label)} · ${sp.w || "?"}×${sp.h || "?"}m</small></div>
+      </div>`;
+    }).join("");
     el.innerHTML = `
-      <h4>广告大屏 · 放置</h4>
-      <label class="me-row">承载形式<select id="ep-bbp-mount" class="me-input-wide">${opts}</select></label>
+      <h4>广告牌模型 <small>ASSET LIBRARY</small></h4>
+      ${cards || `<p class="me-hint">广告牌资产库为空，去「模型工坊」新建广告牌资产。</p>`}
+      <div class="me-hint">模型几何来自资产库；下方仅调整这一块的实例尺寸（不写回资产）。移动鼠标预览占位：<b style="color:#2ce8c0">青</b>=合法、<b style="color:#ffc24d">金</b>=路缘、<b style="color:#ff4d5e">红</b>=冲突。</div>
       <label class="me-row">屏宽(m)<input id="ep-bbp-w" class="me-input-wide" type="number" min="4" max="40" step="1" value="${d.w}" /></label>
       <label class="me-row">屏高(m)<input id="ep-bbp-h" class="me-input-wide" type="number" min="2" max="30" step="1" value="${d.h}" /></label>
-      <label class="me-row">屏心高度(m)<input id="ep-bbp-y" class="me-input-wide" type="number" min="3" max="120" step="1" value="${d.y}" /></label>
-      <div class="me-hint">移动鼠标即可预览真实占位边界（含旋转后的包络与屏体高度）：<b style="color:#2ce8c0">青色</b>=网格吸附合法、<b style="color:#ffc24d">金色</b>=吸附路缘、<b style="color:#ff4d5e">红色</b>=压到建筑/道路/范围外，红色时禁止放置。顶栏可开关路缘吸附。</div>`;
+      <label class="me-row">屏心高度(m)<input id="ep-bbp-y" class="me-input-wide" type="number" min="3" max="120" step="1" value="${d.y}" /></label>`;
     const refresh = () => {
       this._bbGhostKey = "";
       if (this._bbLastEvent) this._bbGhostMove(this._bbLastEvent);
     };
-    el.querySelector("#ep-bbp-mount").addEventListener("change", (e) => {
-      this._bbDraft = { mount: e.target.value, ...MOUNTS[e.target.value].defaults, autoSnap: true };
-      this._renderProps();
-      refresh();
-    });
+    for (const item of el.querySelectorAll(".me-asset-item")) {
+      item.addEventListener("click", () => {
+        this._bbAsset = assets.find((x) => x.id === item.dataset.id) || null;
+        if (this._bbAsset) this._bbDraft = billboardParamsFor({ params: {} }, this._bbAsset);
+        this.status(`已选择广告牌资产「${this._bbAsset ? this._bbAsset.name : "?"}」· 点击地图放置`);
+        this._renderBBPicker(el);
+        refresh();
+      });
+    }
     for (const [id, k, min, max] of [["w", "w", 4, 40], ["h", "h", 2, 30], ["y", "y", 3, 120]]) {
       el.querySelector(`#ep-bbp-${id}`).addEventListener("change", (e) => {
         this._bbDraft[k] = clamp(+e.target.value || this._bbDraft[k], min, max);
@@ -1840,22 +1939,43 @@ export class MapEditor3d {
     this._pickerThumbUrls = {};
     el.innerHTML = `
       <h4>我的模型 <small>ASSETS</small></h4>
-      ${list.length ? list.map((a) => `
+      ${list.length ? list.map((a) => {
+        const sz = a.source === "traced" ? tracedUnitSize(a) : a.unitSize;
+        return `
         <div class="me-asset-item${this._placingAsset && this._placingAsset.id === a.id ? " active" : ""}" data-id="${a.id}">
           ${a.thumb ? `<img src="${this._pickerThumbUrls[a.id] = URL.createObjectURL(a.thumb)}" alt="" />` : `<span class="me-asset-thumb-empty"></span>`}
           <div class="me-asset-info">
             <b>${escHtml(a.name || "未命名")}</b>
-            <small>${escHtml(a.category || "")} · ${a.unitSize ? `${a.unitSize.x}×${a.unitSize.y}×${a.unitSize.z}m` : "?"}</small>
+            <small>${escHtml(a.category || "")} · 放置适配 ${this._assetPlaceTarget(a)}m · ${sz ? `${sz.x}×${sz.y}×${sz.z}m` : "?"}</small>
           </div>
-        </div>`).join("")
+        </div>`;
+      }).join("")
       : `<p class="me-hint">资产库为空。去「模型工坊」导入 GLB 或新建模型。</p>`}
-      <label class="me-asset-target">放置目标尺寸（米 · 按模型最大边适配）
+      ${this._placingAsset && (this._placingAsset.source === "glb" || this._placingAsset.source === "traced") ? `
+      <label class="me-asset-target">「${escHtml(this._placingAsset.name || "该模型")}」放置目标尺寸（米 · 最大边）
+        <input id="me-asset-place-size" type="number" min="0.05" max="2000" step="0.1" value="${this._assetPlaceTarget(this._placingAsset)}" />
+      </label>
+      <div class="me-hint">按名称/分类智能推断（椅子约 1.2m、建筑约 30m），可在这里改，会存进资产。</div>` : ""}
+      <label class="me-asset-target">全局兜底尺寸（无智能推断时用）
         <input id="me-asset-target" type="number" min="1" max="2000" step="1" value="${this._assetTargetSize || 30}" />
       </label>
       <p class="me-hint">选中后移动鼠标预览位置：靠近道路自动吸附路缘（金框），空白处按网格吸附（蓝框）· 单击放置 · Gizmo 可移动/旋转 · Delete 删除 · E 键旋转朝向</p>`;
     el.querySelector("#me-asset-target").addEventListener("change", (e) => {
       this._assetTargetSize = clamp(+e.target.value || 30, 1, 2000);
       e.target.value = this._assetTargetSize;
+      this._renderAssetPicker(el);
+    });
+    const sizeInput = el.querySelector("#me-asset-place-size");
+    if (sizeInput) sizeInput.addEventListener("change", async (e) => {
+      const a = this._placingAsset;
+      if (!a) return;
+      a.placeSize = clamp(+e.target.value || this._assetPlaceTarget(a), 0.05, 2000);
+      e.target.value = a.placeSize;
+      await putAsset(a);
+      this._assetCache.set(a.id, a);
+      invalidateAssetTemplate(a.id); // 描边资产几何按新目标尺寸重建
+      this.status(`「${a.name}」放置尺寸已设为 ${a.placeSize}m，已存入资产`);
+      this._renderAssetPicker(el);
     });
     for (const item of el.querySelectorAll(".me-asset-item")) {
       item.addEventListener("click", () => {
@@ -2425,65 +2545,131 @@ export class MapEditor3d {
       });
       el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
     } else if (kind === "object" && data.type === "billboard") {
-      // 广告大屏：承载形式切换 + 尺寸/屏心高度（经承载形式注册表，新增形式自动出现在下拉里）
+      // 广告大屏：模型 = 资产库引用；内容 / 素材 / 后台三层各自独立。
       const p = data.params || (data.params = {});
-      const spec = normalizeSpec(p);
-      const mountOpts = Object.entries(MOUNTS)
-        .map(([id, m]) => `<option value="${id}"${id === spec.mount ? " selected" : ""}>${m.label}</option>`)
-        .join("");
+      const asset = this._bbAssetOf(data);
+      const spec = normalizeSpec(billboardParamsFor(data, asset));
+      const placeItem = billboardItemFromRecord(data, asset);
       const deg = Math.round(((data.rot || 0) * 180 / Math.PI % 360 + 360) % 360);
-      const valid = validatePlacement(data, this._bbGetConstraints());
-      const f = footprintOf(data);
+      const valid = validatePlacement(placeItem, this._bbGetConstraints());
+      const f = footprintOf(placeItem);
       const validHint = valid.ok
         ? `<span style="color:#2ce8c0">✓ 占位边界有效</span> · 未压占建筑 / 道路 / 范围外`
         : `<span style="color:#ff4d5e">✗ 占位冲突：${reasonText(valid.reasons)}</span> · 进游戏会自动挪到最近合法路缘`;
+      const mountOpts = Object.entries(MOUNTS)
+        .map(([id, m]) => `<option value="${id}"${id === spec.mount ? " selected" : ""}>${m.label}</option>`).join("");
+      // 宿主候选：建筑 / 模型资产 —— 广告牌挂上去后跟随宿主的位移与旋转
+      const hosts = this.map.objects.filter((o) => o && o.id !== data.id && (o.type === "building" || o.type === "asset"));
+      const hostOpts = `<option value="">不挂载（独立放置）</option>` + hosts.map((o) => {
+        const nm = o.type === "building" ? "建筑" : "模型资产";
+        return `<option value="${escHtml(o.id)}"${o.id === data.hostId ? " selected" : ""}>${nm} · ${escHtml((o.name || "未命名").slice(0, 18))}</option>`;
+      }).join("");
+      const local = data.local || {};
+      const lp = Array.isArray(local.pos) ? local.pos : [0, 0, 0];
       el.innerHTML = `
         <h4>广告大屏 · 属性</h4>
+        <div class="me-stat">模型资产<b>${asset ? escHtml(asset.name || "未命名") : (data.assetId ? "读取中…" : "旧数据 · 未绑定资产")}</b></div>
         <div class="me-hint">占位 ${(f.hx * 2).toFixed(1)}×${(f.hz * 2).toFixed(1)}m · ${validHint}</div>
-        <button class="me-btn" id="ep-bb-fix">自动校正到合法落点</button>
+        ${data.assetId
+          ? `<button class="me-btn" id="ep-bb-editasset">在模型工坊中编辑此广告牌模型</button>`
+          : `<button class="me-btn" id="ep-bb-toasset">转为模型资产（解耦几何）</button>`}
+        ${asset && asset.poseYaw && Math.abs((data.rot || 0) - asset.poseYaw) > 0.01
+          ? `<button class="me-btn" id="ep-bb-face">转到资产默认朝向（广告面朝默认视角）</button>` : ""}
+        ${!data.hostId ? `<button class="me-btn" id="ep-bb-fix">自动校正到合法落点</button>` : ""}
         <label class="me-row">承载形式<select id="ep-bb-mount" class="me-input-wide">${mountOpts}</select></label>
         <label class="me-row">屏宽(m)<input id="ep-bb-w" class="me-input-wide" type="number" min="4" max="40" step="1" value="${spec.w}" /></label>
         <label class="me-row">屏高(m)<input id="ep-bb-h" class="me-input-wide" type="number" min="2" max="30" step="1" value="${spec.h}" /></label>
         <label class="me-row">屏心高度(m)<input id="ep-bb-y" class="me-input-wide" type="number" min="3" max="120" step="1" value="${spec.y}" /></label>
         <label class="me-row">旋转(°)<input id="ep-rot" class="me-input-wide" type="number" min="0" max="360" step="5" value="${deg}" /></label>
-        <label class="me-row" title="仅立面屏：进游戏时自动吸附到最近建筑墙面、对齐朝向，无需手工调角度">自动贴墙<input id="ep-bb-snap" type="checkbox" ${p.autoSnap !== false ? "checked" : ""} /></label>
-        <div class="me-hint">立面屏落点放在建筑附近即可，进游戏后会自动贴合墙面并避开墙角；关闭则完全按此处位置与旋转摆放。</div>
+        <label class="me-row" title="仅立面屏：进游戏时自动吸附到最近建筑墙面、对齐朝向">自动贴墙<input id="ep-bb-snap" type="checkbox" ${spec.autoSnap ? "checked" : ""} /></label>
+        <label class="me-row">挂载宿主<select id="ep-bb-host" class="me-input-wide">${hostOpts}</select></label>
+        ${data.hostId ? `
+          <div class="me-hint">宿主局部偏移（米 / 度）：挂上后跟随宿主移动旋转，进游戏不再做贴墙/避让。</div>
+          <label class="me-row">X<input id="ep-bb-lx" class="me-input-wide" type="number" step="0.1" value="${lp[0]}" /></label>
+          <label class="me-row">高度偏移<input id="ep-bb-ly" class="me-input-wide" type="number" step="0.1" value="${lp[1]}" /></label>
+          <label class="me-row">Z<input id="ep-bb-lz" class="me-input-wide" type="number" step="0.1" value="${lp[2] || 0}" /></label>
+          <label class="me-row">相对朝向(°)<input id="ep-bb-lrot" class="me-input-wide" type="number" step="5" value="${Math.round(((local.rot || 0) * 180 / Math.PI % 360 + 360) % 360)}" /></label>` : ""}
         ${posEl(data.pos[0], data.pos[1])}
         <button class="me-btn" id="ep-bb-content">编辑显示内容 · ${(p.content && p.content.items && p.content.items.length) || 8} 项</button>
         <button class="me-del" id="ep-del">删除</button>`;
-      const apply = (patch, undoLabel) => {
-        Object.assign(data.params, patch);
-        this._bbConstraints = null;
-        this._rebuildObjects(); this._dirty = true;
-        const w = this._wrappers.get(data.id);
-        if (w) { this.sel = w; this._three.tc.attach(w.root); } // 重建后接回 Gizmo
-        this._pushUndo(undoLabel);
-      };
-      el.querySelector("#ep-bb-fix").addEventListener("click", () => {
-        const r = resolvePlacement(data, this._bbGetConstraints());
-        if (!r.ok) { this.status("附近没有合法落点：请先调整道路/建筑，或缩小屏体尺寸"); return; }
-        if (!r.moved) { this.status("当前落点已合法，无需校正"); return; }
-        data.pos = r.item.pos;
+      const rebuild = () => {
         this._bbConstraints = null;
         this._rebuildObjects(); this._dirty = true;
         const w = this._wrappers.get(data.id);
         if (w) { this.sel = w; this._three.tc.attach(w.root); }
-        this._pushUndo("自动校正大屏落点");
-        this._renderProps();
-        this.status(`已校正落点至 ${data.pos[0]}, ${data.pos[1]} · 边界有效`);
+      };
+      const apply = (patch, undoLabel) => {
+        p.override = { ...(p.override || {}), ...patch };
+        rebuild(); this._pushUndo(undoLabel);
+      };
+      const fixBtn = el.querySelector("#ep-bb-fix");
+      if (fixBtn) fixBtn.addEventListener("click", () => {
+        const r = resolvePlacement(placeItem, this._bbGetConstraints());
+        if (!r.ok) { this.status("附近没有合法落点：请先调整道路/建筑，或缩小屏体尺寸"); return; }
+        if (!r.moved) { this.status("当前落点已合法，无需校正"); return; }
+        data.pos = r.item.pos; rebuild(); this._pushUndo("自动校正大屏落点");
+        this._renderProps(); this.status(`已校正落点至 ${data.pos[0]}, ${data.pos[1]} · 边界有效`);
       });
-      el.querySelector("#ep-bb-mount").addEventListener("change", (e) => {
-        // 切换承载形式：尺寸缺省跟随新形式的默认值（避免立面屏继承了广告牌的离地高度）
-        apply({ mount: e.target.value, ...MOUNTS[e.target.value].defaults }, "切换承载形式");
-        this._renderProps(); // 刷新输入框为新形式默认尺寸
+      const editBtn = el.querySelector("#ep-bb-editasset");
+      if (editBtn) editBtn.addEventListener("click", () => {
+        if (this.opts.onEditAsset) this.opts.onEditAsset(data.assetId);
+        else this.status("未配置模型工坊入口");
+      });
+      const faceBtn = el.querySelector("#ep-bb-face");
+      if (faceBtn) faceBtn.addEventListener("click", () => {
+        data.rot = asset.poseYaw;
+        rebuild(); this._pushUndo("广告牌转到资产默认朝向"); this._renderProps();
+        this.status("已把广告面转到默认视角朝向；编辑器与进游戏表现一致");
+      });
+      const toAssetBtn = el.querySelector("#ep-bb-toasset");
+      if (toAssetBtn) toAssetBtn.addEventListener("click", async () => {
+        const rec = await createAssetFromBillboard(data);
+        data.assetId = rec.id;
+        data.params = { override: {}, content: p.content || null };
+        this._assetCache.set(rec.id, rec);
+        rebuild(); this._pushUndo("广告牌转为模型资产"); this._renderProps();
+        this.status(`已转为模型资产「${rec.name}」· 几何不再存地图 JSON`);
+      });
+      el.querySelector("#ep-bb-mount").addEventListener("change", async (e) => {
+        // 切换承载形式 = 换一个广告牌模型资产（几何来自资产库，不内联到地图）
+        let list = this._bbAssets && this._bbAssets.length ? this._bbAssets : await listAssets({ category: "billboard" });
+        if (!list.length) { await ensureBillboardAssets(); list = await listAssets({ category: "billboard" }); }
+        const next = list.find((a) => a.billboard && a.billboard.mount === e.target.value) || null;
+        if (!next) { this.status("资产库里没有该承载形式的广告牌模型"); return; }
+        data.assetId = next.id;
+        p.override = {};
+        this._assetCache.set(next.id, next);
+        rebuild(); this._pushUndo("切换广告牌模型"); this._renderProps();
       });
       el.querySelector("#ep-bb-w").addEventListener("change", (e) => apply({ w: +e.target.value || spec.w }, "调整屏宽"));
       el.querySelector("#ep-bb-h").addEventListener("change", (e) => apply({ h: +e.target.value || spec.h }, "调整屏高"));
       el.querySelector("#ep-bb-y").addEventListener("change", (e) => apply({ y: +e.target.value || spec.y }, "调整屏心高度"));
       el.querySelector("#ep-bb-snap").addEventListener("change", (e) => apply({ autoSnap: e.target.checked }, "切换自动贴墙"));
+      el.querySelector("#ep-bb-host").addEventListener("change", (e) => {
+        if (e.target.value) data.hostId = e.target.value;
+        else { delete data.hostId; delete data.local; }
+        rebuild(); this._pushUndo("设置广告牌宿主"); this._renderProps();
+      });
+      for (const [sel, key, i] of [["#ep-bb-lx", "pos", 0], ["#ep-bb-ly", "pos", 1], ["#ep-bb-lz", "pos", 2]]) {
+        const node = el.querySelector(sel);
+        if (!node) continue;
+        node.addEventListener("change", () => {
+          const cur = data.local || (data.local = { pos: [0, 0, 0], rot: 0 });
+          if (!Array.isArray(cur.pos)) cur.pos = [0, 0, 0];
+          cur.pos[i] = +node.value || 0;
+          rebuild(); this._pushUndo("调整广告牌宿主偏移");
+        });
+      }
+      const lrot = el.querySelector("#ep-bb-lrot");
+      if (lrot) lrot.addEventListener("change", () => {
+        const d = +lrot.value || 0;
+        const cur = data.local || (data.local = { pos: [0, 0, 0], rot: 0 });
+        cur.rot = (((d % 360) + 360) % 360) * Math.PI / 180;
+        rebuild(); this._pushUndo("调整广告牌宿主朝向");
+      });
       el.querySelector("#ep-bb-content").addEventListener("click", () => {
-        openBillboardContent(data.params && data.params.content, (cfg) => {
-          data.params.content = cfg;
+        openBillboardContent(p.content, (cfg) => {
+          p.content = cfg;
           this._dirty = true;
           this._pushUndo("编辑大屏显示内容");
           this.status(`已更新大屏内容 · ${cfg.items.length} 项 · 保存后进游戏生效`);
@@ -2495,10 +2681,7 @@ export class MapEditor3d {
         d = ((d % 360) + 360) % 360;
         data.rot = Math.round(d * Math.PI / 180 * 100) / 100;
         e.target.value = d;
-        this._rebuildObjects(); this._dirty = true;
-        const w = this._wrappers.get(data.id);
-        if (w) { this.sel = w; this._three.tc.attach(w.root); }
-        this._pushUndo("旋转大屏");
+        rebuild(); this._pushUndo("旋转大屏");
       });
       el.querySelector("#ep-del").addEventListener("click", () => this._deleteSel());
     } else {
@@ -2828,12 +3011,22 @@ export class MapEditor3d {
     document.getElementById("e3-settings").addEventListener("click", () => this._toggleSettings(), this._sig);
 
     this._onKey = (e) => {
-      if (document.activeElement && ["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
+      const active = document.activeElement;
+      const typing = active && (["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName) || active.isContentEditable);
       if (e.key === "Escape") {
         const pop = document.getElementById("e3-settings-pop");
         if (pop && !pop.classList.contains("hidden")) { this._closeSettings(); return; }
         closeRoadSub();
+        // 属性面板输入框聚焦时也要能用 Esc 退出选中：先退出输入焦点，再走下面的取消逻辑
+        if (typing) active.blur();
         if (this.tool === "set-origin") { this._setTool("select"); this.status("已取消锚点拾取"); return; }
+        if (this.tool === "place-billboard" || this.tool === "place-asset") {
+          // 放置模型/广告牌时 Esc 直接退出放置（幽灵与吸附边界由 _setTool 一并清掉）
+          this._setTool("select");
+          this._select(null);
+          this.status("已取消放置");
+          return;
+        }
         if (this.tool === "place-road") {
           if (this._rtMode === "edit") {
             if (this.sel) { this._select(null); this.status("已取消选择 · Esc 再次返回添加模式"); } // 分级退回：先取消选择
@@ -2864,6 +3057,7 @@ export class MapEditor3d {
         if (this.draft && this.draft.measure) { this._endMeasure("已取消测距"); return; }
         this.draft = null; this._updateDraftPreview(); this._select(null);
       }
+      else if (typing) return; // 输入框聚焦时不响应编辑快捷键（Esc 已单独处理）
       else if (e.key === "Enter") {
         if (this.tool === "place-road" && this._rtChain) { this._rtChain = null; rtRenderPanel(this); this.status("已断开链条"); return; }
         this._finishDraft();

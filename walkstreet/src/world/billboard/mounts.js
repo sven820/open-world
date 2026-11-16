@@ -199,7 +199,7 @@ export const MOUNTS = {
         screenMats: [matA, matB],
         collider,
         cornerArc: ctl,                        // 圆角屏控制器（半径热更新 / UV 模式 / 逐帧重投影）
-        faceMeshes: ctl.faceMeshes(),          // 每面的屏面网格（圆角时每面多段条带）
+        faceMeshes: ctl.faceMeshes(),          // 每面的屏面网格（圆角细分带已按面合并，每面 1 个）
       };
     },
   },
@@ -292,9 +292,13 @@ export function normalizeSpec(params = {}) {
  */
 export function buildBillboardGroup(item, screenMat) {
   const spec = normalizeSpec(item.params);
+  // 编辑器预览用的是共享占位材质（运行时传进来的是独立材质数组）：
+  // 3D 转角一体屏按 split UV 取一整幅跨两面的画面，避免看成左右两块独立屏。
+  const isPreview = !!screenMat && !Array.isArray(screenMat) && !!(screenMat.userData && screenMat.userData.shared);
   const built = getMount(spec.mount).build(spec, asMats(screenMat), {
     pos: item.pos, rot: item.rot || 0,
   });
+  if (isPreview && spec.mount === "corner3d" && built.cornerArc) built.cornerArc.setUvMode("split");
   const group = new THREE.Group();
   for (const fg of built.faceGroups) {
     fg.position.set(0, 0, 0);
@@ -310,6 +314,7 @@ export function buildBillboardGroup(item, screenMat) {
 
 /* ---------------- 编辑器共享材质（userData.shared，避免随重建释放） ---------------- */
 let _previewMat = null;
+let _cornerPreviewMat = null;
 let _ghostMat = null;
 
 // 预览屏面："广告大屏"占位画面（运行时换成真实节目）
@@ -332,6 +337,43 @@ export function editorScreenMaterial() {
   _previewMat.map.colorSpace = THREE.SRGBColorSpace;
   _previewMat.userData.shared = true; // 编辑器全量重建时不 dispose
   return _previewMat;
+}
+
+/** 3D转角包柱屏预览：一整幅跨两面的画面（UV split 模式下 A 面取左半、B 面取右半）。
+ *  中心 u=0.5 正好落在转角棱线 —— 边框只画一圈、文字横跨转角，
+ *  表现「一整块折角屏」而不是两块独立广告牌。 */
+export function editorCornerScreenMaterial() {
+  if (_cornerPreviewMat) return _cornerPreviewMat;
+  const W = 1024, H = 288;
+  const c = makeCanvas(W, H);
+  const ctx = c.getContext("2d");
+  const bg = ctx.createLinearGradient(0, 0, W, 0);
+  bg.addColorStop(0, "#0b1624"); bg.addColorStop(0.5, "#17354c"); bg.addColorStop(1, "#0b1624");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  const band = ctx.createLinearGradient(0, 104, 0, 208);
+  band.addColorStop(0, "rgba(46,196,230,0)");
+  band.addColorStop(0.5, "rgba(46,196,230,0.18)");
+  band.addColorStop(1, "rgba(46,196,230,0)");
+  ctx.fillStyle = band; ctx.fillRect(0, 104, W, 104);
+  ctx.strokeStyle = "#2ec4e6"; ctx.lineWidth = 6;
+  ctx.strokeRect(8, 8, W - 16, H - 16);
+  // 一条连续弧线贯穿两面，拐角不断开
+  ctx.strokeStyle = "rgba(46,196,230,0.45)"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(28, H - 30); ctx.quadraticCurveTo(W / 2, H - 88, W - 28, H - 30); ctx.stroke();
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#8af0ff";
+  ctx.font = "800 60px 'Noto Sans SC', 'Microsoft YaHei', sans-serif";
+  ctx.fillText("转角一体屏", W / 2, 118);
+  ctx.font = "600 28px 'Segoe UI', sans-serif";
+  ctx.fillStyle = "rgba(255,255,255,0.7)";
+  ctx.fillText("CONTINUOUS CORNER DISPLAY · 3D", W / 2, 186);
+  _cornerPreviewMat = new THREE.MeshBasicMaterial({
+    color: 0xc4c4c4, toneMapped: false, side: THREE.FrontSide,
+  });
+  _cornerPreviewMat.map = new THREE.CanvasTexture(c);
+  _cornerPreviewMat.map.colorSpace = THREE.SRGBColorSpace;
+  _cornerPreviewMat.userData.shared = true;
+  return _cornerPreviewMat;
 }
 
 // 放置幽灵：高亮青色。编辑器网格是深蓝灰（0x22303e / 0x3a4a5c），

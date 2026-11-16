@@ -4,6 +4,8 @@ import { buildPlacedBillboard, phaseFor } from "./billboard.js";
 import { normalizeSpec, corner3dWorldFaces, corner3dWorldArcSamples } from "./mounts.js";
 import { defaultContent, normalizeContent, contentKey, scheduleFrom } from "./contentConfig.js";
 import { getRenderSettings } from "../../config/renderSettings.js";
+import { getAssetRecordSync } from "../../data/assetStore.js";
+import { billboardParamsFor } from "../../data/billboardAsset.js";
 
 /* ---------------- 广告大屏管理器 ----------------
  * 唯一来源：编辑器手动放置（map.objects 里 type==="billboard"）。
@@ -83,6 +85,36 @@ export class BillboardManager {
     this.screens.push(b);
   }
 
+  /** 挂到别的建筑 / 资产模型上：宿主世界变换 + 局部偏移。
+   *  广告牌实例只存 hostId 与局部偏移，宿主编排完全独立 —— 几何 / 内容 / 素材 / 后台四层不动。
+   *  返回 null = 该对象未指定宿主（走原来的贴墙 / 落点逻辑）。 */
+  _hostTransform(item, spec, city) {
+    const hostId = item.hostId;
+    if (!hostId || !city || !city.data) return null;
+    const host = (city.data.objects || []).find((o) => o && o.id === hostId);
+    if (!host) return null;
+    let hx = 0, hz = 0;
+    if (Array.isArray(host.pos)) {
+      hx = host.pos[0]; hz = host.pos[1];
+    } else if (host.params && Array.isArray(host.params.footprint) && host.params.footprint.length) {
+      // 描边建筑：以 footprint 质心为锚点
+      for (const [x, z] of host.params.footprint) { hx += x; hz += z; }
+      hx /= host.params.footprint.length; hz /= host.params.footprint.length;
+    }
+    const hrot = host.rot || 0;
+    const local = item.local || {};
+    const lp = Array.isArray(local.pos) ? local.pos : [0, 0, 0];
+    const c = Math.cos(hrot), s = Math.sin(hrot);
+    const px = hx + lp[0] * c + (lp[2] || 0) * s;
+    const pz = hz - lp[0] * s + (lp[2] || 0) * c;
+    const dy = lp[1] || 0;
+    const params = dy ? { ...item.params, y: (spec.y || 0) + dy } : item.params;
+    return {
+      ...item, pos: [px, pz], rot: hrot + (local.rot || 0), params,
+      hostId, local: { ...local },
+    };
+  }
+
   /** 立面屏自动贴墙：对齐法线、贴到墙外、沿墙夹紧避免撞墙角 */
   _snapFacade(item, spec) {
     if (!this.city.colliders || !this.city.colliders.nearestWall) return item;
@@ -144,14 +176,26 @@ export class BillboardManager {
   }
 
   _build(city) {
-    // 只认地图里手动放置的记录；没有就一块都不建（默认街区亦然）
+    // 只认地图里手动放置的记录；没有就一块都不建（默认街区亦然）。
+    // 新记录只存 { assetId, contentRef }，几何规格从资产库同步缓存读（预热阶段已填）；
+    // 老记录内联 params 仍然兼容 —— 存量地图不会失效。
     const placed = ((city.data && city.data.objects) || []).filter((o) => o && o.type === "billboard");
     if (!placed.length) return;
     // 立面屏贴墙；落地屏用建城阶段算好的路缘落点（建筑空地已预留）。
     // placements 缺失时（老地图 / 非 City 调用）退回旧的「撞楼推开」兜底。
     const placements = city.billboardPlacements || null;
-    const items = placed.map((item) => {
+    const items = placed.map((raw) => {
+      const asset = raw.assetId ? getAssetRecordSync(raw.assetId) : null;
+      const item = {
+        ...raw,
+        params: billboardParamsFor(raw, asset),
+        assetId: raw.assetId || null,
+        hostId: raw.hostId || null,
+      };
       const spec = normalizeSpec(item.params);
+      // 挂到建筑 / 资产模型：宿主的变换就是广告牌的基准，跳过贴墙与避让
+      const hosted = this._hostTransform(item, spec, city);
+      if (hosted) return hosted;
       if (spec.mount === "facade") return this._snapFacade(item, spec);
       const pos = placements && placements.get(item.id);
       return pos ? { ...item, pos } : this._avoidBuildings(item, spec);
@@ -179,7 +223,7 @@ export class BillboardManager {
 
   /** 应用后台发布快照：按屏位 ID 匹配内容，未绑定的屏回退到地图内配置 / 默认节目单。
    *  返回 { applied, changed, screens }，供终端 ACK 上报。 */
-  applyExternal(byId = {}) {
+  applyExternal(byId = {}, force = false) {
     this.external = byId || {};
     let applied = 0, changed = 0;
     for (const s of this.screens) {
@@ -187,13 +231,14 @@ export class BillboardManager {
       const cfg = normalizeContent(has ? byId[s.id] : s.localContent) || defaultContent();
       const key = this._keyFor(s.aspect, cfg);
       if (has) applied++;
-      // 转角弧度热更新：只重建屏体几何（参考平面不变 → RT 无需重渲，不会闪），
-      // 必须在下面建 ctx / 内容池之前生效，外扩估算才与新屏面对得上。
-      const arcR = cfg.d3 ? cfg.d3.arc : 0;
+      // 转角弧度：模型资产是默认值；后台 d3.arc 只是临时校准覆盖（null = 跟随模型）。
+      // 只重建屏体几何，参考平面不变 → RT 无需重渲，不会闪。
+      const arcOverride = cfg.d3 ? cfg.d3.arc : null;
+      const arcR = arcOverride == null ? (s.modelArc || 0) : arcOverride;
       if (s.setArc) s.setArc(arcR);
-      if (s.contentKey === key) continue;   // 内容没变：不重建纹理 / 不打断视频
+      if (!force && s.contentKey === key) continue;   // 内容没变：不重建纹理 / 不打断视频
       const is3d = s.mount === "corner3d";
-      const ctx = is3d ? this._ctxFor({ w: s.w, h: s.h, y: s.y, arc: arcR }, [s.x, s.z], s.rot) : null;
+      const ctx = is3d ? this._ctxFor({ w: s.w, h: s.h, y: s.y, arc: s.arcRadius != null ? s.arcRadius : arcR }, [s.x, s.z], s.rot) : null;
       const scope = is3d ? s.id : "";
       const pool = this._poolFor(s.aspect, cfg, ctx, scope);
       if (pool === s.pool) continue;

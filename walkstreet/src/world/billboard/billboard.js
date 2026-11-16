@@ -166,15 +166,20 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
       name: item.name || "",
       group, x: item.pos[0], z: item.pos[1],
       rot: item.rot || 0,
+      // 资产引用 / 宿主引用：只做标识，后台上报与属性面板用，不影响内容渲染
+      assetId: item.assetId || null,
+      hostId: item.hostId || null,
       screenMats: faceMats, playlist, pool,
       mount: built.spec.mount, w: built.spec.w, h: built.spec.h, y: built.spec.y,
       aspect: built.spec.w / built.spec.h,
       // 编辑器里给这块屏单独配的内容；后台未绑定该屏位时回退到这里
       localContent: (item.params && item.params.content) || null,
       contentKey: "",
-      // corner3d 圆角控制器：半径热更新（后台配置）+ 逐帧 UV 重投影（billboardManager 驱动）
+      // corner3d 圆角控制器：半径热更新（后台校准）+ 逐帧 UV 重投影（billboardManager 驱动）
       arc: arcCtl,
       arcRadius: arcCtl ? arcCtl.radius : 0,
+      // 模型自带的弧度（资产 / 地图实例），后台没下发覆盖值时回到它
+      modelArc: arcCtl ? arcCtl.radius : 0,
     };
 
     /** 后台「圆角半径」热更新：只重建屏体几何，不动场景节点 / 材质 / 轮播，

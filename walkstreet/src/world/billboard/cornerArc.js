@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
 /* ---------------- 3D 转角包柱屏 · L 角圆角控制器（cornerArc） ----------------
  * 移植自 PULSE 内容源实验台「屏体几何 · 转角弧度」：屏面 = 两个平面段 +
@@ -241,11 +242,15 @@ export class CornerArcScreen {
     this._trimMat = trimMat();
 
     const box = new THREE.Mesh(new THREE.BoxGeometry(towerW, totalH, towerW), this._housing);
+    box.name = "corner3d-housing";
+    box.userData.bindingKey = "housing";
     box.position.set(0, totalH / 2, 0);
     box.castShadow = true; box.receiveShadow = true;
     this._addBuilt(box);
 
     const trim = new THREE.Mesh(new THREE.BoxGeometry(towerW + 0.3, 0.5, towerW + 0.3), this._trimMat);
+    trim.name = "corner3d-trim";
+    trim.userData.bindingKey = "trim";
     trim.position.set(0, totalH + 0.25, 0);
     trim.castShadow = false; trim.receiveShadow = true;
     this._addBuilt(trim);
@@ -263,6 +268,9 @@ export class CornerArcScreen {
       // GPU 的三角形内线性插值折弯（圆环变椭圆 / 网格变弯），细分后误差可忽略。
       const geom = quadStrip(q.pa, q.pb, y0, y1, 16, 8);
       const mesh = new THREE.Mesh(geom, this.mats[q.face]);
+      mesh.name = `corner3d-screen-${q.face === 0 ? "A" : "B"}`;
+      mesh.userData.billboardScreen = true;
+      mesh.userData.bindingKey = "screen";
       mesh.castShadow = false;
       this.group.add(mesh);
       const attr = geom.attributes.uv;
@@ -302,15 +310,11 @@ export class CornerArcScreen {
     }
     const total = s[s.length - 1] || 1;
     const off = faceIndex === 0 ? 0 : 0.5;   // 整屏平面：A 取画布左半、B 取右半
+    const geos = [], ups = [], vps = [], fulls = [], planes = [];
 
     for (let i = 0; i < poly.length - 1; i++) {
       const p0 = poly[i], p1 = poly[i + 1];
       const geom = quadStrip([p0.x, p0.z], [p1.x, p1.z], y0, y1);
-      const mesh = new THREE.Mesh(geom, this.mats[faceIndex]);
-      mesh.castShadow = false;
-      this.group.add(mesh);
-      const attr = geom.attributes.uv;
-
       const u0 = s[i] / total, u1 = s[i + 1] / total;
       const { up, vp } = geom.userData, n = up.length;
       const full = new Float32Array(n * 2), plane = new Float32Array(n * 2);
@@ -319,8 +323,32 @@ export class CornerArcScreen {
         full[k * 2] = u; full[k * 2 + 1] = vp[k];
         plane[k * 2] = off + u * 0.5; plane[k * 2 + 1] = vp[k];
       }
-      this._records.push({ mesh, geom, face: faceIndex, attr, full, plane, proj: full.slice() });
+      geos.push(geom); ups.push(up); vps.push(vp); fulls.push(full); planes.push(plane);
     }
+
+    // 细分留在顶点层（离轴 UV 需要密度），节点层按面合成 1 个 mesh：
+    // mergeGeometries 自动偏移索引，三套 UV 按同一顶点序拼接，投影逻辑不变。
+    const merged = geos.length > 1 ? mergeGeometries(geos) : geos[0];
+    if (!merged) {
+      // 属性集意外不一致时退回逐段网格，保证画面不缺
+      for (let i = 0; i < geos.length; i++) this._addScreenMesh(geos[i], faceIndex, fulls[i], planes[i]);
+      return;
+    }
+    for (const g of geos) if (g !== merged) g.dispose();
+    merged.userData.up = concatF32(ups);
+    merged.userData.vp = concatF32(vps);
+    this._addScreenMesh(merged, faceIndex, concatF32(fulls), concatF32(planes));
+  }
+
+  /** 统一登记屏面：名字/绑定键在 setRadius 重建后也不会丢 */
+  _addScreenMesh(geom, face, full, plane) {
+    const mesh = new THREE.Mesh(geom, this.mats[face]);
+    mesh.name = `corner3d-screen-${face === 0 ? "A" : "B"}`;
+    mesh.userData.billboardScreen = true;
+    mesh.userData.bindingKey = "screen";
+    mesh.castShadow = false;
+    this.group.add(mesh);
+    this._records.push({ mesh, geom, face, attr: geom.attributes.uv, full, plane, proj: full.slice() });
   }
 
   /** 圆角塔体：屏面折线沿法线内缩 SCREEN_OFFSET 后的轮廓沿 Y 挤出 */
@@ -329,6 +357,8 @@ export class CornerArcScreen {
     this._trimMat = trimMat();
 
     const tower = new THREE.Mesh(this._towerGeom(half, D, R - SCREEN_OFFSET, totalH, 0), this._housing);
+    tower.name = "corner3d-housing";
+    tower.userData.bindingKey = "housing";
     tower.castShadow = true; tower.receiveShadow = true;
     this._addBuilt(tower);
 
@@ -337,6 +367,8 @@ export class CornerArcScreen {
       this._towerGeom(half + 0.15, D, R - SCREEN_OFFSET + 0.15, 0.5, totalH),
       this._trimMat,
     );
+    trim.name = "corner3d-trim";
+    trim.userData.bindingKey = "trim";
     trim.castShadow = false; trim.receiveShadow = true;
     this._addBuilt(trim);
   }
@@ -373,6 +405,13 @@ export class CornerArcScreen {
 }
 
 const _clip = new THREE.Vector3();
+
+const concatF32 = (arrays) => {
+  const out = new Float32Array(arrays.reduce((n, a) => n + a.length, 0));
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
+};
 
 /** 一条竖直条带的细分网格（(su+1)×(sv+1) 顶点）：顶点序 pa(左下) → pb(右下)
  *  → pd(右上) → pc(左上)，与 mounts.js quadGeom 同一绕序（right×up = 屏面外法线）。

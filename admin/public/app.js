@@ -35,7 +35,7 @@ const AUDIOS = { off: "静音（推荐）", nearest: "仅最近一块屏出声",
 const MOUNTS = { standalone: "独立广告牌", facade: "建筑立面屏", corner: "转角包柱屏", corner3d: "3D转角包柱屏" };
 /* 3D 转角包柱屏的屏位级参数（游戏端 contentConfig.D3_DEFAULTS 对应）：
  * 遛眼参数 + 屏体几何 + 显示开关，发布时合并进该屏位的快照 d3 字段。 */
-const D3_DEFAULTS = { depth: 2.5, scale: 1, arc: 0, spin: true, track: true, hud: false, helper: false };
+const D3_DEFAULTS = { depth: 2.5, scale: 1, arc: null, spin: true, track: true, hud: false, helper: false };
 const D3_GROUPS = [
   ["eye", "遛眼参数"],
   ["geo", "屏体几何 · 转角弧度"],
@@ -44,7 +44,7 @@ const D3_GROUPS = [
 const D3_FIELDS = [
   { k: "depth", label: "出屏深度（米，0~10）", type: "number", step: 0.5, min: 0, max: 10, group: "eye" },
   { k: "scale", label: "尺寸（0.4~2）", type: "number", step: 0.05, min: 0.4, max: 2, group: "eye" },
-  { k: "arc", label: "圆角半径（米，0~5）", type: "number", step: 0.5, min: 0, max: 5, group: "geo", hint: "0 = 直角共棱；默认 0，共棱处过渡成 1/4 圆柱弧。屏窄时实际上限取屏宽一半；两台离轴相机仍按原虚拟平面取景，弧段按透视重投影采样，最佳视点的 3D 对位不变" },
+  { k: "arc", label: "圆角半径覆盖（米，0~5）", type: "number", step: 0.1, min: 0, max: 5, group: "geo", nullable: true, hint: "留空 = 跟随模型资产里设置的弧度（推荐）。只有现场校准需要临时改形状时才填数字；0 = 直角共棱。屏窄时实际上限取屏宽一半，离轴相机仍按原虚拟平面取景。" },
   { k: "spin", label: "轻微摆动 / 自转", type: "check", group: "view", hint: "平面素材板不受此开关影响（板子一转就会被离轴投影拉成梯形）" },
   { k: "track", label: "片源跟随当前视点（实时追踪）", type: "check", group: "view", hint: "关闭则固定最佳视点（固定机位评审用）" },
   { k: "hud", label: "右下角双路预览", type: "check", group: "view", hint: "游戏画面右下角叠加两面离轴 RT 的小窗，检查预扭曲用" },
@@ -649,7 +649,7 @@ function openD3Config(sc) {
         </span>
         <span class="small muted">${esc(f.hint || "")}</span></label>` : `
         <label class="field${f.hint ? " full" : ""}"><span>${esc(f.label)}</span>
-          <input id="d3-${f.k}" class="inp" type="number" step="${f.step}" min="${f.min}" max="${f.max}" value="${esc(cur[f.k])}" />
+          <input id="d3-${f.k}" class="inp" type="number" step="${f.step}" min="${f.min}" max="${f.max}" value="${esc(cur[f.k] == null ? "" : cur[f.k])}" placeholder="${f.nullable ? "留空 = 跟随模型" : ""}" />
           ${f.hint ? `<span class="small muted">${esc(f.hint)}</span>` : ""}
         </label>`)).join("")}`).join("")}
     </div>
@@ -663,7 +663,7 @@ function openD3Config(sc) {
         const el = $(`#d3-${f.k}`, root);
         if (!el) continue;
         if (f.type === "check") el.checked = D3_DEFAULTS[f.k];
-        else el.value = D3_DEFAULTS[f.k];
+        else el.value = D3_DEFAULTS[f.k] == null ? "" : D3_DEFAULTS[f.k];
       }
     };
     $("#d3-save", root).onclick = async () => {
@@ -672,6 +672,7 @@ function openD3Config(sc) {
         const el = $(`#d3-${f.k}`, root);
         if (!el) continue;
         if (f.type === "check") d3[f.k] = el.checked;
+        else if (f.nullable && el.value === "") d3[f.k] = null;
         else d3[f.k] = Number(el.value);
       }
       try {

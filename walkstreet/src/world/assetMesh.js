@@ -35,7 +35,10 @@ export async function preloadAssetTemplates(assets) {
 export async function preloadAssetTemplatesFromMap(data) {
   const defs = (data && data.objects) || [];
   const ids = new Set();
-  for (const o of defs) if (o.type === "asset" && o.assetId) ids.add(o.assetId);
+  for (const o of defs) {
+    // 广告牌也是资产引用：模型规格在 IndexedDB，地图只存 assetId（内容单独挂接）
+    if (o.assetId && (o.type === "asset" || o.type === "billboard")) ids.add(o.assetId);
+  }
   if (!ids.size) return;
   const { getAsset } = await import("../data/assetStore.js");
   const assets = (await Promise.all([...ids].map((id) => getAsset(id)))).filter(Boolean);
@@ -68,6 +71,11 @@ export function warmAssetTemplate(asset) {
       let tpl;
       if (asset.source === "traced" && asset.traced) {
         tpl = buildTracedObject(asset);
+      } else if (asset.source === "billboard" && asset.billboard) {
+        // 广告牌资产：规格 → MOUNTS 现场构建（屏面用共享占位材质，运行时由
+        // BillboardManager 换成独立的 screenMaterial 播内容）
+        const { buildBillboardAssetObject } = await import("./billboard/billboardAssetBridge.js");
+        tpl = buildBillboardAssetObject(asset);
       } else if (asset.glb) {
         tpl = await buildGLBObject(asset);
       } else {
@@ -291,10 +299,33 @@ function enableShadows(root) {
 
 /* ---------------- 描边资产构建（与 customMap.buildingGroup 同一挤出公式） ---------------- */
 
-export function buildTracedObject(asset) {
-  const fp = (asset.traced && asset.traced.footprint) || [];
-  if (fp.length < 3) return null;
+// 描边资产是从地图里"缩小画"出来的多边形：原始坐标经常只有几米，
+// 直接按 scale=1 放置会变成tiny 建筑。这里在几何构建期归一化到真实建筑尺度，
+// 让放置 scale 恒为 1（与用户要求一致），同时视觉尺寸合理。
+// 目标尺寸可用资产 placeSize 覆盖，默认 30m。
+export function tracedBuildScale(asset) {
+  const fp = (asset && asset.traced && asset.traced.footprint) || [];
+  if (fp.length < 3) return 1;
   const h = asset.traced.height || 24;
+  const xs = fp.map(([x]) => x), zs = fp.map(([, z]) => z);
+  const maxDim = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs), h) || 1;
+  const target = Math.max(0.05, +(asset && asset.placeSize) || 30);
+  return Math.min(1000, Math.max(0.001, +(target / maxDim).toFixed(6)));
+}
+
+/** 归一化后的包围盒尺寸（编辑器幽灵 / 资产卡片用它显示真实放置尺寸） */
+export function tracedUnitSize(asset) {
+  const raw = (asset && asset.unitSize) || { x: 4, y: 24, z: 4 };
+  const k = tracedBuildScale(asset);
+  return { x: +(raw.x * k).toFixed(2), y: +(raw.y * k).toFixed(2), z: +(raw.z * k).toFixed(2) };
+}
+
+export function buildTracedObject(asset) {
+  const fpRaw = (asset.traced && asset.traced.footprint) || [];
+  if (fpRaw.length < 3) return null;
+  const k = tracedBuildScale(asset);
+  const fp = fpRaw.map(([x, z]) => [x * k, z * k]);
+  const h = (asset.traced.height || 24) * k;
   const bindings = asset.materialBindings || {};
   const wallM = (bindings.wall && getMaterial(bindings.wall)) || new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.85 });
   const roofM = (bindings.roof && getMaterial(bindings.roof)) || new THREE.MeshStandardMaterial({ color: 0x6f6a60, roughness: 0.9 });

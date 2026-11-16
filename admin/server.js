@@ -430,6 +430,11 @@ async function handleApi(req, res, u) {
     return json(res, 200, { ok: true });
   }
 
+  // 素材库：目录（游戏端「素材内容源」按 ID 引用；相对 /media/ 地址由后台同源提供）
+  if (p === "/api/media" && method === "GET") {
+    return json(res, 200, state.media || []);
+  }
+
   // 素材库：新增（URL 或 base64 上传）
   if (p === "/api/media" && method === "POST") {
     const type = ["image", "video", "stream", "model3d"].includes(body.type) ? body.type : "image";

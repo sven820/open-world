@@ -5,6 +5,9 @@ import { City } from "./world/city.js";
 import { buildLandmarks } from "./world/landmarks.js";
 import { BillboardManager } from "./world/billboard/billboardManager.js";
 import { AdminSync } from "./world/billboard/adminClient.js";
+import { ensureBillboardAssets } from "./data/billboardAsset.js";
+import { listAssets } from "./data/assetStore.js";
+import { registerAssetSource } from "./world/billboard/contentSources.js";
 import { Traffic } from "./entities/traffic.js";
 import { PedestrianCrowd } from "./entities/pedestrians.js";
 import { Player } from "./entities/player.js";
@@ -114,6 +117,13 @@ async function buildWorld(mapData, mapId) {
   for (const g of landmarkGroup.children) city.registerStreamed(g);
   if (city.custom && city.custom.group) city.registerStreamed(city.custom.group);
   setProgress(0.72, "正在布置地图中的广告大屏…");
+  // 四种广告牌 = 模型工坊资产库的四个模型资产（幂等播种，用户删除后重启会重建）。
+  // 地图对象只存 assetId；资产记录已在 city 预热阶段进同步缓存。
+  await ensureBillboardAssets();
+  // 资产库 GLB 注册为「模型工坊资产」内容源：内容配置只存 assetId，地址运行时解析
+  for (const a of (await listAssets()) || []) {
+    if (a.glb) registerAssetSource(a.id, URL.createObjectURL(a.glb), { name: a.name, is3d: true, type: "model3d" });
+  }
   // 广告大屏：只构建地图里手动放置的 billboard 记录，默认街区不自动生成
   const billboards = new BillboardManager(engine.scene, city, engine.renderer);
   for (const s of billboards.screens) city.registerStreamed(s.group);

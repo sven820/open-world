@@ -2,7 +2,8 @@ import * as THREE from "three";
 import { makeCanvas, canvasTexture } from "../textures.js";
 import { SHOP_NAMES, SHOP_SUBS } from "../../data/cityData.js";
 import { defaultContent, normalizeContent, DEFAULT_TEXT } from "./contentConfig.js";
-import { make3dContent, make3dPlaceholder } from "./content3d.js";
+import { resolveContentSources } from "./contentSources.js";
+import { resolveRenderer } from "./contentRenderer.js";
 
 /* ---------------- 广告大屏内容源 ----------------
  * 文字类（内置广告 / 滚动字幕 / 时钟）按屏比重新排版，字号按可用宽度收缩，不会裁切。
@@ -411,7 +412,9 @@ function makeVideo(it, W, H, aspect) {
  *   { renderer, faces:[{pa,pb,pc,pd 世界坐标}] } —— 由 BillboardManager 提供
  */
 export function createContentPool(aspect = 1.75, rawContent = null, ctx = null) {
-  const cfg = normalizeContent(rawContent) || defaultContent();
+  // 先按 sourceRef 解析素材地址（后台素材库 / 模型工坊资产 → url），
+  // 再交渲染器接口挑选实现 —— 渲染层永远只看到最终 url，不关心素材来源。
+  const cfg = resolveContentSources(normalizeContent(rawContent) || defaultContent());
   const H = BASE_H;
   const W = Math.max(384, Math.round(H * aspect));
   // 整屏平面展示（实验台「两面拼成一张图」同款）：3D转角包柱屏上的非 3D 素材
@@ -430,12 +433,12 @@ export function createContentPool(aspect = 1.75, rawContent = null, ctx = null) 
     }
   };
   const pool = cfg.items.map((it) => {
-    // 3D转角包柱屏按条目实时切换显示模式：model3d 或素材勾选 is3d 的条目进离轴管线
-    //（出屏深度用素材自带值），其余素材整屏平面平铺
-    if (ctx && !it.flat && (it.type === "model3d" || it.is3d)) return make3dContent(it, W, H, aspect, ctx, cfg.d3, () => make2d(it));
-    if (it.type === "model3d") return make3dPlaceholder(it, W, H); // 非 3D 屏 / 平贴退化：占位
-    // 整屏平面展示：仅未勾平贴退化的非 3D 素材 —— 两面拼一张画布（billboard 拆 UV）
-    // 平贴退化（对照档）：保持每面整幅铺满的原 2D 行为，不拆 UV
+    // 渲染接口：由注册表决定用离轴 3D / 3D 平贴 / 默认 2D 渲染器。
+    // 本文件只保留 2D 实现，3D 实现在 contentRenderer.js 里注册。
+    const env = { W, H, aspect, ctx, cfg, make2d };
+    const renderer = resolveRenderer(it, env);
+    if (renderer.id === "offaxis-3d" || renderer.id === "flat-3d") return renderer.create(it, env);
+    // 默认 2D：整屏平面展示（仅未勾平贴退化的非 3D 素材）—— 两面拼一张画布（billboard 拆 UV）
     const plane = isCorner3d && !it.flat;
     const inner = make2d(it, plane ? Wfull : W, plane ? aspect * 2 : aspect);
     if (plane && inner && inner.texture && !Array.isArray(inner.texture)) inner.texture.planeFull = true;

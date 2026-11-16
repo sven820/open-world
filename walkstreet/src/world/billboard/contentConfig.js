@@ -47,7 +47,7 @@ export const CONTENT_TYPES = {
 export const D3_DEFAULTS = {
   depth: 2.5,   // 出屏深度（米，0~10）：contentRoot.position = VC + OUT·depth
   scale: 1,     // 尺寸（0.4~2）：contentRoot.scale
-  arc: 0,       // 圆角半径（米，0~5）：0 = 直角共棱；>0 转角过渡成 1/4 圆柱弧
+  arc: null,    // 圆角半径（米，0~5）：null = 跟随模型资产的 arc；数字 = 后台临时校准覆盖
   spin: true,   // 轻微摆动/自转（平面素材板不受此开关影响，永远不转）
   track: true,  // 片源跟随当前视点（实时追踪）；关闭则固定最佳视点
   hud: false,   // 右下角双路预览（管理器叠加层）
@@ -59,11 +59,16 @@ export const ARC_R_MAX = 5;
 
 export const DEFAULT_TEXT = "潮汇坊 · 中央大道商圈 今日营业至 22:00   ◆   新品上市 全场 8 折起   ◆   周末街头市集 · 梧桐街广场   ◆   ";
 
+// 内容渲染策略（解耦层 2：内容 → 渲染器 的选择维度，不写死具体素材）
+export const SOURCE_TYPES = ["auto", "flat", "3d-static"];
+export const DEFAULT_SOURCE_TYPE = "auto";
+
 export function defaultContent() {
   return {
     fit: "auto",
     transition: 0.6,
     audio: "off",
+    sourceType: DEFAULT_SOURCE_TYPE,
     items: [
       { type: "ad", duration: 9, seed: 1 },
       { type: "text", duration: 10, text: DEFAULT_TEXT },
@@ -89,8 +94,11 @@ export function normalizeContent(raw) {
     d3 = {
       depth: clamp(Math.round((+raw.d3.depth || 0) * 10) / 10, 0, 10, D3_DEFAULTS.depth),
       scale: clamp(Math.round((+raw.d3.scale || 0) * 100) / 100, 0.4, 2, D3_DEFAULTS.scale),
-      // 转角弧度：0 / 未配置 / 非法值都走直角共棱（老快照没有该字段，行为不变）
-      arc: clamp(Math.round((+raw.d3.arc || 0) * 10) / 10, 0, ARC_R_MAX, D3_DEFAULTS.arc),
+      // 转角弧度归模型资产管：未配置 / 留空 = null → 运行时用模型自己的 arc。
+      // 只有显式数字才是后台临时校准覆盖（不写回模型）。
+      arc: (raw.d3.arc === undefined || raw.d3.arc === null || raw.d3.arc === "")
+        ? null
+        : clamp(Math.round((+raw.d3.arc || 0) * 10) / 10, 0, ARC_R_MAX, 0),
       spin: raw.d3.spin !== false,
       track: raw.d3.track !== false,
       hud: !!raw.d3.hud,
@@ -122,6 +130,11 @@ export function normalizeContent(raw) {
         out.fallback = String(it.fallback || "").slice(0, 4000).trim();
         out.fit = FIT_MODES[it.fit] ? it.fit : (FIT_MODES[raw.fit] ? raw.fit : "auto");
       }
+      // 素材内容源引用（解耦层 3）：只存 kind + id，地址由 source provider 解析；
+      // 老配置没有 source 字段 → 视为 inline，url 直接生效。
+      if (it.source && it.source.kind && it.source.id != null) {
+        out.source = { kind: String(it.source.kind).slice(0, 24), id: String(it.source.id).slice(0, 200) };
+      }
       return out;
     });
   if (!items.length) return null;
@@ -129,6 +142,7 @@ export function normalizeContent(raw) {
     fit: FIT_MODES[raw.fit] ? raw.fit : "auto",
     transition: clamp(raw.transition, 0, 2, 0.6),
     audio: AUDIO_MODES[raw.audio] ? raw.audio : "off",
+    sourceType: SOURCE_TYPES.includes(raw.sourceType) ? raw.sourceType : DEFAULT_SOURCE_TYPE,
     d3,
     items,
   };
@@ -136,7 +150,7 @@ export function normalizeContent(raw) {
 
 /** 稳定哈希：相同配置 + 相同屏比 → 共享同一内容池（d3 参与：3D 参数不同 = 内容不同） */
 export function contentKey(cfg, aspect) {
-  const s = JSON.stringify([cfg.items, cfg.fit, cfg.audio, cfg.d3 || 0]);
+  const s = JSON.stringify([cfg.items, cfg.fit, cfg.audio, cfg.d3 || 0, cfg.sourceType || "auto"]);
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0;
   return `${aspect.toFixed(2)}|${cfg.fit}|${h.toString(36)}`;

@@ -10,7 +10,7 @@ import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { bendGeometry } from "../../config/curvature.js";
 import { makeAsphaltTexture, ASPHALT_TILE } from "../../world/textures.js";
 import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "../../world/materials.js";
-import { buildBillboardGroup, editorScreenMaterial } from "../../world/billboard/mounts.js";
+import { buildBillboardGroup, editorScreenMaterial, editorCornerScreenMaterial } from "../../world/billboard/mounts.js";
 
 // 世界米制 planar UV（与运行时 customMap.planarUV 同式）：纹理按世界坐标对齐，
 // 交叠 / 相邻路面的颗粒、明暗斑与轮迹无缝衔接
@@ -201,7 +201,9 @@ export function buildObjectMesh(ed, o) {
   if (o.type === "lamp") return buildLampMesh();
   if (o.type === "billboard") {
     // wrapper 已按 data.pos/rot 定位（_makeWrapper），网格自身归零避免双重位移
-    const g = buildBillboardGroup(o, editorScreenMaterial()).group;
+    // 3D 转角一体屏用跨两面的全景占位图，编辑器里也是「一整块折角屏」
+    const mat = o.params && o.params.mount === "corner3d" ? editorCornerScreenMaterial() : editorScreenMaterial();
+    const g = buildBillboardGroup(o, mat).group;
     g.position.set(0, 0, 0);
     g.rotation.y = 0;
     return g;

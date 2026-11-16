@@ -14,6 +14,8 @@ import {
 } from "../data/assetStore.js";
 import { listMaterials, getMaterial } from "../world/materials.js";
 import { getAssetTemplate, invalidateAssetTemplate, updateAssetAnimations, playAssetClips, stopAssetMixer, getAssetClipNames } from "../world/assetMesh.js";
+import { ensureBillboardAssets, BILLBOARD_TEMPLATES } from "../data/billboardAsset.js";
+import { buildBillboardAssetObject, getCornerArc } from "../world/billboard/billboardAssetBridge.js";
 import "./studio.css";
 
 export class ModelStudio {
@@ -32,6 +34,7 @@ export class ModelStudio {
     this._buildDOM();
     this._buildScene();
     this._wireKeys();
+    await ensureBillboardAssets(); // 首次进工坊自动播种四种广告牌模型资产
     await this._refreshAssetList();
     if (isMemoryOnly()) this._setStatus("注意：IndexedDB 不可用，资产仅保存在内存中（刷新即丢）");
     if (this.opts.initialAssetId) {
@@ -51,7 +54,8 @@ export class ModelStudio {
       this._lightbarOutside = null;
     }
     if (this._iblTex) { this._iblTex.dispose(); this._iblTex = null; }
-    if (this._tc) this._tc.dispose();
+    if (this._three && this._three.tc) this._three.tc.dispose();
+    if (this._selBox) { this._selBox.geometry.dispose(); this._selBox.material.dispose(); }
     if (this._orbit) this._orbit.dispose();
     if (this._renderer) this._renderer.dispose();
     for (const u of Object.values(this._thumbUrls || {})) URL.revokeObjectURL(u);
@@ -97,12 +101,14 @@ export class ModelStudio {
           <div class="ms3-tb-spacer"></div>
           <div class="ms3-tb-group" id="ms3-tb-right">
             <button class="ms3-btn primary" id="ms3-save" title="保存到资产库 (Ctrl+S)">保存资产</button>
+            <button class="ms3-btn" id="ms3-cover" title="只重拍列表封面：不重新保存模型 / 不导出几何">更新封面</button>
             <button class="ms3-btn" id="ms3-export" title="导出为 .glb 文件">导出 GLB</button>
             <div class="ms3-tb-sep"></div>
             <button class="ms3-btn" id="ms3-close">返回</button>
           </div>
         </div>
-        <div class="ms3-status" id="ms3-status">左键旋转视角 · 滚轮缩放 · 右键平移 · 点选部件编辑</div>
+        <div class="ms3-sel-label" id="ms3-sel-label"></div>
+        <div class="ms3-status" id="ms3-status">左键旋转视角 · 滚轮缩放 · 右键平移 · 点选部件编辑（青色框 = 当前部件）</div>
       </div>
       <div class="ms3-side">
         <h4>属性 <span id="ms3-asset-badge"></span></h4>
@@ -121,6 +127,7 @@ export class ModelStudio {
       this._onImportFile(file, cat);
     });
     el.querySelector("#ms3-save").addEventListener("click", () => this._save());
+    el.querySelector("#ms3-cover").addEventListener("click", () => this._updateCover());
     el.querySelector("#ms3-export").addEventListener("click", () => this._export());
     el.querySelector("#ms3-search").addEventListener("input", () => this._refreshAssetList());
     el.querySelector("#ms3-add-group").addEventListener("click", () => this._editGroup(null));
@@ -170,10 +177,36 @@ export class ModelStudio {
     this._ground = ground; // 昼/夜预设需同步调地面颜色
     scene.add(hemi, sun, fill, grid, ground);
 
+    // 变换轴挂在一个「代理轴心」上：广告牌子网格的局部原点都在底面中心，
+    // 直接 attach 网格会让所有部件的坐标轴重叠在同一处。代理轴心放到选中
+    // 部件的几何包围盒中心，再把它的位移/旋转/缩放增量换算回部件自身变换。
+    const pivot = new THREE.Object3D();
+    pivot.name = "__ms3_gizmo_pivot";
+    scene.add(pivot);
+    this._gizmoPivot = pivot;
+
     const tc = new TransformControls(camera, renderer.domElement);
-    tc.addEventListener("dragging-changed", (e) => { orbit.enabled = !e.value; });
-    tc.addEventListener("mouseUp", () => { this._geometryDirty = true; this._renderProps(); });
+    // three r187 的 TransformControls 只派发 mouseDown/mouseUp，没有 dragging-changed
+    tc.addEventListener("mouseDown", () => { orbit.enabled = false; this._beginGizmoDrag(); });
+    tc.addEventListener("objectChange", () => this._applyGizmoDelta());
+    tc.addEventListener("mouseUp", () => {
+      orbit.enabled = true;
+      this._endGizmoDrag();
+      this._geometryDirty = true;
+      this._renderProps();
+    });
     scene.add(tc.getHelper());
+
+    // 选中描边：世界空间包围盒 + 名称浮标（见 _updateSelOverlay），始终可见
+    const selBox = new THREE.Box3Helper(new THREE.Box3(), 0x35e0ff);
+    selBox.material.depthTest = false;
+    selBox.material.depthWrite = false;
+    selBox.material.transparent = true;
+    selBox.material.opacity = 0.95;
+    selBox.renderOrder = 999;
+    selBox.visible = false;
+    scene.add(selBox);
+    this._selBox = selBox;
 
     // IBL 环境光照：RoomEnvironment 经 PMREM 预滤波 → 每个方向都有光（背光面
     // 不死黑）、金属/光泽材质有真实反射；与四盏灯独立，面板可单独开关
@@ -205,9 +238,9 @@ export class ModelStudio {
   _tick = () => {
     if (this._disposed) return;
     this._raf = requestAnimationFrame(this._tick);
-    const { orbit, renderer, scene, camera, tc } = this._three;
+    const { orbit, renderer, scene, camera } = this._three;
     orbit.update();
-    if (tc.dragging) this._syncDrag();
+    this._updateSelOverlay();
     // GLB 内建动画（如小火车）随实例播放
     this._clock = this._clock || new THREE.Clock();
     updateAssetAnimations(this._clock.getDelta());
@@ -215,6 +248,59 @@ export class ModelStudio {
   };
 
   /* ---------------- 资产库面板 ---------------- */
+
+  /** 转角弧度：直接改圆角控制器，只重建屏体/机箱几何 —— 不动场景节点、朝向、材质与 UV 模式 */
+  _setBillboardArc(radius) {
+    const a = this.workspace && this.workspace.asset;
+    if (!a || !a.billboard) return;
+    const r = Math.max(0, Math.min(5, +radius || 0));
+    a.billboard.spec = { ...(a.billboard.spec || {}), arc: r };
+    const ctl = getCornerArc(this.workspace.root);
+    if (ctl) ctl.setRadius(r); // 内部 _rebuild 会保留 mats / group / split UV / poseYaw
+    invalidateAssetTemplate(a.id); // 地图编辑器 / 缩略图下次取模板用新弧度
+    this._applyNightEmissive();
+    this._renderTree();
+  }
+
+  /** 当前视口机位（相机相对 orbit 目标的方向），保存时给缩略图用 */
+  _thumbDirection() {
+    const t = this._three;
+    if (!t || !t.camera || !t.orbit) return null;
+    return t.camera.position.clone().sub(t.orbit.target);
+  }
+
+  /** 缩略图已重新生成：丢弃旧 objectURL，下次列表渲染才会显示新图 */
+  _invalidateThumb(id) {
+    if (!this._thumbUrls || !id) return;
+    if (this._thumbUrls[id]) URL.revokeObjectURL(this._thumbUrls[id]);
+    delete this._thumbUrls[id];
+  }
+
+  /** 按当前视口重拍封面并落库。只写缩略图字段，不碰模型几何 / 规格，不失效模板。 */
+  async _renderCover(assetId) {
+    const thumb = await renderThumb(this.workspace.root.clone(true), { direction: this._thumbDirection() });
+    await saveAssetThumb(assetId, thumb);
+    this._invalidateThumb(assetId);
+    if (this.workspace.asset.id === assetId) this.workspace.asset.thumb = thumb;
+    return thumb;
+  }
+
+  /** 顶栏「更新封面」：资产必须已保存过（有 id）才有封面可更新 */
+  async _updateCover() {
+    if (!this.workspace || !this.workspace.asset || !this.workspace.asset.id) {
+      this._setStatus("请先「保存资产」建立记录，再更新封面");
+      return;
+    }
+    this._setStatus("正在重拍封面…");
+    try {
+      await this._renderCover(this.workspace.asset.id);
+      await this._refreshAssetList();
+      this._setStatus(`封面已更新（模型未改动）· ${this.workspace.asset.name || ""}`);
+    } catch (e) {
+      console.error(e);
+      this._setStatus("封面更新失败：" + (e && e.message ? e.message : e));
+    }
+  }
 
   async _refreshAssetList() {
     const kw = this._el.querySelector("#ms3-search").value.trim();
@@ -271,6 +357,7 @@ export class ModelStudio {
         ${g ? `
         <button class="ms3-group-act" data-act="import" title="导入 GLB 到「${esc(g.name)}」">⇪</button>
         <button class="ms3-group-act" data-act="new" title="在「${esc(g.name)}」中新建参数模型">＋</button>
+        <button class="ms3-group-act" data-act="billboard" title="在「${esc(g.name)}」中新建广告牌模型资产">▣</button>
         <button class="ms3-group-edit" title="编辑分组">✎</button>` : ""}`;
       const body = document.createElement("div");
       body.className = "ms3-group-body";
@@ -295,6 +382,10 @@ export class ModelStudio {
         header.querySelector('[data-act="new"]').addEventListener("click", (e) => {
           e.stopPropagation();
           this._newWorkspace(g.id);
+        });
+        header.querySelector('[data-act="billboard"]').addEventListener("click", (e) => {
+          e.stopPropagation();
+          this._newBillboardWorkspace(g.id);
         });
       }
       box.appendChild(header);
@@ -374,8 +465,7 @@ export class ModelStudio {
       // 要等用户手动点保存才有图）
       if (this.workspace && this.workspace.root.children.length) {
         try {
-          const thumb = await renderThumb(this.workspace.root.clone(true));
-          await saveAssetThumb(asset.id, thumb);
+          await this._renderCover(asset.id);
         } catch (e) {
           console.warn("[studio] 缩略图生成失败:", e);
         }
@@ -432,6 +522,18 @@ export class ModelStudio {
         needsExport = true;
       }
     }
+    if (asset.source === "billboard" && tpl) {
+      // 广告牌工作台直接用桥接产物（带 _cornerArc 控制器），而不是模板克隆 ——
+      // 这样右侧改弧度可以原地 setRadius，无需重建模型 / 不丢朝向与材质。
+      const fresh = buildBillboardAssetObject(asset);
+      if (fresh) {
+        // 不能用 tpl.clone() 的 rotation：three 的 clone 会把 π 欧拉角丢成 ~0，
+        // 广告面就转到背面去了。fresh 由桥接产物构建，poseYaw 由资产数据直接写入。
+        const inner = root.children[0];
+        if (inner) root.remove(inner);
+        root.add(fresh);
+      }
+    }
     this.workspace = {
       asset,
       root,
@@ -469,6 +571,39 @@ export class ModelStudio {
     this._setStatus("空白工作台：用「＋ 添加部件」开始搭建，保存时自动生成 GLB");
   }
 
+  /** 新建广告牌模型资产：只建规格（mount+尺寸），不写死任何内容/素材/后台配置 */
+  _newBillboardWorkspace(category) {
+    const hint = BILLBOARD_TEMPLATES.map((t, i) => `${i + 1} ${t.name}`).join("\n");
+    const raw = window.prompt(`新建哪种广告牌模型？\n${hint}`, "1");
+    const idx = Math.max(0, Math.min(BILLBOARD_TEMPLATES.length - 1, (parseInt(raw, 10) || 1) - 1));
+    const t = BILLBOARD_TEMPLATES[idx];
+    this._clearWorkspace();
+    const asset = {
+      name: t.name,
+      category: category || "billboard",
+      tags: ["广告牌", t.name],
+      source: "billboard",
+      poseYaw: t.poseYaw || 0,
+      billboard: {
+        mount: t.mount,
+        spec: { ...t.spec },
+        autoSnap: t.mount === "facade",
+        screenFaces: t.screenFaces,
+      },
+      materialBindings: {},
+      pivot: "base-center",
+      collider: { mode: "aabb" },
+      unitSize: { x: t.mount === "corner" || t.mount === "corner3d" ? t.spec.w + 1.4 : t.spec.w + 0.8, y: t.spec.y + t.spec.h / 2 + 0.6, z: 2 },
+    };
+    const root = buildBillboardAssetObject(asset);
+    if (!root) return;
+    this.workspace = { asset, root, bindings: { screen: "" }, geometryDirty: false, isNew: true };
+    this._workspaceRoot.add(root);
+    this._renderProps();
+    this._frameView();
+    this._setStatus(`已载入广告牌模型「${t.name}」· 保存后可在地图编辑器放置；内容/素材/后台与模型完全解耦`);
+  }
+
   _clearWorkspace() {
     this._deselect();
     stopAssetMixer(this._wsMixer);
@@ -491,6 +626,8 @@ export class ModelStudio {
     }
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const d = Math.max(sphere.radius, 1) / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.2;
+    // 相机永远用同一个机位；模型朝向由资产自身的 poseYaw 决定（见 billboardAssetBridge）。
+    // 新增任何模型都不用在这里加 if —— 该转的是模型，不是相机。
     const dir = new THREE.Vector3(0.7, 0.55, 0.7).normalize();
     camera.position.copy(sphere.center).addScaledVector(dir, d);
     camera.near = Math.max(d / 1000, 0.1);
@@ -505,24 +642,113 @@ export class ModelStudio {
   _select(obj) {
     this.sel = obj || null;
     const tc = this._three.tc;
-    if (obj) { tc.attach(obj); this._expandTo(obj); }
-    else tc.detach();
+    tc.detach();
+    this._gizmoDragging = false;
+    this._pivotStart = null;
+    this._objStartWorld = null;
+    if (obj) {
+      this._focusGizmoPivot(obj);
+      tc.attach(this._gizmoPivot);
+      this._expandTo(obj);
+    }
+    this._updateSelOverlay();
     this._renderProps();
     this._renderTree();
   }
 
   _deselect() { this._select(null); }
 
+  /** 变换轴心放到选中部件的真实几何中心，而不是模型底面原点 */
+  _focusGizmoPivot(obj) {
+    const pivot = this._gizmoPivot;
+    const box = new THREE.Box3().setFromObject(obj);
+    pivot.position.copy(box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3()));
+    pivot.quaternion.identity();
+    pivot.scale.set(1, 1, 1);
+    pivot.updateMatrixWorld(true);
+    obj.updateWorldMatrix(true, false);
+    this._pivotStart = pivot.matrixWorld.clone();
+    this._objStartWorld = obj.matrixWorld.clone();
+  }
+
+  _beginGizmoDrag() {
+    const obj = this.sel;
+    if (!obj) return;
+    // 每次拖拽都从当前状态取基准：参数重建几何后增量也不会错位
+    obj.updateWorldMatrix(true, false);
+    this._gizmoPivot.updateMatrixWorld(true);
+    this._objStartWorld = obj.matrixWorld.clone();
+    this._pivotStart = this._gizmoPivot.matrixWorld.clone();
+    this._gizmoDragging = true;
+  }
+
+  /** 把代理轴心的位移/旋转/缩放换算回部件自身变换，保持原父子层级 */
+  _applyGizmoDelta() {
+    if (!this._gizmoDragging || !this.sel || !this._pivotStart || !this._objStartWorld) return;
+    const obj = this.sel, pivot = this._gizmoPivot;
+    pivot.updateMatrixWorld(true);
+    const delta = pivot.matrixWorld.clone().multiply(this._pivotStart.clone().invert());
+    let world = delta.multiply(this._objStartWorld);
+    obj.updateWorldMatrix(true, false);
+    obj.matrix.copy(obj.parent.matrixWorld.clone().invert()).multiply(world);
+    obj.matrix.decompose(obj.position, obj.quaternion, obj.scale);
+    obj.updateMatrixWorld(true);
+    // 禁止沉到地面以下：抬升部件与轴心并同步基准，避免下一次增量跳变
+    const box = new THREE.Box3().setFromObject(obj);
+    if (!box.isEmpty() && box.min.y < 0) {
+      const lift = new THREE.Matrix4().makeTranslation(0, -box.min.y, 0);
+      world = lift.multiply(world);
+      obj.matrix.copy(obj.parent.matrixWorld.clone().invert()).multiply(world);
+      obj.matrix.decompose(obj.position, obj.quaternion, obj.scale);
+      obj.updateMatrixWorld(true);
+      pivot.position.y -= box.min.y;
+      pivot.updateMatrixWorld(true);
+      this._pivotStart.copy(pivot.matrixWorld);
+      this._objStartWorld.copy(world);
+    }
+  }
+
+  _endGizmoDrag() {
+    this._gizmoDragging = false;
+    if (this.sel) this._focusGizmoPivot(this.sel);
+  }
+
+  /** 选中描边 + 名称浮标：每帧跟随，点中哪个部件一眼可辨 */
+  _updateSelOverlay() {
+    const label = this._el.querySelector("#ms3-sel-label");
+    const helper = this._selBox;
+    if (!label || !helper) return;
+    const obj = this.sel;
+    if (!obj || !this.workspace || !obj.parent) {
+      helper.visible = false;
+      label.style.display = "none";
+      return;
+    }
+    const box = new THREE.Box3().setFromObject(obj);
+    if (box.isEmpty()) {
+      helper.visible = false;
+      label.style.display = "none";
+      return;
+    }
+    helper.box.copy(box).expandByScalar(0.06);
+    helper.visible = true;
+    const { camera, renderer } = this._three;
+    camera.updateMatrixWorld();
+    const p = box.getCenter(new THREE.Vector3()).project(camera);
+    if (p.z > 1) { label.style.display = "none"; return; }
+    const r = renderer.domElement.getBoundingClientRect();
+    const wrap = this._el.querySelector(".ms3-canvas-wrap").getBoundingClientRect();
+    label.textContent = obj.name || obj.type;
+    label.style.display = "block";
+    label.style.left = `${r.left - wrap.left + (p.x * 0.5 + 0.5) * r.width}px`;
+    label.style.top = `${r.top - wrap.top + (-p.y * 0.5 + 0.5) * r.height}px`;
+  }
+
   _setMode(mode) {
     this._three.tc.setMode(mode);
     for (const [id, m] of [["#ms3-mode-w", "translate"], ["#ms3-mode-e", "rotate"], ["#ms3-mode-r", "scale"]]) {
       this._el.querySelector(id).classList.toggle("active", m === mode);
     }
-  }
-
-  _syncDrag() {
-    // 拖拽部件时禁止沉到地面以下（y≥0），松手后标记几何已变
-    if (this.sel && this.sel.position.y < 0) this.sel.position.y = 0;
   }
 
   _wireKeys() {
@@ -681,7 +907,10 @@ export class ModelStudio {
     this.workspace.asset.materialBindings = { ...this.workspace.bindings };
 
     try {
-      if (this.workspace.isNew || this.workspace.geometryDirty || this.workspace.needsExport) {
+      // 广告牌资产只存规格（mount + w/h/y/arc），几何由 MOUNTS 现场重建 ——
+      // 不导出 GLB，避免把屏面占位材质固化进模型（每屏运行时要独立播内容）。
+      const isBillboard = this.workspace.asset.source === "billboard";
+      if (!isBillboard && (this.workspace.isNew || this.workspace.geometryDirty || this.workspace.needsExport)) {
         // 几何/绑定有变（或新建）：整个工作台导出为 GLB，资产升级为 glb 存储。
         // 导出副本把每个 mesh 的材质改名为绑定键（part:1 / wall / roof）——
         // 共享库实例没有名字，直接导出会让 GLB 往返丢失绑定关系
@@ -701,8 +930,7 @@ export class ModelStudio {
       this.workspace.asset.id = saved.id;
       invalidateAssetTemplate(saved.id);
       // 缩略图：克隆工作台（renderThumb 会把对象加进临时场景）
-      const thumb = await renderThumb(this.workspace.root.clone(true));
-      await saveAssetThumb(saved.id, thumb);
+      await this._renderCover(saved.id); // 旧 objectURL 已在内部失效，列表显示新图
       this._setStatus(`已保存「${saved.name}」· 可在 3D 地图编辑器的「我的模型」中放置`);
       this._refreshAssetList();
       this._renderProps();
@@ -758,6 +986,7 @@ export class ModelStudio {
       return;
     }
     const a = this.workspace.asset;
+    const isBillboard = a.source === "billboard";
     badge.textContent = a.name || "";
     // 选中对象可能是 Group（无材质）：材质绑定/夜景控件仅对 mesh 显示
     const selMat = this.sel && this.sel.material ? this.sel.material : null;
@@ -800,7 +1029,14 @@ export class ModelStudio {
     box.innerHTML = `
       <div class="ms3-field"><label>名称</label><input id="ms3-name" value="${esc(a.name || "")}" maxlength="24" /></div>
       <div class="ms3-field"><label>分类</label><select id="ms3-cat">${cats.map((g) => `<option value="${esc(g.id)}"${a.category === g.id ? " selected" : ""}>${esc(g.name)}</option>`).join("")}</select></div>
-      <div class="ms3-field"><label>来源</label><input value="${{ glb: "GLB 模型", traced: "描边建筑", studio: "参数建模" }[a.source] || a.source}" disabled /></div>
+      <div class="ms3-field"><label>来源</label><input value="${{ glb: "GLB 模型", traced: "描边建筑", studio: "参数建模", billboard: "广告牌模型" }[a.source] || a.source}" disabled /></div>
+      ${isBillboard ? `<div class="ms3-hint">广告牌模型：几何由承载形式 + 屏体规格现场重建，不存 GLB。<b>内容 / 素材 / 后台内容源与模型完全解耦</b>——在地图编辑器选中广告牌后单独编辑显示内容，任意广告牌可挂到别的建筑模型上。</div>
+        <div class="ms3-hint">${(() => { const b = a.billboard || {}; const s = b.spec || {}; return `承载形式：${b.mount || "?"} · 屏宽 ${s.w || "?"}m · 屏高 ${s.h || "?"}m · 屏心高度 ${s.y || "?"}m`; })()}</div>
+        ${isBillboard && a.billboard && a.billboard.mount === "corner3d" ? `
+        <div class="ms3-field"><label>转角弧度 · 圆角半径（米）<span id="ms3-arc-val">${(+((a.billboard.spec || {}).arc) || 0).toFixed(1)}</span></label>
+          <input id="ms3-arc" type="range" min="0" max="5" step="0.1" value="${(+((a.billboard.spec || {}).arc) || 0)}" style="--fill:${Math.round(((+((a.billboard.spec || {}).arc) || 0) / 5) * 100)}%" />
+          <div class="ms3-hint">0 = 直角共棱；大于 0 时转角过渡成 1/4 圆柱弧。拖动即改模型几何，保存资产后随模型生效；后台「圆角半径覆盖」留空即跟随这里。</div>
+        </div>` : ""}` : ""}
       ${a.unitSize ? `<div class="ms3-hint">包围盒：${a.unitSize.x} × ${a.unitSize.y} × ${a.unitSize.z} m（碰撞自动按放置缩放生成 AABB）</div>` : ""}
       ${this._clipNames && this._clipNames.length ? `
       <h4 style="border:none;padding-left:0">动画 <small style="color:#7d8794">${this._clipNames.length} 个片段</small></h4>
@@ -815,6 +1051,7 @@ export class ModelStudio {
       <label class="ms3-check"><input type="checkbox" id="ms3-glow-on" ${on ? "checked" : ""} />夜间发光（贴图亮部点亮）</label>
       <div class="ms3-field"><label>发光强度 <span id="ms3-glow-val">${st}</span></label><input id="ms3-glow-strength" type="range" min="0" max="2" step="0.05" value="${st}" /></div>`;
       })() : ""}
+      ${isBillboard ? "" : `
       <div style="margin-bottom:10px">
         <button class="ms3-btn" id="ms3-add-box" style="width:100%;margin-bottom:6px">＋ 添加部件 · 盒</button>
         <div class="ms3-row">
@@ -823,7 +1060,7 @@ export class ModelStudio {
           <button class="ms3-btn" id="ms3-add-slab">薄板</button>
         </div>
         <div class="ms3-hint">部件类型：盒/圆柱/球/薄板 = 参数化基础体，适合搭建筑体块；GLB 导入的部件 = 原模型网格。每个部件有绑定键，用于绑材质与夜景亮度。</div>
-      </div>
+      </div>`}
       <h4 style="border:none;padding-left:0">场景部件</h4>
       <div id="ms3-tree" style="margin-bottom:10px"></div>
       ${selInfo}`;
@@ -855,6 +1092,15 @@ export class ModelStudio {
     on("#ms3-del", () => this._deleteSelected());
     const matSel = box.querySelector("#ms3-mat");
     if (matSel) matSel.addEventListener("change", (e) => this._bindMaterial(e.target.value));
+    const arcInput = box.querySelector("#ms3-arc");
+    if (arcInput) arcInput.addEventListener("input", () => {
+      const r = +arcInput.value || 0;
+      const label = box.querySelector("#ms3-arc-val");
+      if (label) label.textContent = r.toFixed(1);
+      arcInput.style.setProperty("--fill", `${Math.round((r / 5) * 100)}%`);
+      this._setBillboardArc(r);
+      this._setStatus(`转角弧度 ${r.toFixed(1)}m · 视口实时预览，保存资产后写入模型`);
+    });
     // 动画配置：勾选片段 / 调速度 → 实时重启工作台预览；写入资产记录后「保存」持久化
     const speedInput = box.querySelector("#ms3-anim-speed");
     if (speedInput) {
@@ -1089,19 +1335,23 @@ export class ModelStudio {
     tree.innerHTML = "";
     this._treeCollapsed = this._treeCollapsed || new Set(); // 收起状态（按对象 uuid）
     const helper = this._three.tc.getHelper();
-    const walk = (obj, depth) => {
+    let anon = 0; // 未命名 mesh 的序号：避免一列「Mesh」分不清是哪一个
+    const walk = (obj, depth, path) => {
       for (const child of obj.children) {
         if (child === helper) continue;
         const hasKids = child.children.some((c) => c !== helper);
         const collapsed = this._treeCollapsed.has(child.uuid);
         const key = child.userData ? child.userData.bindingKey : null;
         const bound = key && this.workspace.bindings[key];
+        const disp = child.name || (child.isMesh ? `Mesh #${++anon}` : child.type);
+        const fullPath = `${path}/${disp}`;
         const item = document.createElement("div");
         item.className = "ms3-tree-item" + (child === this.sel ? " active" : "");
         item.style.paddingLeft = 8 + depth * 14 + "px";
+        item.title = fullPath;
         item.innerHTML = `${hasKids
           ? `<span class="ms3-tree-toggle" title="展开/收起">${collapsed ? "▸" : "▾"}</span>`
-          : `<span class="ms3-tree-dot"></span>`}${esc(child.name || child.type)}${child.isMesh && key ? `<span class="mat-chip${bound ? "" : " unbound"}">${esc(bound || key)}</span>` : ""}`;
+          : `<span class="ms3-tree-dot"></span>`}${esc(disp)}${child.isMesh && key ? `<span class="mat-chip${bound ? "" : " unbound"}">${esc(bound || key)}</span>` : ""}`;
         item.addEventListener("click", () => this._select(child));
         if (hasKids) {
           item.querySelector(".ms3-tree-toggle").addEventListener("click", (e) => {
@@ -1111,10 +1361,10 @@ export class ModelStudio {
           });
         }
         tree.appendChild(item);
-        if (hasKids && !collapsed) walk(child, depth + 1);
+        if (hasKids && !collapsed) walk(child, depth + 1, fullPath);
       }
     };
-    walk(this.workspace.root, 0);
+    walk(this.workspace.root, 0, this.workspace.asset.name || "模型");
   }
 
   // 选中部件时自动展开其祖先链（画布点选深层部件也能在树里看到）
