@@ -43,8 +43,8 @@ export class BillboardManager {
       renderer: this.renderer,
       scene: this.scene,
       faces: corner3dWorldFaces(spec, pos, rot),
-      // 圆角屏：弧段采样点（世界坐标），content3d 据此估算 RT 视锥外扩量；
-      // 直角屏（半径 0）为 null，离轴矩阵与移植前逐位一致。
+      // 圆角屏：真实屏面折线采样点（世界坐标），content3d 据此求每路 RT 取景框；
+      // 直角屏（半径 0）为 null，改用参考面四角。
       arcPts: spec.arc > 0 ? corner3dWorldArcSamples(spec, pos, rot) : null,
     };
   }
@@ -301,7 +301,10 @@ export class BillboardManager {
       if (!pool || !pool.cfg || !pool.cfg.d3 || !pool.cfg.d3.hud) continue;
       const slot = s.playlist.schedule[s.playlist.cur];
       const it = slot ? pool[slot.idx] : null;
-      if (it && it.is3d && Array.isArray(it.texture)) wants.push(it.texture);
+      if (it && it.is3d && Array.isArray(it.texture)) {
+        // faceFit = 每路内容区域占 RT 的宽 / 高比例，预览要裁到同一块区域
+        wants.push({ texs: it.texture, fit: it.faceFit });
+      }
       if (wants.length >= 2) break;
     }
     if (!wants.length) { if (this._hud) this._hud.visible = false; return; }
@@ -312,11 +315,28 @@ export class BillboardManager {
       this._hudCam = camera;
     }
     const quads = this._hud.children;
-    wants.forEach((texs, si) => {
+    wants.forEach((w, si) => {
+      const texs = w.texs;
       for (let fi = 0; fi < 2; fi++) {
         const q = quads[si * 2 + fi];
         q.visible = !!texs[fi];
         if (q.visible && q.material.map !== texs[fi]) { q.material.map = texs[fi]; q.material.needsUpdate = true; }
+        if (!q.visible) continue;
+        /* 实验台 applyHudUv 同款：预览裁到该路 RT 的内容区域，否则会显示
+         * 大片清屏底色。几何 UV 先存一份原值，按 fx/fy 绕中心缩放；只在
+         * 比例变化时写缓冲，静态片源不产生逐帧上传。 */
+        const f = w.fit && w.fit[fi];
+        const fx = f ? f.fx : 1, fy = f ? f.fy : 1;
+        if (q.userData.cfx === fx && q.userData.cfy === fy) continue;
+        q.userData.cfx = fx; q.userData.cfy = fy;
+        const g = q.geometry, a = g.getAttribute("uv");
+        if (!g.userData.uv0) g.userData.uv0 = Float32Array.from(a.array);
+        const o = g.userData.uv0;
+        for (let k = 0; k < o.length; k += 2) {
+          a.array[k] = 0.5 + (o[k] - 0.5) * fx;
+          a.array[k + 1] = 0.5 + (o[k + 1] - 0.5) * fy;
+        }
+        a.needsUpdate = true;
       }
     });
     for (let i = wants.length * 2; i < quads.length; i++) quads[i].visible = false;

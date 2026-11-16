@@ -125,7 +125,7 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
     // 当前上屏纹理：按面展开（数组纹理 = [面A RT, 面B RT] 按面分配；普通纹理每面同张）
     let curTexs = null;
     // 屏面 UV 模式（仅 corner3d）："proj" 离轴重投影 / "split" 两面拼一张画布 / "full" 每面整幅。
-    // 直角屏由 CornerArcScreen 内部按 radius=0 判定为恒等，圆角屏才真正改 UV。
+    // 直角 / 圆角屏都要走 proj：统一视图基下 UV 落在各自 RT 内容区域，不再是恒等 0..1。
     let curMode = null;
     const arcCtl = built.cornerArc || null;
     const setUvMode = (mode) => { if (arcCtl) arcCtl.setUvMode(mode); };
@@ -153,8 +153,9 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
       if (mode !== curMode) setUvMode(mode);
       curMode = mode;
       const texs = toFaceTexs(tex);
-      // 圆角屏的 proj / full 两种 UV 数值不同，只有模式一致才敢淡入
-      const canFade = arcCtl && arcCtl.radius > 0 ? mode === prevMode : plane === (prevMode === "split");
+      // 统一视图基下直角屏也会按矩阵重投影 UV，proj 与 full/split 数值不同：
+      // 只要模式变了就硬切，避免交叉淡入期间新旧纹理共用不匹配的 UV。
+      const canFade = arcCtl ? mode === prevMode : plane === (prevMode === "split");
       if (fade.begin(curTexs, texs, canFade)) return; // 过渡中：保持旧 map，由 shader 混合新图
       applyTex(texs);
     };

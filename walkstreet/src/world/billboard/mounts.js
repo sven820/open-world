@@ -223,7 +223,7 @@ export function quadGeom(pa, pb, pc, pd) {
 /** corner3d 两面屏面的局部四角（group 原点 = 地面落点，未含 pos/rot）。
  *  角点命名与实验台 quadGeom/offAxis 约定一致：
  *    pa = 左下(UV 0,0)、pb = 右下(UV 1,0)、pc = 左下正上方(UV 0,1)、pd = 右下正上方(UV 1,1)
- *  —— offAxis(pa,pb,pc) 的 up 向量取 pc-pa，必须保证 pc 在 pa 正上方，否则投影歪斜。
+ *  —— 参考面四角仍用于内容场地常量与直角屏取景，pc 必须保证在 pa 正上方。
  *  A 面朝局部 -Z（纹理右缘 = 转角棱线）；B 面朝局部 -X（纹理左缘 = 转角棱线）；
  *  两面共享棱线 (-D, y, -D)，D = 塔体半宽 + 屏面外凸。 */
 export function corner3dFaceDefs(spec) {
@@ -250,8 +250,8 @@ export function corner3dWorldFaces(spec, pos, rot = 0) {
   });
 }
 
-/** corner3d 圆角屏面的世界坐标采样点（每面一圈上下沿），供 content3d.js 估算
- *  弧段 UV 是否越出 RT 视锥、需要外扩多少。半径 0 时返回 null（直角屏无越界）。 */
+/** corner3d 圆角屏面的世界坐标采样点（每面一圈上下沿），供 content3d.js
+ *  求每路屏面在公共视图基下的 NDC 包围盒（即 RT 取景框）。半径 0 时返回 null。 */
 export function corner3dWorldArcSamples(spec, pos, rot = 0) {
   const local = cornerArcSamples(spec, spec.arc);
   if (!local) return null;

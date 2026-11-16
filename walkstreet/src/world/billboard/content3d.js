@@ -4,13 +4,20 @@ import { parseGLB } from "../../data/assetStore.js";
 
 /* ---------------- 3D 裸眼内容源 —— rea/billboard-content-lab 移植版 ----------------
  * 架构与实验台（PULSE · 内容源实验台）一致：
- *   offAxis()           离轴投影矩阵（P·R·T，逐字同款）
- *   每面一块 WebGLRenderTarget，projCam 只看内容层（layer 隔离）
- *   frame() 主循环：临时换背景/雾 → 双路离轴渲染进 RT → 还原
+ *   两路 WebGLRenderTarget，projCam 只看内容层（layer 隔离）
+ *   frame() 主循环：双路离轴渲染进 RT → 屏面 UV 用同一组矩阵重投影
  *
  * 与实验台的两处适配（不改变效果）：
  *   1. 场地常量(VC/OUT)换成本块屏的实际世界坐标；
  *   2. 每块 3D 内容独占一个 layer（1~30），多块屏 / 多个条目互不串扰。
+ *
+ * 三轮视觉修复（与实验台 _template.html 同步，详见 §4 与 buildCalib）：
+ *   ① 单面视角细线锯齿：RT 提到 1536×1024 + 4×MSAA + mipmap + 各向异性；
+ *      几何校准片全部改用有半径的管状网格，屏面横 / 竖向细分。
+ *   ② 共棱对不上：删掉 offAxis / 视锥外扩 / 参考面回退 / 眼位保护，两路共用
+ *      公共透视矩阵 M0，各自只用 clip 空间 S 贴紧取景框（M = S·M0）。
+ *   ③ L 角窄边糊：按该面在最终画面里的像素宽高比分配 RT 内容区域 fx/fy，
+ *      使 u/v 缩小倍率一致，mipmap 不再把细线平均成糊块；HUD 预览同步裁剪。
  *
  * 内容条目 type 在 3D 屏上的去向（实验台「内容源」全量迁移）：
  *   model3d   demo1 内置环形装置 / demo2 12秒品牌广告 / calib 几何校准 / GLB 模型
@@ -33,7 +40,9 @@ import { parseGLB } from "../../data/assetStore.js";
  ---------------------------------------------------------------------- */
 
 const NEAR = 0.12, FAR = 400;      // 实验台 frame() 同款
-const RTW = 768, RTH = 512;        // 实验台 RT 尺寸同款
+/* 与实验台同款：768×512 的 RT 在片源被压缩 / 斜看时细线会被抽样成锯齿或糊块。
+ * 4×MSAA 补覆盖率、mipmap + 各向异性补 minification，是下面三轮修复的地基。 */
+const RTW = 1536, RTH = 1024;
 const EYE_H = 1.7;                 // 观看视点离地高度（实验台 HERO.y 同款）
 const EYE_DIST = 30;               // 固定最佳视点：沿 OUT 方向离屏体的距离
 const DESIGN_DIST = 22;            // 板子尺寸的设计视距（实验台 12×8 构图基准）
@@ -72,85 +81,56 @@ if (typeof window !== "undefined") window.__rt3d = RT_STATS;
  * 必须全局递增，否则换条目时批次号可能撞车，导致 UV 漏更新。 */
 let _projSeqGlobal = 0;
 
-/* 实验台 §5 离轴投影（逐字同款，仅改 three 引用名） */
-const _vr = new THREE.Vector3(), _vu = new THREE.Vector3(), _vn = new THREE.Vector3();
-const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vector3();
-const _P = new THREE.Matrix4(), _R = new THREE.Matrix4(), _Tm = new THREE.Matrix4(), _M = new THREE.Matrix4();
+/* ---------------- 两路片源的统一视图基（实验台 §4 同款） ----------------
+ * 旧版每面各用一次 offAxis(参考平面) 取景，还要靠 arcPad 外扩视锥、靠
+ * faceDist/SAFE_D 借对面参考四边形、靠 __dbgGuard 推眼位。只要两路的视图基
+ * 或眼位有任何差异，共棱点命中的就不是同一根射线，黄色环 / 粉色球网 / 底色
+ * 都会错开 —— 这是「连接处没对上」的根因。
+ *
+ * 现在两路共用 M0（从眼位 E 看向屏体中心的公共透视矩阵），只按各自屏面顶点
+ * 在 M0 下的 NDC 包围盒，用一个 clip 空间缩放 / 平移 S 把取景框贴紧该路屏面：
+ * M = S·M0。S 不改变 w，透视抵消与射线一致性不变；UV 落在 [0,1]，不再需要
+ * over-scan 补偿，也不会再被 clamp 拉成梳齿。
+ *
+ * fx / fy = 该路内容在 RT 里应占的宽 / 高比例。侧对那一面在最终画面里只有
+ * 十几像素宽，若仍把整张 RT 铺给它，u 缩小几十倍、v 只缩小几倍，mipmap 会
+ * 按 u 取到很粗的层，细线被平均成模糊色块（L 角处「糊」）。让 RT 里内容的
+ * 像素宽高比与它在画面里的像素宽高比一致即可。 */
+const _vn = new THREE.Vector3(), _va = new THREE.Vector3();
 const _eye = new THREE.Vector3(), _look = new THREE.Vector3(), _rel = new THREE.Vector3();
+const _baseCam = new THREE.PerspectiveCamera(90, 1, NEAR, FAR);
+const _M0 = new THREE.Matrix4(), _Mcam = new THREE.Matrix4(), _S = new THREE.Matrix4();
+const _fitV = new THREE.Vector4(), _canvasSize = new THREE.Vector2(), _camQ = new THREE.Quaternion();
 
-/* pad = 视锥外扩比例（0 = 原样）。圆角屏的弧段顶点不在参考平面上，从斜侧看会把
- * 超出参考四边形的画面投到 u<0 / u>1 —— 也就是 RT 视锥外。此时把视锥按米级外扩一点，
- * 让弧段采样到的内容仍在 RT 内，否则会被 clamp 拉成一条竖带（接缝处明显）。
- * 平面段顶点的 UV 不受影响：RT 内容同步按同一矩阵渲染，屏幕最终成像不变。 */
-function offAxis(pa, pb, pc, pe, near, far, pad) {
-  _vr.subVectors(pb, pa).normalize(); _vu.subVectors(pc, pa).normalize();
-  _vn.crossVectors(_vr, _vu).normalize();
-  _va.subVectors(pa, pe); _vb.subVectors(pb, pe); _vc.subVectors(pc, pe);
-  let d = -_vn.dot(_va); if (d < 0.05) d = 0.05;
-  let l = _vr.dot(_va) * near / d, r = _vr.dot(_vb) * near / d,
-    b = _vu.dot(_va) * near / d, t = _vu.dot(_vc) * near / d;
-  if (pad > 0) {   // 按视锥中心等比外扩（屏幕宽度的 pad 倍）
-    const cx = (l + r) * 0.5, cy = (b + t) * 0.5;
-    const k = 1 + pad * 2;
-    l = cx + (l - cx) * k; r = cx + (r - cx) * k;
-    b = cy + (b - cy) * k; t = cy + (t - cy) * k;
+/* M0 必须与主相机「同眼位 + 同朝向」：屏面 UV 是在屏面顶点上逐点算出的，
+ * 但 GPU 光栅化时是按**主相机的 w** 对 UV 做透视校正插值。若 M0 自己另看向
+ * 屏体中心，两者 w 行不同，三角形内插值得到的 UV 就不是真实投影值，圆环 /
+ * 球网会被折成波浪（正对单面、两视线夹角最大时最明显）。实验台主相机恒看向
+ * TARGET 所以二者天然一致；开放世界里玩家可自由转头，必须显式跟随。
+ * 只借用朝向，fov/aspect 仍用 90°/1 —— 取景框由 S 贴合，w 行不受影响。 */
+function baseProj(eye, camera, target) {
+  _baseCam.position.copy(eye);
+  if (camera && camera.isCamera) {
+    camera.getWorldQuaternion(_camQ);
+    _baseCam.quaternion.copy(_camQ);
+  } else if (target) {
+    _baseCam.lookAt(target);   // 初始化帧（主相机还没传进来）退回屏体中心
+  } else {
+    _baseCam.lookAt(eye.x, eye.y, eye.z - 1);
   }
-  _P.set(
-    2 * near / (r - l), 0, (r + l) / (r - l), 0,
-    0, 2 * near / (t - b), (t + b) / (t - b), 0,
-    0, 0, -(far + near) / (far - near), -2 * far * near / (far - near),
-    0, 0, -1, 0,
-  );
-  _R.set(_vr.x, _vr.y, _vr.z, 0, _vu.x, _vu.y, _vu.z, 0, _vn.x, _vn.y, _vn.z, 0, 0, 0, 0, 1);
-  _Tm.makeTranslation(-pe.x, -pe.y, -pe.z);
-  return _M.copy(_P).multiply(_R).multiply(_Tm);
+  _baseCam.updateMatrixWorld(true);
+  return _M0.copy(_baseCam.projectionMatrix).multiply(_baseCam.matrixWorldInverse);
 }
+function fitFrustum(x0, x1, y0, y1, fx, fy) {
+  const cx = (x0 + x1) * 0.5, cy = (y0 + y1) * 0.5;
+  // NDC 宽 (x1-x0) → [-fx,fx]；下限 .02 防止极端侧对时缩放系数爆炸
+  const sx = 2 * fx / Math.max(x1 - x0, 0.02), sy = 2 * fy / Math.max(y1 - y0, 0.02);
+  return _S.set(sx, 0, 0, -sx * cx, 0, sy, 0, -sy * cy, 0, 0, 1, 0, 0, 0, 0, 1);
+}
+const clampFit = (v) => Math.min(1, Math.max(0.02, v));
 
-const _padP = new THREE.Vector3();
-/** 估算弧段采样点越出参考四边形 UV 多少（0 = 完全在内）。
- *  必须同时量 u 与 v：正对一面、另一面斜对时，弧段除了左右越界，还会因为
- *  视点低于屏底而整体从垂直方向（v<0 / v>1）越出参考四边形 —— 只量 u 会漏掉，
- *  表现出来就是弧段被 clamp 拉成一条竖带（画面像被撕开 / 重影）。
- *  外扩量按 NDC 比例（中心不动，等比缩放 1/(1+2·pad)），所以 u/v 越界量直接当 pad 用；
- *  再加 0.012 余量与 smoothstep 起步，上限 0.8 与实验台一致。 */
-function arcPad(pts, M) {
-  if (!pts || !pts.length) return 0;
-  let ux = 0, un = 1, vx = 0, vn = 1;
-  for (const p of pts) {
-    _padP.copy(p).applyMatrix4(M);
-    const u = _padP.x * 0.5 + 0.5, v = _padP.y * 0.5 + 0.5;
-    if (u > ux) ux = u;
-    if (u < un) un = u;
-    if (v > vx) vx = v;
-    if (v < vn) vn = v;
-  }
-  const over = Math.max(ux - 1, -un, vx - 1, -vn, 0);
-  if (over <= 0) return 0;
-  const k = Math.min(1, over / 0.01);
-  const sm = k * k * (3 - 2 * k);   // smoothstep：小越界几乎不外扩，避免无谓损失
-  return Math.min(0.8, over + 0.012 * sm);
-}
-
-/* ---------------- 侧对 / 背向时的「参考面回退」 ----------------
- * 离轴投影必须从参考面前方取景：正对 A 面时 B 面的 d 会降到 0 甚至为负，
- * offAxis 只能把 d 钳到 0.05，那一面的投影矩阵退化 —— 屏面被斜切拉花。
- *
- * 注意：**不能靠移动眼位来救**。两路 RT 一旦来自不同视点，共棱处的画面就不再是
- * 同一条视线上的内容，圆角弧段（一半取 A 路、一半取 B 路）会明显错位 ——
- * 表现就是「圆环在转角处断开 / 扭成钩子」。
- *
- * 正确做法：眼位永远等于真实相机，只把「退化那一面」的参考四边形换成对面那块的。
- * 同一眼位下，任何参考平面渲染出来的都是同一条视线上的内容，所以屏面成像不变、
- * 接缝严格连续，代价只是这一路 RT 的分辨率摊到了更大范围（该面此时接近侧对，
- * 在屏上只占几个像素）。切换点在 d = SAFE_D，两侧内容本就一致，所以没有跳变。 */
-const SAFE_D = 2.5;          // 面法线方向的最小可取景距离（米）
-const _gN = new THREE.Vector3(), _gC = new THREE.Vector3(), _gE = new THREE.Vector3();
-/** 眼位到该面平面的有符号距离（正 = 在面外侧，可取景）。
- *  face 四角与 offAxis 同一绕序，法线 = right(pa→pb) × up(pa→pc)。 */
-function faceDist(face, eye) {
-  _gN.subVectors(face.pb, face.pa).cross(_gC.subVectors(face.pc, face.pa)).normalize();
-  return _gN.dot(_gE.subVectors(eye, face.pa));
-}
+/* 旧版 arcPad / faceDist / SAFE_D / __dbgGuard 已全部移除：新方案下 RT 取景框
+ * 直接由该路屏面顶点在 M0 下的包围盒给出，弧段天然落在框内，无需外扩或借面。 */
 
 function setLayer(o, n) { o.traverse(function (c) { c.layers.set(n); }); return o; }
 
@@ -232,7 +212,7 @@ function plan3dLoad(rawUrl) {
 }
 
 function faceNormal(f) {
-  // 与 quadGeom/offAxis 右手系一致：right(pb-pa) × up(pc-pa) = 屏面外法线
+  // 与 quadGeom 右手系一致：right(pb-pa) × up(pc-pa) = 屏面外法线
   return _vn.copy(f.pb).sub(f.pa).cross(_va.copy(f.pc).sub(f.pa)).normalize().clone();
 }
 
@@ -443,22 +423,57 @@ function buildDemo2(VC, OUT, gScale) {
   return { root, tunnel, update };
 }
 
-/* ---------------- 几何校准片（实验台 56446-56454 行移植） ---------------- */
+/* ---------------- 几何校准片（实验台 §6c 同款） ----------------
+ * 全部改用有半径的管状网格，不再是 1px 的 GL_LINES：GL 线段没有覆盖率信息，
+ * 在片源被压缩 / 斜看时会被抽样成断线，MSAA 与 mipmap 都补不回来。
+ * 球网换成真正的经纬圆（旧版 WireframeGeometry 是 14×9 的折线且带三角剖分斜线）。 */
+function calibTube(pts, r, mat, closed) {
+  const curve = (!closed && pts.length === 2)
+    ? new THREE.LineCurve3(pts[0], pts[1])
+    : new THREE.CatmullRomCurve3(pts, !!closed, "centripetal");
+  const seg = closed ? Math.max(96, pts.length * 2) : (pts.length - 1) * 2;
+  return new THREE.Mesh(new THREE.TubeGeometry(curve, seg, r, 6, !!closed), mat);
+}
+function calibRing(n, fn) {
+  const a = [];
+  for (let i = 0; i < n; i++) a.push(fn(i / n * Math.PI * 2));
+  return a;
+}
 function buildCalib() {
   const g = new THREE.Group();
-  const cm = new THREE.LineBasicMaterial({ color: 0x35e8ff, transparent: true, opacity: 0.9, fog: false });
-  g.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(6.6, 6.6, 6.6)), cm));
-  g.add(new THREE.LineSegments(
-    new THREE.WireframeGeometry(new THREE.SphereGeometry(3.2, 14, 9)),
-    new THREE.LineBasicMaterial({ color: 0xff3d9a, transparent: true, opacity: 0.6, fog: false }),
-  ));
-  const circ = new THREE.Mesh(
-    new THREE.TorusGeometry(4.6, 0.045, 6, 80),
-    new THREE.MeshBasicMaterial({ color: 0xffd45e, fog: false }),
-  );
-  circ.rotation.x = Math.PI / 2; g.add(circ);
-  const grid = new THREE.GridHelper(20, 20, 0x35e8ff, 0x1a5a76);
-  grid.position.y = -4.4; g.add(grid);
+  const cm = new THREE.MeshBasicMaterial({ color: 0x35e8ff, fog: false });
+  const gm = new THREE.MeshBasicMaterial({ color: 0x1a5a76, fog: false });
+  const pink = new THREE.MeshBasicMaterial({ color: 0xd8358b, fog: false });
+  const gold = new THREE.MeshBasicMaterial({ color: 0xffd45e, fog: false });
+
+  const HB = 3.3, corners = [];
+  [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1],
+    [-1, 1, -1], [1, 1, -1], [1, 1, 1], [-1, 1, 1]].forEach((c) => {
+    corners.push(new THREE.Vector3(c[0] * HB, c[1] * HB, c[2] * HB));
+  });
+  [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4],
+    [0, 4], [1, 5], [2, 6], [3, 7]].forEach((e) => {
+    g.add(calibTube([corners[e[0]], corners[e[1]]], 0.022, cm, false));
+  });
+
+  const SR = 3.2;
+  for (let li = -3; li <= 3; li++) {
+    const lat = li * Math.PI / 14, rr = SR * Math.cos(lat), yy = SR * Math.sin(lat);
+    g.add(calibTube(calibRing(64, (a) => new THREE.Vector3(rr * Math.cos(a), yy, rr * Math.sin(a))), 0.024, pink, true));
+  }
+  for (let mi = 0; mi < 12; mi++) {
+    const phi = mi * Math.PI / 12, cp = Math.cos(phi), sp = Math.sin(phi);
+    g.add(calibTube(calibRing(64, (a) => new THREE.Vector3(
+      SR * Math.cos(a) * cp, SR * Math.sin(a), SR * Math.cos(a) * sp)), 0.024, pink, true));
+  }
+  g.add(calibTube(calibRing(128, (a) => new THREE.Vector3(4.6 * Math.cos(a), 0, 4.6 * Math.sin(a))), 0.055, gold, true));
+
+  /* 网格间距 2 m：1 m 间距在浅视角下会与采样栅格叠出明显摩尔纹 */
+  for (let gi = 0; gi <= 10; gi++) {
+    const q = -10 + gi * 2, m = gi === 5 ? cm : gm;
+    g.add(calibTube([new THREE.Vector3(q, -4.4, -10), new THREE.Vector3(q, -4.4, 10)], 0.012, m, false));
+    g.add(calibTube([new THREE.Vector3(-10, -4.4, q), new THREE.Vector3(10, -4.4, q)], 0.012, m, false));
+  }
   return g;
 }
 
@@ -495,25 +510,82 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
   const VC = edge.clone().addScaledVector(OUT, -2.8 * Math.SQRT2);
   const gScale = Math.min(faceH / 8, 2.5); // 实验台原生比例按 12×8 屏设计，按屏高折算
 
-  /* —— 圆角屏（3D转角包柱屏 · 圆角半径>0）：视锥外扩估算 ——
-   * 屏面弧段顶点不在参考平面上，从斜侧看会投到 RT 视锥之外（u / v 都可能越界），
-   * 被 clamp 拉成竖带、接缝处出现明显亮/暗边。这里按实际弧段采样点算出每面
-   * 需要外扩多少，并让 RT 渲染与屏面 UV 共用同一个矩阵 —— 两者永远一致。
-   * 直角屏（ctx.arcPts 为 null）pad 恒为 0，走的还是原来数值完全相同的路径。 */
+  /* —— 每路屏面顶点（世界坐标）：RT 取景框 + 最终画面像素占比都由它算 ——
+   * 直角屏用参考面四角；圆角屏再加上弧段上下沿采样点（corner3dWorldArcSamples）。
+   * 旧版 arcPad 靠这些点估算视锥外扩，新方案直接把它们投到 M0 求包围盒。 */
   const arcPts = ctx && Array.isArray(ctx.arcPts) ? ctx.arcPts : null;
-  const pads = [0, 0];
-  const faceMats = [new THREE.Matrix4(), new THREE.Matrix4()];
+  const faceVerts = faces.map((f, fi) => {
+    // 圆角屏：arcPts[fi] 就是实际屏面折线的上下沿顶点（与 CornerArcScreen 一致）。
+    // 不能把直角参考面四角混进来 —— 那是虚拟平面，圆角处并不存在，混进来会让
+    // 取景框偏离真实屏面，屏面 UV 与 RT 内容错开，正对单面时整幅画面被拉花。
+    if (arcPts && arcPts[fi] && arcPts[fi].length) return arcPts[fi].slice();
+    return [f.pa, f.pb, f.pc, f.pd];   // 直角屏：屏面就是参考面本身
+  });
+  const fits = faces.map(() => ({ fx: 1, fy: 1 }));  // HUD 双路预览据此裁到内容区域
+  const faceMats = faces.map(() => new THREE.Matrix4());
   let projSeq = 0;   // 本条目最近一批矩阵的批次号（取自全局序列）
+
+  /* 统一视图基 + 每路自适应取景框（实验台 refreshProj 同款）：
+   * 两路共用 M0，S 只缩放 / 平移 clip 的 x/y（不改 w），共棱点仍命中同一根射线。
+   * fx/fy 按该面在最终主相机画面里的像素宽高比分配 RT 内容区域，避免侧对窄边
+   * 被 mipmap 抹成糊块。相机原地转头也会改变像素占比，见 update() 里的脏标记。 */
+  function refreshProj(eye, camera) {
+    const M0 = baseProj(eye, camera, VC);
+    let cw = RTW, ch = RTH;
+    if (renderer && renderer.getSize) {
+      renderer.getSize(_canvasSize);
+      cw = _canvasSize.x || cw; ch = _canvasSize.y || ch;
+    }
+    if (camera && camera.isPerspectiveCamera) {
+      camera.updateMatrixWorld();
+      _Mcam.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    } else {
+      _Mcam.copy(M0);
+    }
+    const ratio = RTW / RTH;
+    for (let fi = 0; fi < faceVerts.length; fi++) {
+      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;  // M0 下：RT 取景框
+      let a0 = 1e9, a1 = -1e9, b0 = 1e9, b1 = -1e9;  // 主相机下：最终画面像素占比
+      for (const p of faceVerts[fi]) {
+        _fitV.set(p.x, p.y, p.z, 1).applyMatrix4(M0);
+        if (_fitV.w > 1e-4) {
+          const nx = _fitV.x / _fitV.w, ny = _fitV.y / _fitV.w;
+          if (nx < x0) x0 = nx; if (nx > x1) x1 = nx;
+          if (ny < y0) y0 = ny; if (ny > y1) y1 = ny;
+        }
+        _fitV.set(p.x, p.y, p.z, 1).applyMatrix4(_Mcam);
+        if (_fitV.w > 1e-4) {
+          const ax = _fitV.x / _fitV.w, ay = _fitV.y / _fitV.w;
+          if (ax < a0) a0 = ax; if (ax > a1) a1 = ax;
+          if (ay < b0) b0 = ay; if (ay > b1) b1 = ay;
+        }
+      }
+      if (x1 <= x0) { x0 = -1; x1 = 1; } if (y1 <= y0) { y0 = -1; y1 = 1; }
+      if (a1 <= a0) { a0 = -1; a1 = 1; } if (b1 <= b0) { b0 = -1; b1 = 1; }
+      const wPx = Math.max((a1 - a0) * 0.5 * cw, 1), hPx = Math.max((b1 - b0) * 0.5 * ch, 1);
+      const r = wPx / hPx;
+      let fx, fy;
+      if (r < ratio) { fy = 0.98; fx = 0.98 * r / ratio; }
+      else { fx = 0.98; fy = 0.98 * ratio / r; }
+      fx = clampFit(fx); fy = clampFit(fy);
+      fits[fi].fx = fx; fits[fi].fy = fy;
+      faceMats[fi].copy(fitFrustum(x0, x1, y0, y1, fx, fy)).multiply(M0);
+    }
+  }
 
   /* —— 每面一块 RT + projCam（只看内容层） —— */
   const projCam = new THREE.Camera();
   projCam.layers.set(layer);
   projCam.matrixAutoUpdate = false;
+  const maxAniso = (renderer.capabilities && renderer.capabilities.getMaxAnisotropy)
+    ? Math.min(4, renderer.capabilities.getMaxAnisotropy()) : 1;
   const rts = faces.map((f) => ({
     f,
     rt: new THREE.WebGLRenderTarget(RTW, RTH, {
-      minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+      minFilter: THREE.LinearMipmapLinearFilter,
+      magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
+      generateMipmaps: true, anisotropy: maxAniso, samples: 4,
     }),
   }));
 
@@ -530,7 +602,7 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
    * 每帧被遍历 2 次；而且每帧把主 scene 的 background/fog 改掉再还原，
    * fog 变化会让所有 fog 材质走 program 变更检查甚至重编译。
    * 这里改用一张只装内容层的 Scene：世界坐标不变、adScene 无变换、
-   * offAxis 投影矩阵完全不变，画面等价，但遍历量从「整城」降到十几个对象，
+   * 投影矩阵完全不变，画面等价，但遍历量从「整城」降到十几个对象，
    * 也彻底不用再碰主场景的背景/雾。 */
   const adScene = new THREE.Scene();
   adScene.background = AD_BG;
@@ -599,6 +671,10 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
   let videoCbId = 0, videoEl = null;
   let lastTexVersion = -1;
   const lastRtEye = new THREE.Vector3(Infinity, Infinity, Infinity);
+  /* fx/fy 取景框依赖主相机的朝向与 fov/aspect：玩家原地转头时眼位没变，
+   * 但该面在画面里的像素宽高比会变，静态素材也必须用新矩阵重渲一次。 */
+  const lastCamDir = new THREE.Vector3(0, 0, -1), camDir = new THREE.Vector3();
+  let lastCamFov = -1, lastCamAspect = -1;
   // 视频判定以 2D 工厂为准（占位/海报降级时 isVideo 仍为 true，但不会误判静态素材）
 
   const markRtDirty = () => { rtDirty = true; };
@@ -769,6 +845,8 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
     // 每面最近一次渲染 RT 用的离轴矩阵 + 批次号：屏面 UV 用它逐顶点重投影，
     // 保证「RT 里画的」与「屏面上贴的」是同一套矩阵（圆角屏弧段必需）。
     faceMatrices: faceMats,
+    // 每路内容区域占 RT 的宽 / 高比例：HUD 双路预览据此裁到同一块区域
+    faceFit: fits,
     get projSeq() { return projSeq; },
     isVideo: !!(it.type !== "model3d" && innerItem && innerItem.isVideo),
     video: it.type !== "model3d" && innerItem ? innerItem.video : undefined,
@@ -838,6 +916,16 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
       // 离轴投影矩阵随眼位变化，玩家走动时静态素材也必须跟着重算（物理必需）；
       // 站着不动则命中缓存。比实验台的「track 就无条件每帧渲」更精细。
       if (_eye.distanceToSquared(lastRtEye) > EYE_EPS2) markRtDirty();
+      // 原地转头 / 改 fov / 改窗口比例：取景框 fx/fy 变了，同样必须重算
+      if (camera && camera.isPerspectiveCamera) {
+        camera.getWorldDirection(camDir);
+        if (camDir.distanceToSquared(lastCamDir) > 1e-6
+          || camera.fov !== lastCamFov || camera.aspect !== lastCamAspect) {
+          lastCamDir.copy(camDir);
+          lastCamFov = camera.fov; lastCamAspect = camera.aspect;
+          markRtDirty();
+        }
+      }
       // texture.version 捕捉：图片异步加载完成、Canvas 重绘、VideoTexture 新帧、失败海报
       if (boardTex && boardTex.version !== lastTexVersion) {
         lastTexVersion = boardTex.version;
@@ -866,37 +954,17 @@ export function make3dContent(it, W, H, aspect, ctx, d3, make2d) {
         }
       } else {
         // 双路离轴：渲独立 adScene，不再碰主场景（背景/雾/整城遍历都省掉）
-        // 两面各自的取景距离：本面太贴近（侧对 / 背向）时借对面的参考四边形取景，
-        // 眼位保持不变 —— 两路 RT 必须来自同一视点，共棱处才严丝合缝。
-        const dists = rts.length === 2 ? [faceDist(rts[0].f, _eye), faceDist(rts[1].f, _eye)] : [SAFE_D];
+        // 两路共用 M0，只用各自的 clip 空间 S 贴紧取景框 —— 同一眼位、同一视图基，
+        // 共棱点命中同一根射线；faceMats 同时回传给屏面做逐顶点 UV 重投影。
+        refreshProj(_eye, camera);
         for (let fi = 0; fi < rts.length; fi++) {
-          const r = rts[fi];
-          const other = rts.length === 2 ? rts[1 - fi] : null;
-          const ownD = dists[fi];
-          const othD = other ? dists[1 - fi] : -Infinity;
-          let ref = other && ownD < SAFE_D && othD > ownD ? other.f : r.f;
-          let fe = _eye;
-          // 临时 A/B 对照开关（旧「移动眼位」方案），仅调试用
-          if (typeof window !== "undefined" && window.__dbgGuard) {
-            const _n = new THREE.Vector3().subVectors(r.f.pb, r.f.pa).cross(new THREE.Vector3().subVectors(r.f.pc, r.f.pa)).normalize();
-            const _d = _n.dot(new THREE.Vector3().subVectors(_eye, r.f.pa));
-            let _t = Math.min(1, Math.max(0, (2 * SAFE_D - _d) / SAFE_D));
-            _t = _t * _t * (3 - 2 * _t);
-            fe = _eye.clone().addScaledVector(_n, _t * (SAFE_D - _d));
-            ref = r.f;
-          }
-          // 圆角屏：先用无外扩矩阵量弧段越界，再用外扩后的矩阵出片；
-          // 这个矩阵同时回传给屏面做逐顶点 UV 投影，两边同源，接缝必然对得上。
-          if (arcPts) pads[fi] = arcPad(arcPts[fi], offAxis(ref.pa, ref.pb, ref.pc, fe, NEAR, FAR, 0));
-          const M = offAxis(ref.pa, ref.pb, ref.pc, fe, NEAR, FAR, pads[fi]);
+          const M = faceMats[fi];
           projCam.projectionMatrix.copy(M);
           projCam.projectionMatrixInverse.copy(M).invert();
-          renderer.setRenderTarget(r.rt);
+          renderer.setRenderTarget(rts[fi].rt);
           renderer.render(adScene, projCam);
-          faceMats[fi].copy(M);
         }
         projSeq = ++_projSeqGlobal;   // 屏面 UV 只需在矩阵更新后重投影一次
-        if (typeof window !== "undefined") window.__dbgPads = pads.slice();
       }
       renderer.setRenderTarget(prevRT);
       renderer.shadowMap.autoUpdate = savedShadow;

@@ -7,12 +7,13 @@ import * as THREE from "three";
  * 与移植前的几何 / UV / 渲染数值一致，零回归。
  *
  * 改动这块之前请先读这四条约定：
- * 1) 离轴相机仍按「原始虚拟平面」取景 —— 参考面恒为 corner3dFaceDefs 的直角
- *    四边形，圆角只改屏体几何、不改 3D 对位，所以 R=0 / R>0 的投影矩阵数值一致。
+ * 1) 3D 片源用统一公共视图基 M0 + 每路 clip 空间取景框 S（M = S·M0），
+ *    不再按「原始虚拟平面」逐面做 offAxis；圆角只改屏体几何、不改共棱对位。
  * 2) 3D 模式下屏面 UV 与 RT 投影矩阵同源：逐顶点用同一个 M 投影
  *    （u,v = clip.xy / clip.w 归一化），弧段与 RT 矩阵永远不会不同步，
- *    共棱处也就不会出现 clamp 竖带。M 由 content3d.js 渲染 RT 时算出并回传
- *    （见 updateProj），本模块不重复推导，杜绝「算两遍算不一样」。
+ *    共棱处也就不会出现 clamp 竖带。直角屏同样要走 updateProj（旧版跳过），
+ *    因为 S 把 UV 贴进该路内容区域，不再是恒等 0..1。M 由 content3d.js 算出回传，
+ *    本模块不重复推导，杜绝「算两遍算不一样」。
  * 3) 整屏平面模式（2D 内容）把两面拼成一张画布：A 面 u∈[0,0.5]、B 面 u∈[0.5,1]，
  *    u 沿屏面弧长分布，接缝正好落在圆角中点；平贴退化 / 每面整幅时 u∈[0,1]。
  * 4) 塔体 / 檐口跟着屏面轮廓共形退让（沿法线内缩 SCREEN_OFFSET），否则内凹的
@@ -21,7 +22,8 @@ import * as THREE from "three";
 
 const SCREEN_OFFSET = 0.08;   // 屏面凸出塔体（与 mounts.js 同名常量同值）
 const TOWER_EXTRA = 1.4;      // 塔体宽 = 屏宽 + 1.4（与 mounts.js 一致）
-const ARC_SEG = 10;           // 单面弧段细分段数（两面合计 90°，共 20 段）
+const ARC_SEG = 24;           // 单面弧段细分段数（两面合计 90°，共 48 段）
+const PLANE_SEG = 16;         // 单面平面段细分段数（实验台 NA/NB=16 同款）
 const NEAR = 0.12, FAR = 400; // 与 content3d.js 离轴相机同一组远近平面
 
 const HOUSING_COLOR = 0x262a30;
@@ -62,17 +64,25 @@ function arcPolys(spec, R) {
   const D = cornerD(spec);
   const ox = -D + R, oz = -D + R;
   const pt = (t) => ({ x: ox + R * Math.cos(t), z: oz + R * Math.sin(t) });
-  const A = [{ x: -D + spec.w, z: -D }];
-  for (let i = 0; i <= ARC_SEG; i++) A.push(pt(-Math.PI / 2 - (Math.PI / 4) * (i / ARC_SEG)));
-  const B = [];
+  const x1 = -D + spec.w, z1 = -D + spec.w;
+  const A = [], B = [];
+  /* 平面段也必须细分：离轴 UV 是投影变换，屏面渲染时 GPU 按主相机 w 做透视
+   * 校正插值，一条横跨 11 m 的大条带会把圆环 / 球网折成波浪。拆成等长小条带
+   * 后每段 UV 跨度很小，插值误差可忽略。跳过与平面段端点重合的弧点，避免零长条带。 */
+  for (let i = 0; i <= PLANE_SEG; i++) {
+    A.push({ x: x1 + ((-D + R) - x1) * (i / PLANE_SEG), z: -D });
+  }
+  for (let i = 1; i <= ARC_SEG; i++) A.push(pt(-Math.PI / 2 - (Math.PI / 4) * (i / ARC_SEG)));
   for (let i = 0; i <= ARC_SEG; i++) B.push(pt(-Math.PI * 0.75 - (Math.PI / 4) * (i / ARC_SEG)));
-  B.push({ x: -D, z: -D + spec.w });
+  for (let i = 1; i <= PLANE_SEG; i++) {
+    B.push({ x: -D, z: (-D + R) + (z1 - (-D + R)) * (i / PLANE_SEG) });
+  }
   return { A, B, D, R };
 }
 
-/** 弧段采样点（局部坐标，上下沿各一圈）：给 content3d.js 估算 RT 视锥需要
- *  外扩多少（over-scan）—— 平面段顶点本来就落在参考面上，不会越界；
- *  弧段顶点在不理想的视点下会算出 u<0 / u>1，越界部分被 clamp 拉成竖带。 */
+/** 屏面折线采样点（局部坐标，上下沿各一圈）：给 content3d.js 求每路屏面在
+ *  公共视图基 M0 下的 NDC 包围盒。必须与 _buildFaceStrips 用的折线逐点一致，
+ *  否则取景框会偏，屏面 UV 与 RT 内容就会错开。 */
 export function cornerArcSamples(spec, radius) {
   const R = clampArcRadius(spec, radius);
   if (!R) return null;
@@ -150,13 +160,13 @@ export class CornerArcScreen {
     this._writeUv();
   }
 
-  /** 用 content3d.js 渲染 RT 时的同一组离轴矩阵重写屏面 UV。
+  /** 用 content3d.js 渲染 RT 时的同一组矩阵逐顶点重写屏面 UV。
    *  @param {THREE.Matrix4[]} matrices [A 面, B 面]（世界坐标投影矩阵）
    *  @param {number} [seq] 矩阵批次号：同一批次不重复投影（省掉无谓的缓冲上传）
-   *  只在圆角屏（R>0）有意义：直角面片本身就贴在参考面上，UV 恒等于 0..1。 */
+   *  直角屏同样需要：统一视图基 M = S·M0 下屏面四角不再恰好落在 UV 0..1，
+   *  而是落在该路的内容区域 [0.5±fx/2, 0.5±fy/2]。 */
   updateProj(matrices, seq) {
     if (!matrices || matrices.length < 2) return;
-    if (this.radius === 0) return;       // 直角：proj 恒等于 full，零开销
     if (seq !== undefined && seq === this._projSeq) return;
     if (seq !== undefined) this._projSeq = seq;
     const [px, pz] = this.pos, cs = this._cs, sn = this._sn;
@@ -249,15 +259,20 @@ export class CornerArcScreen {
       { face: 1, pa: [-D, -D], pb: [-D, x1] },
     ];
     for (const q of quads) {
-      const geom = quadStrip(q.pa, q.pb, y0, y1);
+      // 直角面片横跨整面，必须细分：离轴 UV 是投影变换，单个大四边形会被
+      // GPU 的三角形内线性插值折弯（圆环变椭圆 / 网格变弯），细分后误差可忽略。
+      const geom = quadStrip(q.pa, q.pb, y0, y1, 16, 8);
       const mesh = new THREE.Mesh(geom, this.mats[q.face]);
       mesh.castShadow = false;
       this.group.add(mesh);
       const attr = geom.attributes.uv;
-      // 直角面片顶点全在参考平面上：离轴投影结果恒等于面片自身 UV(0..1)
-      const full = new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]);
+      const { up, vp } = geom.userData, n = up.length;
+      const full = new Float32Array(n * 2), plane = new Float32Array(n * 2);
       const off = q.face === 0 ? 0 : 0.5;
-      const plane = new Float32Array([off, 0, off + 0.5, 0, off + 0.5, 1, off, 1]);
+      for (let i = 0; i < n; i++) {
+        full[i * 2] = up[i]; full[i * 2 + 1] = vp[i];
+        plane[i * 2] = off + up[i] * 0.5; plane[i * 2 + 1] = vp[i];
+      }
       this._records.push({
         mesh, geom, face: q.face, attr,
         full, plane, proj: full.slice(),
@@ -297,11 +312,13 @@ export class CornerArcScreen {
       const attr = geom.attributes.uv;
 
       const u0 = s[i] / total, u1 = s[i + 1] / total;
-      const full = new Float32Array([u0, 0, u1, 0, u1, 1, u0, 1]);
-      const plane = new Float32Array([
-        off + u0 * 0.5, 0, off + u1 * 0.5, 0,
-        off + u1 * 0.5, 1, off + u0 * 0.5, 1,
-      ]);
+      const { up, vp } = geom.userData, n = up.length;
+      const full = new Float32Array(n * 2), plane = new Float32Array(n * 2);
+      for (let k = 0; k < n; k++) {
+        const u = u0 + (u1 - u0) * up[k];
+        full[k * 2] = u; full[k * 2 + 1] = vp[k];
+        plane[k * 2] = off + u * 0.5; plane[k * 2 + 1] = vp[k];
+      }
       this._records.push({ mesh, geom, face: faceIndex, attr, full, plane, proj: full.slice() });
     }
   }
@@ -357,20 +374,39 @@ export class CornerArcScreen {
 
 const _clip = new THREE.Vector3();
 
-/** 一条竖直条带的四边形（4 顶点 + 索引）：顶点序 pa(左下) → pb(右下) → pd(右上) → pc(左上)，
- *  与 mounts.js quadGeom 同一绕序（right×up = 屏面外法线），UV 先给 0..1 由调用方覆写。 */
-function quadStrip(p0, p1, y0, y1) {
+/** 一条竖直条带的细分网格（(su+1)×(sv+1) 顶点）：顶点序 pa(左下) → pb(右下)
+ *  → pd(右上) → pc(左上)，与 mounts.js quadGeom 同一绕序（right×up = 屏面外法线）。
+ *  离轴 UV 是投影变换（u = L(x)/w），GPU 在三角形内只做透视线性插值，单个大四边形
+ *  会把圆环 / 网格折弯；横竖细分后误差可忽略。userData.up/vp 保存每个顶点的条带内
+ *  参数，供 full / split / proj 三种 UV 共用。 */
+function quadStrip(p0, p1, y0, y1, su = 4, sv = 8) {
   const geom = new THREE.BufferGeometry();
-  const pos = [
-    p0[0], y0, p0[1],
-    p1[0], y0, p1[1],
-    p1[0], y1, p1[1],
-    p0[0], y1, p0[1],
-  ];
-  geom.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-  geom.setAttribute("uv", new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
-  geom.setIndex([0, 1, 2, 0, 2, 3]);
+  const n = (su + 1) * (sv + 1);
+  const pos = new Float32Array(n * 3), uv = new Float32Array(n * 2);
+  const up = new Float32Array(n), vp = new Float32Array(n), idx = [];
+  for (let j = 0; j <= sv; j++) {
+    const tv = j / sv, y = y0 + (y1 - y0) * tv;
+    for (let i = 0; i <= su; i++) {
+      const tu = i / su, k = j * (su + 1) + i;
+      pos[k * 3] = p0[0] + (p1[0] - p0[0]) * tu;
+      pos[k * 3 + 1] = y;
+      pos[k * 3 + 2] = p0[1] + (p1[1] - p0[1]) * tu;
+      uv[k * 2] = tu; uv[k * 2 + 1] = tv;
+      up[k] = tu; vp[k] = tv;
+    }
+  }
+  for (let j = 0; j < sv; j++) {
+    for (let i = 0; i < su; i++) {
+      const a = j * (su + 1) + i, b = a + 1, c = a + su + 1, d = c + 1;
+      idx.push(a, b, d, a, d, c);
+    }
+  }
+  geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geom.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  geom.setIndex(idx);
   geom.computeVertexNormals();
+  geom.userData.up = up;
+  geom.userData.vp = vp;
   return geom;
 }
 
