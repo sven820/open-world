@@ -3,6 +3,10 @@
  *
  * 所有需要调用大模型的功能（文本捏脸、以图生成、后续其他入口）共享同一份
  * 配置。任何入口修改配置，其他入口立即生效；配置只存本机浏览器。
+ *
+ * 注意（阶段 1 起）：优先走 AI 网关（src/ai/wsAiClient.js → ai-gateway/），
+ * Key 托管在服务端 .env；本配置仅在网关不可用时的"直连回退"路径使用。
+ * 见 docs/design/ai-agent-gateway-design.md
  * ------------------------------------------------------------------ */
 
 const STORAGE_KEY = "ws_creator_ai_config"; // 沿用旧 key，保留用户已填的 Key

@@ -2,9 +2,11 @@
   Local dev runner for open-world.
   Double-click start.bat / stop.bat for one-click start / stop.
 
-  There are two processes covering three parts:
-    admin/server.js  -> admin backend (/api) + admin UI (public/) on port 8787
-    vite             -> walkstreet game on port 5173
+  There are three processes covering four parts:
+    admin/server.js   -> admin backend (/api) + admin UI (public/) on port 8787
+    vite              -> walkstreet game on port 5173
+    ai-gateway        -> AI ability gateway (Mastra) on port 8788 (optional:
+                         start failures only warn, frontend falls back)
   Admin UI is served by the backend, so it needs no separate process.
 #>
 param(
@@ -19,23 +21,28 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Root      = $PSScriptRoot
-$AdminDir  = Join-Path $Root 'admin'
-$GameDir   = Join-Path $Root 'walkstreet'
-$AdminPort = 8787
-$GamePort  = 5173
-$AdminBase = "http://127.0.0.1:$AdminPort"
-$GameBase  = "http://127.0.0.1:$GamePort"
-$AdminUrl  = "$AdminBase/"
-$GameUrl   = "$GameBase/?admin=" + [uri]::EscapeDataString($AdminBase)
+$Root        = $PSScriptRoot
+$AdminDir    = Join-Path $Root 'admin'
+$GameDir     = Join-Path $Root 'walkstreet'
+$GatewayDir  = Join-Path $Root 'ai-gateway'
+$AdminPort   = 8787
+$GamePort    = 5173
+$GatewayPort = 8788
+$AdminBase   = "http://127.0.0.1:$AdminPort"
+$GameBase    = "http://127.0.0.1:$GamePort"
+$GatewayBase = "http://127.0.0.1:$GatewayPort"
+$AdminUrl    = "$AdminBase/"
+$GameUrl     = "$GameBase/?admin=" + [uri]::EscapeDataString($AdminBase)
 
 $StateDir  = Join-Path $env:TEMP 'open-world-dev'
 $StateFile = Join-Path $StateDir 'pids.json'
 $Logs      = @{
-    adminOut = Join-Path $StateDir 'admin.out.log'
-    adminErr = Join-Path $StateDir 'admin.err.log'
-    gameOut  = Join-Path $StateDir 'walkstreet.out.log'
-    gameErr  = Join-Path $StateDir 'walkstreet.err.log'
+    adminOut    = Join-Path $StateDir 'admin.out.log'
+    adminErr    = Join-Path $StateDir 'admin.err.log'
+    gameOut     = Join-Path $StateDir 'walkstreet.out.log'
+    gameErr     = Join-Path $StateDir 'walkstreet.err.log'
+    gatewayOut  = Join-Path $StateDir 'ai-gateway.out.log'
+    gatewayErr  = Join-Path $StateDir 'ai-gateway.err.log'
 }
 
 function Ensure-StateDir {
@@ -71,6 +78,7 @@ function Test-ServiceProc([int]$ProcessId, [string]$Kind) {
     if ($null -eq $p -or $p.Name -ine 'node.exe') { return $false }
     $cl = [string]$p.CommandLine
     if ($Kind -eq 'admin') { return ($cl -match 'server\.js') }
+    if ($Kind -eq 'gateway') { return ($cl -match 'tsx' -and $cl -match 'src[/\\]index\.ts') }
     return ($cl -match 'vite')
 }
 
@@ -90,11 +98,12 @@ function Read-State {
     return $null
 }
 
-function Save-State([int]$AdminPid, [int]$GamePid) {
+function Save-State([int]$AdminPid, [int]$GamePid, [int]$GatewayPid) {
     Ensure-StateDir
     $obj = [ordered]@{
         admin      = $AdminPid
         walkstreet = $GamePid
+        gateway    = $GatewayPid
         time       = (Get-Date).ToString('o')
     }
     $obj | ConvertTo-Json | Set-Content -Path $StateFile -Encoding ASCII -Force
@@ -215,14 +224,17 @@ function Read-LogTail($Tail) {
     }
 }
 
-function Invoke-FollowLogs([int]$AdminPid, [int]$GamePid, [bool]$AdminFresh, [bool]$GameFresh) {
-    $adminSkip = -not $AdminFresh
-    $gameSkip  = -not $GameFresh
+function Invoke-FollowLogs([int]$AdminPid, [int]$GamePid, [int]$GatewayPid, [bool]$AdminFresh, [bool]$GameFresh, [bool]$GatewayFresh) {
+    $adminSkip   = -not $AdminFresh
+    $gameSkip    = -not $GameFresh
+    $gatewaySkip = -not $GatewayFresh
     $tails = @(
-        (New-LogTail $Logs.adminOut 'admin' 'Cyan'       -SkipExisting:$adminSkip),
-        (New-LogTail $Logs.adminErr 'admin' 'DarkYellow' -SkipExisting:$adminSkip),
-        (New-LogTail $Logs.gameOut  'game'  'Green'      -SkipExisting:$gameSkip),
-        (New-LogTail $Logs.gameErr  'game'  'DarkYellow' -SkipExisting:$gameSkip)
+        (New-LogTail $Logs.adminOut    'admin'   'Cyan'       -SkipExisting:$adminSkip),
+        (New-LogTail $Logs.adminErr    'admin'   'DarkYellow' -SkipExisting:$adminSkip),
+        (New-LogTail $Logs.gameOut     'game'    'Green'      -SkipExisting:$gameSkip),
+        (New-LogTail $Logs.gameErr     'game'    'DarkYellow' -SkipExisting:$gameSkip),
+        (New-LogTail $Logs.gatewayOut  'gateway' 'Magenta'    -SkipExisting:$gatewaySkip),
+        (New-LogTail $Logs.gatewayErr  'gateway' 'DarkYellow' -SkipExisting:$gatewaySkip)
     )
 
     Write-Host ''
@@ -261,7 +273,7 @@ function Invoke-FollowLogs([int]$AdminPid, [int]$GamePid, [bool]$AdminFresh, [bo
             }
 
             $alive = $false
-            foreach ($procId in @($AdminPid, $GamePid)) {
+            foreach ($procId in @($AdminPid, $GamePid, $GatewayPid)) {
                 if ($procId -gt 0 -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { $alive = $true }
             }
             if (-not $alive) {
@@ -308,22 +320,47 @@ function Invoke-Start {
         if (-not (Test-Path $viteCli)) { throw "vite cli is still missing: $viteCli" }
     }
 
+    # ai-gateway dependencies (optional service: missing deps get installed, but
+    # a broken gateway must not block admin/walkstreet startup)
+    $gatewayEntry = Join-Path $GatewayDir 'src\index.ts'
+    $gatewayPkg   = Join-Path $GatewayDir 'package.json'
+    $gatewayTsx   = Join-Path $GatewayDir 'node_modules\tsx'
+    $gatewayAvailableDir = (Test-Path $gatewayEntry) -and (Test-Path $gatewayPkg)
+    if ($gatewayAvailableDir -and ($Install -or -not (Test-Path $gatewayTsx))) {
+        if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { throw 'npm.cmd not found in PATH.' }
+        Write-Host '[setup] installing ai-gateway dependencies (npm) ...'
+        Push-Location $GatewayDir
+        try {
+            if (Test-Path (Join-Path $GatewayDir 'package-lock.json')) {
+                & cmd.exe /c 'npm ci --no-audit --no-fund'
+            } else {
+                & cmd.exe /c 'npm install --no-audit --no-fund'
+            }
+            if ($LASTEXITCODE -ne 0) { throw "ai-gateway npm install failed (exit $LASTEXITCODE)." }
+        } finally {
+            Pop-Location
+        }
+        if (-not (Test-Path $gatewayTsx)) { throw "ai-gateway deps are still missing: $gatewayTsx" }
+    }
+
     Ensure-StateDir
-    $adminPid    = 0
-    $gamePid     = 0
-    $adminFresh  = $false   # true = log files were (re)created by this start
-    $gameFresh   = $false
+    $adminPid     = 0
+    $gamePid      = 0
+    $gatewayPid   = 0
+    $adminFresh   = $false   # true = log files were (re)created by this start
+    $gameFresh    = $false
+    $gatewayFresh = $false
 
     # 1) admin backend + admin UI (one process, port 8787)
     $owners = @(Get-PortOwners $AdminPort)
     $mine   = @($owners | Where-Object { Test-ServiceProc $_ 'admin' })
     if ($mine.Count -gt 0) {
         $adminPid = [int]$mine[0]
-        Write-Host "[1/2] admin backend + admin UI already running (PID $adminPid) -> $AdminUrl"
+        Write-Host "[1/3] admin backend + admin UI already running (PID $adminPid) -> $AdminUrl"
     } elseif ($owners.Count -gt 0) {
         throw "Port $AdminPort is held by another process (PID $($owners -join ', ')). Free it first."
     } else {
-        Write-Host '[1/2] starting admin/server.js (backend + admin UI) ...'
+        Write-Host '[1/3] starting admin/server.js (backend + admin UI) ...'
         $adminFresh = $true
         $adminPid = Start-Node $AdminDir @('server.js') $Logs.adminOut $Logs.adminErr
         if (-not (Wait-Ready "$AdminBase/api/health" $adminPid 40)) {
@@ -337,11 +374,11 @@ function Invoke-Start {
     $mine   = @($owners | Where-Object { Test-ServiceProc $_ 'game' })
     if ($mine.Count -gt 0) {
         $gamePid = [int]$mine[0]
-        Write-Host "[2/2] walkstreet vite already running (PID $gamePid) -> $GameBase/"
+        Write-Host "[2/3] walkstreet vite already running (PID $gamePid) -> $GameBase/"
     } elseif ($owners.Count -gt 0) {
         throw "Port $GamePort is held by another process (PID $($owners -join ', ')). Free it first."
     } else {
-        Write-Host '[2/2] starting walkstreet vite ...'
+        Write-Host '[2/3] starting walkstreet vite ...'
         $gameFresh = $true
         $quoted   = '"{0}"' -f $viteCli
         $viteArgs = @($quoted, '--host', '127.0.0.1', '--port', "$GamePort", '--strictPort')
@@ -352,13 +389,52 @@ function Invoke-Start {
         Write-Host "      ready: $GameBase/ (PID $gamePid)"
     }
 
-    Save-State $adminPid $gamePid
+    # 3) ai-gateway (Mastra AI ability gateway, port 8788)
+    # Non-fatal by design: the frontend falls back to legacy/local AI paths when
+    # the gateway is down, so a gateway failure only warns here.
+    if ($gatewayAvailableDir -and -not (Test-Path $gatewayTsx)) {
+        Write-Host '[3/3] ai-gateway skipped - dependencies missing (run: cd ai-gateway; npm install)' -ForegroundColor Yellow
+    } elseif ($gatewayAvailableDir) {
+        $owners = @(Get-PortOwners $GatewayPort)
+        $mine   = @($owners | Where-Object { Test-ServiceProc $_ 'gateway' })
+        if ($mine.Count -gt 0) {
+            $gatewayPid = [int]$mine[0]
+            Write-Host "[3/3] ai-gateway already running (PID $gatewayPid) -> $GatewayBase/health"
+        } elseif ($owners.Count -gt 0) {
+            Write-Host "[3/3] warning: port $GatewayPort held by another process (PID $($owners -join ', ')) - ai-gateway not started" -ForegroundColor Yellow
+        } else {
+            Write-Host '[3/3] starting ai-gateway (Mastra) ...'
+            try {
+                $gatewayFresh = $true
+                $gatewayPid = Start-Node $GatewayDir @('--import', 'tsx', 'src/index.ts') $Logs.gatewayOut $Logs.gatewayErr
+                if (-not (Wait-Ready "$GatewayBase/health" $gatewayPid 40)) {
+                    throw "ai-gateway did not become ready on $GatewayPort"
+                }
+                Write-Host "      ready: $GatewayBase/health (PID $gatewayPid)"
+                $health = ''
+                try { $health = (Invoke-WebRequest -Uri "$GatewayBase/health" -UseBasicParsing -TimeoutSec 3).Content } catch { }
+                if ($health -match '"configured":false') {
+                    Write-Host '      note: model key not configured - edit ai-gateway/.env (abilities will return 503 until then)' -ForegroundColor DarkYellow
+                }
+            } catch {
+                $gatewayPid = 0
+                Write-Host "[3/3] warning: ai-gateway failed to start ($($_.Exception.Message))" -ForegroundColor Yellow
+                Write-Host "      frontend will fall back to legacy AI paths. Log: $($Logs.gatewayErr)" -ForegroundColor Yellow
+            }
+        }
+    } else {
+        Write-Host '[3/3] ai-gateway skipped - folder not found (ai-gateway/)' -ForegroundColor DarkGray
+    }
+
+    Save-State $adminPid $gamePid $gatewayPid
 
     Write-Host ''
     Write-Host 'All services up:' -ForegroundColor Green
     Write-Host "  admin backend  : $AdminBase/api/health"
     Write-Host "  admin UI       : $AdminUrl   (served by admin/server.js)"
     Write-Host "  walkstreet     : $GameUrl"
+    if ($gatewayPid -gt 0) { Write-Host "  ai-gateway     : $GatewayBase/health" }
+    else { Write-Host '  ai-gateway     : NOT RUNNING (AI abilities fall back to legacy paths)' -ForegroundColor Yellow }
     if (-not $Visible) { Write-Host "  logs           : $StateDir" }
     Write-Host '  stop           : stop.bat'
     Write-Host ''
@@ -369,7 +445,7 @@ function Invoke-Start {
     }
 
     if ($Follow -and -not $Visible) {
-        Invoke-FollowLogs $adminPid $gamePid $adminFresh $gameFresh
+        Invoke-FollowLogs $adminPid $gamePid $gatewayPid $adminFresh $gameFresh $gatewayFresh
     } elseif ($Follow -and $Visible) {
         Write-Host '  note: -Visible already opens a console per service; log watching is skipped.' -ForegroundColor DarkGray
         Write-Host ''
@@ -383,30 +459,32 @@ function Invoke-Stop {
     $ids = @()
     $state = Read-State
     if ($state) {
-        foreach ($v in @($state.admin, $state.walkstreet)) {
+        foreach ($v in @($state.admin, $state.walkstreet, $state.gateway)) {
             if ($v) { $ids += [int]$v }
         }
     }
-    foreach ($port in @($AdminPort, $GamePort)) {
+    foreach ($port in @($AdminPort, $GamePort, $GatewayPort)) {
         $ids += @(Get-PortOwners $port)
     }
     $ids = @($ids | Where-Object { $_ -gt 0 } | Select-Object -Unique)
 
     if ($ids.Count -eq 0) {
-        Write-Host 'Nothing to stop (ports 8787 / 5173 are free).'
+        Write-Host 'Nothing to stop (ports 8787 / 5173 / 8788 are free).'
     }
 
     foreach ($id in $ids) {
         $p = Get-ProcInfo $id
         if (-not $p) { continue }
-        $isAdmin = Test-ServiceProc $id 'admin'
-        $isGame  = Test-ServiceProc $id 'game'
-        if (-not ($isAdmin -or $isGame)) {
+        $isAdmin   = Test-ServiceProc $id 'admin'
+        $isGame    = Test-ServiceProc $id 'game'
+        $isGateway = Test-ServiceProc $id 'gateway'
+        if (-not ($isAdmin -or $isGame -or $isGateway)) {
             Write-Host "  skip PID $id ($($p.Name)) - not a walkstreet dev process" -ForegroundColor Yellow
             continue
         }
         $label = 'walkstreet vite'
         if ($isAdmin) { $label = 'admin/server.js' }
+        if ($isGateway) { $label = 'ai-gateway' }
         try {
             Stop-Process -Id $id -Force -ErrorAction Stop
             Write-Host "  stopped $label (PID $id)"
@@ -418,12 +496,12 @@ function Invoke-Stop {
     $deadline = (Get-Date).AddSeconds(10)
     while ((Get-Date) -lt $deadline) {
         $busy = @()
-        foreach ($port in @($AdminPort, $GamePort)) { $busy += @(Get-PortOwners $port) }
+        foreach ($port in @($AdminPort, $GamePort, $GatewayPort)) { $busy += @(Get-PortOwners $port) }
         if ($busy.Count -eq 0) { break }
         Start-Sleep -Milliseconds 300
     }
 
-    foreach ($port in @($AdminPort, $GamePort)) {
+    foreach ($port in @($AdminPort, $GamePort, $GatewayPort)) {
         $left = @(Get-PortOwners $port)
         if ($left.Count -gt 0) {
             Write-Host "  warning: port $port still held by PID $($left -join ', ')" -ForegroundColor Yellow
@@ -441,8 +519,9 @@ function Invoke-Status {
     Write-Host ''
     Write-Host '== open-world local dev / status ==' -ForegroundColor Cyan
     $items = @(
-        @{ Name = 'admin backend + UI'; Port = $AdminPort; Url = "$AdminBase/api/health" },
-        @{ Name = 'walkstreet vite';    Port = $GamePort;  Url = "$GameBase/" }
+        @{ Name = 'admin backend + UI'; Port = $AdminPort;   Url = "$AdminBase/api/health" },
+        @{ Name = 'walkstreet vite';    Port = $GamePort;    Url = "$GameBase/" },
+        @{ Name = 'ai-gateway';         Port = $GatewayPort; Url = "$GatewayBase/health" }
     )
     foreach ($item in $items) {
         $up     = Test-Http $item.Url

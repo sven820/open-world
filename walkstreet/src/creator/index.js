@@ -1,8 +1,9 @@
 import { AvatarRig } from "./avatarRig.js";
-import { PARAM_GROUPS, COLOR_PARAMS, PRESETS, defaultConfig, clampConfig, presetConfig, randomConfig } from "./faceParams.js";
+import { PARAM_GROUPS, COLOR_PARAMS, PRESETS, PARAM_MAP, defaultConfig, clampConfig, presetConfig, randomConfig } from "./faceParams.js";
 import { AIStylist } from "./aiStylist.js";
-import { ImageAvatarGenerator } from "./imageAvatar.js";
+import { ImageAvatarGenerator, prepareImage } from "./imageAvatar.js";
 import { onAIConfigChange, configured, isVisionModel } from "../config/aiConfig.js";
+import { gatewayAvailable, invokeAbility } from "../ai/wsAiClient.js";
 import "./creator.css";
 
 const STORAGE_KEY = "ws_creator_avatar";
@@ -51,6 +52,9 @@ export class CharacterCreator {
     this.busy = false;
     this._bound = false;
     this._toastTimer = 0;
+    // AI 栏附件：{ kind: 'image' | 'model', file, name }
+    this._aiAttach = null;
+    this._aiModelObjectUrl = null;
   }
 
   get canvas() { return $("#cc-canvas", this.el); }
@@ -250,6 +254,30 @@ export class CharacterCreator {
     $("#cc-ai-input", el).addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); this._aiRefine(); }
     });
+    // AI 栏附件：图片（以图捏脸）/ GLB 模型（自定义角色），支持点击、粘贴、拖入
+    $("#cc-ai-attach", el).addEventListener("click", () => $("#cc-ai-file", el).click());
+    const aiFileInput = $("#cc-ai-file", el);
+    aiFileInput.addEventListener("change", () => {
+      const f = aiFileInput.files && aiFileInput.files[0];
+      if (f) this._setAiAttach(f);
+      aiFileInput.value = "";
+    });
+    $("#cc-ai-input", el).addEventListener("paste", (e) => {
+      const items = e.clipboardData && e.clipboardData.files;
+      if (items && items.length && items[0].type.startsWith("image/")) {
+        e.preventDefault();
+        this._setAiAttach(items[0]);
+      }
+    });
+    const aiBar = $("#cc-ai-bar", el);
+    aiBar.addEventListener("dragover", (e) => { e.preventDefault(); aiBar.classList.add("dragover"); });
+    aiBar.addEventListener("dragleave", () => aiBar.classList.remove("dragover"));
+    aiBar.addEventListener("drop", (e) => {
+      e.preventDefault();
+      aiBar.classList.remove("dragover");
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) this._setAiAttach(f);
+    });
 
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape" || el.classList.contains("hidden")) return;
@@ -331,28 +359,73 @@ export class CharacterCreator {
   }
 
   /* -------------------- AI -------------------- */
+
+  /** AI 栏附件：选择/粘贴/拖入文件 */
+  _setAiAttach(file) {
+    const isImage = file.type && file.type.startsWith("image/");
+    const isModel = /\.(glb|gltf)$/i.test(file.name || "");
+    if (!isImage && !isModel) { this._toast("仅支持图片（png/jpg/webp）或 GLB/GLTF 模型文件", true); return; }
+    if (file.size > 20 * 1024 * 1024) { this._toast("文件过大（>20MB），请压缩后再试", true); return; }
+    this._clearAiAttach();
+    this._aiAttach = { kind: isImage ? "image" : "model", file, name: file.name || "剪贴板图片" };
+    this._renderAiChip();
+    this._toast(isImage ? "已添加图片：AI 修改将按照片生成样貌" : "已添加模型：点击「AI 修改」载入为自定义角色");
+  }
+
+  _renderAiChip() {
+    const chip = $("#cc-ai-chip", this.el);
+    if (!this._aiAttach) { chip.classList.add("hidden"); chip.innerHTML = ""; return; }
+    const kindLabel = this._aiAttach.kind === "image" ? "图片" : "模型";
+    chip.innerHTML = `<i>${kindLabel}</i><b>${escapeHtml(this._aiAttach.name)}</b><span class="cc-ai-chip-x" title="移除">✕</span>`;
+    chip.classList.remove("hidden");
+    chip.querySelector(".cc-ai-chip-x").addEventListener("click", () => this._clearAiAttach());
+  }
+
+  _clearAiAttach() {
+    this._aiAttach = null;
+    this._renderAiChip();
+  }
+
   async _aiRefine() {
     if (this.busy) return;
     const input = $("#cc-ai-input", this.el);
     const text = input.value.trim();
+
+    // 附件路由：模型文件 → 直接载入为自定义角色；图片 → 以图捏脸（文字作为补充要求）
+    if (this._aiAttach && this._aiAttach.kind === "model") {
+      try { this._applyModelFile(this._aiAttach.file); } finally { this._clearAiAttach(); }
+      input.value = "";
+      return;
+    }
+    if (this._aiAttach && this._aiAttach.kind === "image") {
+      await this._withAiBusy(() => this._aiRefineImage(this._aiAttach.file, text), input, text);
+      this._clearAiAttach();
+      return;
+    }
+
     if (!text) { this._toast("先描述一下想要的样子，例如「大眼睛、瓜子脸、微笑」", true); input.focus(); return; }
+    await this._withAiBusy(() => this.ai.refine(text, this.config), input, text, true);
+  }
+
+  /** AI 调用公共外壳：busy 状态、按钮态、结果应用 */
+  async _withAiBusy(taskPromiseFn, input, text, clearOnOk = false) {
     this.busy = true;
     const btn = $("#cc-ai-go", this.el);
     const old = btn.textContent;
     btn.disabled = true; btn.textContent = "AI 思考中…";
     $("#cc-status", this.el).textContent = "AI 正在调整…";
     try {
-      const res = await this.ai.refine(text, this.config);
-      if (res.ok) {
+      const res = await taskPromiseFn();
+      if (res && res.ok && res.config) {
         this._pushHistory();
         res.config.snapshot = this.config.snapshot;
         this.config = res.config;
         this._activePreset = null;
         this._applyAndSync();
         this._renderParams();
-        input.value = "";
+        if (clearOnOk && input) input.value = "";
       }
-      this._toast(res.message, !res.ok);
+      this._toast(res ? res.message : "未返回结果", !(res && res.ok));
     } catch (e) {
       this._toast(`AI 调整失败：${e.message}`, true);
     } finally {
@@ -360,6 +433,52 @@ export class CharacterCreator {
       btn.disabled = false; btn.textContent = old;
       $("#cc-status", this.el).textContent = `已就绪 · ${this.rig ? this.rig.boneCount : 0} 根骨骼`;
     }
+  }
+
+  /** 附件为图片：网关 image-avatar（vision）优先，回退旧直连/本地分析 */
+  async _aiRefineImage(file, extraPrompt) {
+    try {
+      if (await gatewayAvailable()) {
+        const img = await prepareImage(file);
+        const data = await invokeAbility("image-avatar", {
+          imageBase64: img.base64,
+          extraPrompt: extraPrompt || "",
+          currentConfig: this.config,
+        });
+        const changes = data && data.changes && typeof data.changes === "object" ? data.changes : null;
+        if (data && data.ok !== false && changes && Object.keys(changes).length) {
+          const cfg = clampConfig(this.config);
+          for (const [id, raw] of Object.entries(changes)) {
+            const p = PARAM_MAP[id];
+            if (!p) continue;
+            const v = Number(raw);
+            if (!Number.isFinite(v)) continue;
+            cfg.params[id] = Math.min(p.max, Math.max(p.min, Math.round(v)));
+          }
+          cfg.name = "照片形象";
+          return { ok: true, source: "gateway", message: data.reply || "已按照片调整参数", config: cfg };
+        }
+        if (data && data.ok === false) {
+          return { ok: false, message: data.reply || "照片中未识别出有效特征" };
+        }
+        // 网关返回无效结果 → 走旧路径
+      }
+    } catch (e) {
+      // 网关不可用/失败 → 走旧路径（localRefine 式兜底在旧生成器里）
+    }
+    // 旧路径：直连视觉模型 / 本地图像分析（Key 在浏览器，历史行为保留）
+    return this.imageGen.generate(file, this.config, { extraPrompt: extraPrompt || "" });
+  }
+
+  /** 附件为 GLB/GLTF：载入为自定义基础角色（非 AI 流程） */
+  _applyModelFile(file) {
+    if (this._aiModelObjectUrl) URL.revokeObjectURL(this._aiModelObjectUrl);
+    const url = URL.createObjectURL(file);
+    this._aiModelObjectUrl = url;
+    this.config.name = file.name.replace(/\.(glb|gltf)$/i, "") || "自定义模型";
+    // _loadAvatar 会写 config.avatar 并触发 rig.apply；骨骼数决定精细/基础调整
+    this._loadAvatar(url);
+    this._toast(`已载入自定义模型「${this.config.name}」${this.rig && this.rig.boneCount > 40 ? "" : "（未检测到精细面部骨骼，仅支持基础调整）"}`);
   }
 
   /* -------------------- 以图生成 -------------------- */
@@ -434,15 +553,38 @@ export class CharacterCreator {
   }
 
   /* -------------------- 保存 -------------------- */
-  _save() {
+  async _save() {
     try {
       if (this.rig) this.config.snapshot = this.rig.snapshot(128);
+      await this._persistAvatarIfLocal();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.config));
       if (typeof this.onSave === "function") this.onSave(clampConfig(this.config));
       this.close();
       window.dispatchEvent(new CustomEvent("ws:avatar-changed", { detail: this.config }));
     } catch (e) {
       this._toast(`保存失败：${e.message}`, true);
+    }
+  }
+
+  /**
+   * 自定义模型（附件上传的 GLB）的持久化：blob URL 重启后失效。
+   * ≤4MB 的模型转 dataURL 一并存储；过大的模型只保留本次会话内的 blob 引用，
+   * 并提示用户重启后会回退到原基础模型（参数仍会保存）。
+   */
+  async _persistAvatarIfLocal() {
+    if (!this.config.avatar || !this.config.avatar.startsWith("blob:")) return;
+    if (!this._aiAttach || this._aiAttach.kind !== "model") return;
+    const file = this._aiAttach.file;
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result));
+      r.onerror = () => reject(new Error("模型文件读取失败"));
+      r.readAsDataURL(file);
+    });
+    if (dataUrl.length <= 4_000_000) {
+      this.config.avatar = dataUrl;
+    } else {
+      this._toast("模型文件过大（>3MB），已保存参数；模型仅本次会话有效，重启后回退原基础模型", true);
     }
   }
 

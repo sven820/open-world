@@ -170,6 +170,19 @@
 }
 .cc-ai-bar button:hover:not(:disabled) { background: rgba(255,61,139,.28); }
 .cc-ai-bar button:disabled { opacity: .5; cursor: wait; }
+#cc-ai-attach { padding: 10px 11px; border-color: var(--line); background: rgba(255,255,255,.04); color: var(--text); }
+#cc-ai-attach:hover:not(:disabled) { border-color: var(--pink); background: rgba(255,61,139,.14); color: #ff9ec5; }
+.cc-ai-chip {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; max-width: 180px;
+  padding: 6px 9px; border: 1px solid var(--line); border-radius: 3px;
+  background: rgba(255,255,255,.05); color: var(--text); font: 500 11px/1 var(--sans);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default;
+}
+.cc-ai-chip b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.cc-ai-chip i { font-style: normal; color: var(--gold); }
+.cc-ai-chip .cc-ai-chip-x { flex: none; cursor: pointer; color: rgba(244,242,238,.5); font-weight: 700; }
+.cc-ai-chip .cc-ai-chip-x:hover { color: var(--pink); }
+.cc-ai-bar.dragover input { border-color: var(--pink); background: rgba(255,61,139,.08); }
 
 /* ---- toast / modal ---- */
 .cc-toast {

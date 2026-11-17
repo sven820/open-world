@@ -1,3 +1,27 @@
+## 0. 文档导航
+
+项目文档中枢在 [`docs/`](docs/README.md)，关键入口：
+
+| 文档 | 说明 |
+|---|---|
+| [docs/README.md](docs/README.md) | 文档体系总纲 + 全局索引（架构/设计/需求/计划/测试/ADR） |
+| [docs/architecture/ai-agent-architecture-research.md](docs/architecture/ai-agent-architecture-research.md) | AI Agent 升级调研与选型思考 |
+| [docs/design/ai-agent-gateway-design.md](docs/design/ai-agent-gateway-design.md) | AI 网关设计（Mastra 阶段 1） |
+| [docs/plans/ai-agent-roadmap.md](docs/plans/ai-agent-roadmap.md) | AI Agent 研发计划与进度 |
+| [docs/adr/](docs/adr/) | 架构决策记录（只增不改） |
+
+> 新增文档必须回 `docs/README.md` 登记索引。
+
+## 0.1 快速开始
+
+| 组件 | 启动方式 | 说明 |
+|---|---|---|
+| 全套本地环境 | 双击 `start.bat`（停止用 `stop.bat`） | admin 服务(8787) + walkstreet 前端 |
+| AI 网关 | `cd ai-gateway` → `npm install` → 复制 `.env.example` 为 `.env` 填 Key → `npm run dev` | 独立进程(8788)，见 `docs/design/ai-agent-gateway-design.md` |
+| walkstreet 单独开发 | `cd walkstreet` → `npm run dev` | Vite dev server |
+
+> AI 编码助手请先读根目录 [`AGENTS.md`](AGENTS.md)（项目规则）。
+
 ## 1. 目录结构
 ```
 openworld/

@@ -1,5 +1,6 @@
 import { PARAM_MAP, ALL_PARAMS, PRESETS, presetConfig, randomConfig, defaultConfig, describeConfig, AI_PARAM_SCHEMA, clampConfig } from "./faceParams.js";
 import { getAIConfig, configured, updateAIConfig } from "../config/aiConfig.js";
+import { gatewayAvailable, invokeAbility } from "../ai/wsAiClient.js";
 
 export { AI_PRESETS } from "../config/aiConfig.js";
 
@@ -47,13 +48,41 @@ export class AIStylist {
   }
 
   /**
-   * 用自然语言修改角色。优先调用 OpenAI 兼容大模型；未配置或调用失败时
-   * 自动回落到本地规则引擎，保证功能在无网络 / 无 Key 环境仍可用。
+   * 用自然语言修改角色。优先走 AI 网关（Key 在服务端，docs/design/ai-agent-gateway-design.md）；
+   * 网关不可用时回退直连大模型；仍未配置或失败时回落本地规则引擎，保证无网络/无 Key 环境可用。
    */
   async refine(prompt, currentConfig) {
     const text = String(prompt || "").trim();
     if (!text) return { ok: false, message: "请输入修改描述", config: currentConfig };
 
+    // 1) 网关优先（AI 能力平台化：Key 在服务端，见 docs/design/ai-agent-gateway-design.md）
+    try {
+      if (await gatewayAvailable()) {
+        const data = await invokeAbility("face-refine", { prompt: text, currentConfig });
+        const changes = data && data.changes && typeof data.changes === "object" ? data.changes : null;
+        if (data && data.ok !== false && changes && Object.keys(changes).length) {
+          // 前端本地 PARAM_MAP 做最终 clamp（前端是参数权威）
+          const cfg = clampConfig(currentConfig);
+          let count = 0;
+          for (const [id, raw] of Object.entries(changes)) {
+            const p = PARAM_MAP[id];
+            if (!p) continue;
+            const v = Number(raw);
+            if (!Number.isFinite(v)) continue;
+            cfg.params[id] = Math.min(p.max, Math.max(p.min, Math.round(v)));
+            count++;
+          }
+          if (count) {
+            return { ok: true, source: "gateway", message: data.reply || `已调整 ${count} 项参数`, config: cfg };
+          }
+        }
+        // 网关返回无效结果 → 继续走本地路径
+      }
+    } catch (e) {
+      // 网关不可用/调用失败 → 回退旧路径，永不阻塞业务
+    }
+
+    // 2) 旧直连路径（保留作为回退；阶段 1.5 网关稳定后降级为高级模式）
     if (this.configured) {
       try {
         const data = await this._chat([

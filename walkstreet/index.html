@@ -261,9 +261,12 @@
           <button id="cc-random">随机</button>
           <button id="cc-reset">重置</button>
         </div>
-        <div class="cc-ai-bar">
+        <div class="cc-ai-bar" id="cc-ai-bar">
           <span class="cc-ai-label">AI 捏脸</span>
           <input id="cc-ai-input" maxlength="120" placeholder="描述想要的样貌：大眼睛、瓜子脸、高鼻梁、微笑…" />
+          <button id="cc-ai-attach" title="添加图片（以图捏脸）或 GLB 模型（自定义角色）">⊕</button>
+          <input type="file" id="cc-ai-file" accept="image/png,image/jpeg,image/webp,.glb,.gltf" hidden />
+          <span id="cc-ai-chip" class="cc-ai-chip hidden"></span>
           <button id="cc-ai-go">AI 修改</button>
         </div>
         <div class="cc-commit">
