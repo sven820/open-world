@@ -262,3 +262,91 @@ label.ms3-check small { font-size: 11px; }
   background: #4a3426; color: #e8b39f; font-size: 12px; border-radius: 6px;
   padding: 6px 10px; margin-bottom: 10px;
 }
+
+/* ---------------- 组合模式：拖拽添加资产 ---------------- */
+/* 左侧资产卡片：可拖进画布；＋ = 不拖拽也能加入当前模型 */
+.ms3-card[draggable="true"] { cursor: grab; }
+.ms3-card[draggable="true"]:active { cursor: grabbing; }
+.ms3-card.dragging { opacity: .55; border-color: #3a72b0; }
+.ms3-card-add {
+  align-self: center; flex: none; width: 22px; height: 22px; line-height: 20px;
+  padding: 0; border-radius: 6px; border: 1px solid #343b44; background: #14171a;
+  color: #7fdcff; font-size: 14px; cursor: pointer; opacity: 0; transition: opacity .15s;
+}
+.ms3-card:hover .ms3-card-add { opacity: 1; }
+.ms3-card-add:hover { background: #233b4a; border-color: #3a9fd0; color: #e8f6ff; }
+
+/* 拖到画布上：整块视口给出可放置反馈 */
+.ms3-canvas-wrap.drag-over::after {
+  content: "松手即可加入组合 · 自动吸附模型表面";
+  position: absolute; inset: 54px 12px 40px; z-index: 4;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px dashed #7fdcff; border-radius: 12px;
+  background: rgba(58, 114, 176, .12); color: #b9ecff;
+  font-size: 14px; letter-spacing: .5px; pointer-events: none;
+  box-shadow: inset 0 0 60px rgba(58, 159, 208, .12);
+}
+/* 空白工作台：常驻引导，告诉用户「任意建筑 + 任意广告屏」怎么用 */
+.ms3-drop-hint {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 3; pointer-events: none; text-align: center; line-height: 1.9;
+  padding: 18px 28px; border: 1px dashed #3a4753; border-radius: 12px;
+  background: rgba(20, 24, 29, .55); color: #a9b6c4;
+}
+.ms3-drop-hint[hidden] { display: none; }
+.ms3-drop-hint b { display: block; font-size: 15px; color: #cfd9e5; font-weight: 600; }
+.ms3-drop-hint span { font-size: 11.5px; color: #7d8794; }
+
+/* 右侧「组合部件」面板 */
+.ms3-part-title { border: none; padding-left: 0; }
+.ms3-part-title small {
+  background: #34404d; color: #9fc2e8; border-radius: 8px; padding: 1px 7px; font-size: 11px;
+}
+.ms3-part-list { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 10px; }
+.ms3-part-row {
+  display: flex; align-items: center; gap: 7px; padding: 6px 8px;
+  border: 1px solid #2c323a; border-radius: 7px; background: #191d22;
+  cursor: pointer; font-size: 12px; color: #c2cad4;
+}
+.ms3-part-row:hover { background: #262c33; border-color: #3a4048; }
+.ms3-part-row.active { border-color: #3a9fd0; background: #233442; color: #e8f6ff; }
+.ms3-part-row b { flex: 1; min-width: 0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ms3-part-icon { flex: none; color: #7d8794; font-size: 14px; }
+.ms3-part-icon.screen { color: #7fdcff; }
+.ms3-part-role {
+  flex: none; font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  background: #34404d; color: #9fc2e8;
+}
+.ms3-part-row.active .ms3-part-role { background: #2f5a8a; color: #e8f6ff; }
+.ms3-part-del {
+  flex: none; width: 18px; height: 18px; line-height: 16px; padding: 0;
+  border: 1px solid transparent; border-radius: 5px; background: transparent;
+  color: #7d8794; font-size: 14px; cursor: pointer;
+}
+.ms3-part-del:hover { background: #5a2626; color: #ff9d9d; }
+.ms3-part-empty {
+  padding: 14px 8px; border: 1px dashed #343b44; border-radius: 8px;
+  text-align: center; font-size: 12px; color: #6c7683; line-height: 1.8;
+}
+.ms3-part-empty small { color: #5d6672; font-size: 11px; }
+.ms3-part-editor {
+  border: 1px solid #3a4048; border-radius: 8px; padding: 9px;
+  background: #191d22; margin-bottom: 10px;
+}
+.ms3-part-editor-head { font-size: 12px; color: #9aa5b1; margin-bottom: 8px; }
+.ms3-part-editor-head b { color: #d8dce2; }
+.ms3-part-editor-head span { display: block; font-size: 10.5px; color: #6c7683; margin-top: 2px; }
+.ms3-part-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.ms3-part-grid label {
+  display: flex; align-items: center; gap: 5px; font-size: 11px; color: #8fa0b5;
+}
+.ms3-part-grid input {
+  width: 100%; min-width: 0; box-sizing: border-box; background: #14171a; color: #d8dce2;
+  border: 1px solid #343b44; border-radius: 5px; padding: 4px 6px; font-size: 12px;
+}
+.ms3-part-editor .ms3-btn { font-size: 12px; padding: 5px 8px; }
+.ms3-tree-chip {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 8px;
+  font-size: 10px; background: #34404d; color: #9fc2e8;
+}
+.ms3-tree-chip.screen { background: #1f4657; color: #8fe6ff; }

@@ -43,7 +43,6 @@ import {
 import {
   BB_COLORS, createFootprintBoundary, updateFootprintBoundary, disposeFootprintBoundary,
 } from "./editor3d/billboardBoundary.js";
-import { openBillboardContent } from "./editor3d/billboardContent.js";
 import { listMaterials } from "../world/materials.js";
 import { listAssets, getAsset, getAssetRecordSync, putAsset, inferPlaceSize, createAssetFromTraced } from "../data/assetStore.js";
 import { getAssetTemplateIfReady, warmAssetTemplate, assetInstance, updateAssetAnimations, tracedUnitSize, invalidateAssetTemplate } from "../world/assetMesh.js";
@@ -2590,7 +2589,7 @@ export class MapEditor3d {
           <label class="me-row">Z<input id="ep-bb-lz" class="me-input-wide" type="number" step="0.1" value="${lp[2] || 0}" /></label>
           <label class="me-row">相对朝向(°)<input id="ep-bb-lrot" class="me-input-wide" type="number" step="5" value="${Math.round(((local.rot || 0) * 180 / Math.PI % 360 + 360) % 360)}" /></label>` : ""}
         ${posEl(data.pos[0], data.pos[1])}
-        <button class="me-btn" id="ep-bb-content">编辑显示内容 · ${(p.content && p.content.items && p.content.items.length) || 8} 项</button>
+        <div class="me-hint">内容由后台统一配置 · 屏位 ID：<b>${escHtml(data.id)}</b></div>
         <button class="me-del" id="ep-del">删除</button>`;
       const rebuild = () => {
         this._bbConstraints = null;
@@ -2666,15 +2665,6 @@ export class MapEditor3d {
         const cur = data.local || (data.local = { pos: [0, 0, 0], rot: 0 });
         cur.rot = (((d % 360) + 360) % 360) * Math.PI / 180;
         rebuild(); this._pushUndo("调整广告牌宿主朝向");
-      });
-      el.querySelector("#ep-bb-content").addEventListener("click", () => {
-        openBillboardContent(p.content, (cfg) => {
-          p.content = cfg;
-          this._dirty = true;
-          this._pushUndo("编辑大屏显示内容");
-          this.status(`已更新大屏内容 · ${cfg.items.length} 项 · 保存后进游戏生效`);
-          this._renderProps();
-        });
       });
       el.querySelector("#ep-rot").addEventListener("change", (e) => {
         let d = +e.target.value || 0;

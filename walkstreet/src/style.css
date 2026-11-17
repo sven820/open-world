@@ -424,6 +424,37 @@ kbd {
 .rs-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 #rs-stats { font: 600 10.5px/1.4 var(--cond); letter-spacing: .08em; color: var(--gold); }
 
+/* ---------- 设置面板 tab（画面 / AI） ---------- */
+.set-tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+.set-tab {
+  flex: 1; padding: 10px 4px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; color: var(--muted); font: 700 13px/1 var(--sans);
+  letter-spacing: .1em; cursor: pointer; transition: .15s;
+}
+.set-tab small { margin-left: 6px; font: 600 9px/1 var(--cond); letter-spacing: .16em; opacity: .7; }
+.set-tab:hover { color: var(--text); }
+.set-tab.active { color: var(--text); border-bottom-color: var(--red); background: rgba(224,35,30,.08); }
+.set-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* ---------- AI 设置组件（可复用） ---------- */
+.ai-set-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
+.ai-set-row { display: flex; flex-direction: column; gap: 6px; }
+.ai-set-row label { font: 600 11px/1.5 var(--sans); color: var(--muted); letter-spacing: .02em; }
+.ai-set-row input, .ai-set-row select {
+  width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 3px;
+  background: rgba(255,255,255,.04); color: var(--text); font: 400 12px/1 var(--sans); outline: none;
+}
+.ai-set-row input:focus, .ai-set-row select:focus { border-color: var(--pink); }
+.ai-set-row select { color-scheme: dark; cursor: pointer; }
+.ai-set-row select option { background: #171821; color: #f4f2ee; }
+.ai-set-note { margin: 2px 0; font: 500 10.5px/1.6 var(--sans); color: rgba(244,242,238,.45); }
+.ai-set-status { min-height: 16px; font: 600 10.5px/1.4 var(--sans); color: var(--muted); }
+.ai-set-status.ok { color: var(--gold); }
+.ai-set-status.err { color: #ff8a85; }
+.ai-set-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.ai-set-actions .ai-set-save { border-color: var(--red); background: rgba(224,35,30,.18); color: #ff9b95; }
+.ai-set-actions .ai-set-save:hover { background: rgba(224,35,30,.32); }
+
 /* ---------- billboard content editor ---------- */
 .bbc-overlay { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; background: rgba(4,6,10,.78); backdrop-filter: blur(8px); }
 .bbc-panel { width: min(760px, 94vw); max-height: 88vh; display: flex; flex-direction: column; padding: 20px 22px; border: 1px solid var(--line); border-radius: 6px; background: rgba(10,12,17,.97); box-shadow: 0 30px 80px rgba(0,0,0,.65); }

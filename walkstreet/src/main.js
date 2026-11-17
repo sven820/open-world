@@ -21,6 +21,7 @@ import {
   getRenderSettings, onRenderSettingsChange, MAX_PEDESTRIANS, MAX_VEHICLES,
 } from "./config/renderSettings.js";
 import { RenderSettingsPanel } from "./ui/renderSettingsPanel.js";
+import { CharacterCreator, loadSavedAvatar } from "./creator/index.js";
 
 window.__errs = [];
 window.addEventListener("error", (e) => window.__errs.push(String(e.message) + " @" + (e.filename || "") + ":" + (e.lineno || "")));
@@ -141,6 +142,7 @@ async function buildWorld(mapData, mapId) {
   const player = new Player(engine.scene, engine.camera, city, engine.renderer);
   player.reset();
   await player.ready;
+  await player.setAvatarConfig(loadSavedAvatar());
   const hud = new Hud(city, player, env);
   const mapName = mapData ? mapData.name : "默认街区 · 程序化城市";
   world = { mapId, mapName, city, landmarkGroup, traffic, peds, player, hud, billboards };
@@ -226,15 +228,25 @@ async function boot() {
 
 /* ---------------- UI wiring ---------------- */
 document.getElementById("btn-start").addEventListener("click", startGame);
-document.getElementById("btn-character").addEventListener("click", () => world && world.hud.showNotify("角色：阿杰 · 潮汇坊长大的老街坊，爱逛步行街", 2600));
 
-/* ---------------- 画面设置（渲染性能可调） ---------------- */
+/* ---------------- 捏脸工坊（选择角色入口） ---------------- */
+const creator = new CharacterCreator({
+  onSave: (cfg) => {
+    if (world && world.player) world.player.setAvatarConfig(cfg);
+    if (world && world.hud) world.hud.showNotify(`角色已更新：${cfg.name} · 已进入街区形象`, 2400);
+  },
+});
+window.__creator = creator;
+document.getElementById("btn-character").addEventListener("click", () => creator.open());
+
+/* ---------------- 设置（画面 / AI，供各入口复用） ---------------- */
 let settingsPanel = null;
-function openSettings() {
+function openSettings(tab) {
   if (!settingsPanel) settingsPanel = new RenderSettingsPanel();
-  settingsPanel.open();
+  settingsPanel.open(tab);
 }
-document.getElementById("btn-settings").addEventListener("click", openSettings);
+window.openSettings = openSettings; // 其他功能模块需要配置 AI 时可直接 openSettings("ai")
+document.getElementById("btn-settings").addEventListener("click", () => openSettings("graphics"));
 
 // 行人/车流规模属于"实例数量"，热切换即可，不用重建世界
 onRenderSettingsChange((s) => {

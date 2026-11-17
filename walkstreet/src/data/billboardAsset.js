@@ -87,6 +87,9 @@ export function billboardSpecFromAsset(asset, overrides = null) {
   return {
     mount: b.mount || "standalone",
     w: s.w, h: s.h, y: s.y, arc: s.arc || 0,
+    // 转角屏左右两面可各自设长度；未设时回退到基准屏宽
+    wA: s.wA != null ? s.wA : s.w,
+    wB: s.wB != null ? s.wB : s.w,
     autoSnap: b.autoSnap !== false,
     screenFaces: b.screenFaces || 1,
     ...(overrides || {}),
@@ -106,8 +109,12 @@ export function billboardParamsFor(item, asset) {
       w: o.w != null ? +o.w : spec.w,
       h: o.h != null ? +o.h : spec.h,
       y: o.y != null ? +o.y : spec.y,
+      wA: o.wA != null ? +o.wA : spec.wA,
+      wB: o.wB != null ? +o.wB : spec.wB,
       arc: spec.arc,
       autoSnap: o.autoSnap != null ? o.autoSnap : spec.autoSnap,
+      // 组合挂件：屏作为别的模型的子部件，不生成自带塔体/立柱
+      attached: !!(o.attached || p.attached),
       // 内容配置是独立一层，覆盖在模型规格之上（不写回资产）
       content: p.content || null,
     };

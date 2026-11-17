@@ -132,15 +132,24 @@
   <div id="render-settings" class="hidden">
     <div class="ms-panel rs-panel">
       <div class="ms-head">
-        <h3>画面设置 <small>GRAPHICS</small></h3>
+        <h3>设置 <small>SETTINGS</small></h3>
         <span id="rs-close">✕</span>
       </div>
-      <div class="rs-list" id="rs-list"></div>
-      <div class="rs-foot">
-        <span id="rs-stats">—</span>
-        <button class="bm-btn" id="rs-reset">恢复默认 <span>RESET</span></button>
+      <div class="set-tabs" id="set-tabs">
+        <button class="set-tab active" data-set-tab="graphics">画面设置 <small>GRAPHICS</small></button>
+        <button class="set-tab" data-set-tab="ai">AI 设置 <small>AI MODEL</small></button>
       </div>
-      <p class="ms-note">设置即时生效并自动保存。渲染距离 / 阴影 / 泛光决定显卡负载；行人车流数量决定 CPU 负载。画面卡顿时优先降「渲染分辨率」与「实时阴影」。</p>
+      <div class="set-pane" data-set-pane="graphics">
+        <div class="rs-list" id="rs-list"></div>
+        <div class="rs-foot">
+          <span id="rs-stats">—</span>
+          <button class="bm-btn" id="rs-reset">恢复默认 <span>RESET</span></button>
+        </div>
+        <p class="ms-note">设置即时生效并自动保存。渲染距离 / 阴影 / 泛光决定显卡负载；行人车流数量决定 CPU 负载。画面卡顿时优先降「渲染分辨率」与「实时阴影」。</p>
+      </div>
+      <div class="set-pane hidden" data-set-pane="ai">
+        <div id="ai-settings-panel"></div>
+      </div>
     </div>
   </div>
 
@@ -205,6 +214,88 @@
       <div class="me-props" id="e3-props"></div>
     </div>
     <div class="e3-foot"><span id="e3-status">正在初始化…</span><span>左键 选择/描边/放置 · 右键拖动 旋转视角 · 滚轮 缩放 · 双击 结束描边 · W/E/R 变换模式 · Del 删除</span></div>
+  </div>
+
+  <div id="character-creator" class="hidden">
+    <div class="cc-shell">
+      <div class="cc-head">
+        <div class="cc-title"><h3>捏脸工坊 <small>CHARACTER CREATOR</small></h3></div>
+        <div class="cc-head-note">骨骼捏脸 · 实时预览 · AI 辅助优化</div>
+        <div class="cc-head-actions">
+          <button class="cc-icon-btn" id="cc-image-open">▣ 以图生成</button>
+          <span class="cc-close" id="cc-close" title="关闭">✕</span>
+        </div>
+      </div>
+      <div class="cc-body">
+        <aside class="cc-left">
+          <div class="cc-section">
+            <div class="cc-sec-title">角色基底 <small>BASE MODEL</small></div>
+            <div class="cc-avatar-list" id="cc-avatar-list"></div>
+          </div>
+          <div class="cc-section">
+            <div class="cc-sec-title">脸型预设 <small>PRESETS</small></div>
+            <div class="cc-preset-list" id="cc-preset-list"></div>
+          </div>
+        </aside>
+        <main class="cc-stage">
+          <canvas id="cc-canvas"></canvas>
+          <div class="cc-stage-top"><span id="cc-name-badge">自定义角色</span><span id="cc-status">正在初始化…</span></div>
+          <div class="cc-viewswitch">
+            <button class="active" data-view="front">正面</button>
+            <button data-view="upper">3/4</button>
+            <button data-view="side">侧面</button>
+            <button data-view="back">背面</button>
+          </div>
+          <div class="cc-stage-foot"><span>左键拖动旋转 · 滚轮缩放</span><span id="cc-bone-info">—</span></div>
+          <div class="cc-loading" id="cc-loading">模型加载中…</div>
+        </main>
+        <aside class="cc-right">
+          <div class="cc-tabs" id="cc-tabs"></div>
+          <div class="cc-params" id="cc-params"></div>
+        </aside>
+      </div>
+      <div class="cc-foot">
+        <div class="cc-history">
+          <button id="cc-undo" title="撤销">↶ 撤销</button>
+          <button id="cc-redo" title="重做">↷ 重做</button>
+          <button id="cc-random">随机</button>
+          <button id="cc-reset">重置</button>
+        </div>
+        <div class="cc-ai-bar">
+          <span class="cc-ai-label">AI 捏脸</span>
+          <input id="cc-ai-input" maxlength="120" placeholder="描述想要的样貌：大眼睛、瓜子脸、高鼻梁、微笑…" />
+          <button id="cc-ai-go">AI 修改</button>
+        </div>
+        <div class="cc-commit">
+          <button id="cc-cancel">取消</button>
+          <button id="cc-save" class="primary">保存并应用</button>
+        </div>
+      </div>
+      <div class="cc-toast hidden" id="cc-toast"></div>
+      <div class="cc-modal hidden" id="cc-image-modal">
+        <div class="cc-modal-card cc-image-card">
+          <div class="cc-modal-head"><h4>以图生成角色 <small>IMAGE TO AVATAR</small></h4><span id="cc-image-modal-close">✕</span></div>
+          <div class="cc-image-drop" id="cc-image-drop">
+            <input type="file" id="cc-image-file" accept="image/png,image/jpeg,image/webp" hidden />
+            <div class="cc-image-placeholder" id="cc-image-placeholder">
+              <div class="cc-image-bigicon">▣</div>
+              <b>点击选择 / 拖入 / 粘贴人物照片</b>
+              <small>建议使用正面、光线均匀、无遮挡的人像；图片只用于生成捏脸参数</small>
+            </div>
+            <img id="cc-image-preview" class="hidden" alt="照片预览" />
+          </div>
+          <div class="cc-image-row">
+            <label>补充要求（可选）</label>
+            <input id="cc-image-extra" maxlength="80" placeholder="例如：保持微笑、偏动漫风格、更白皙…" />
+          </div>
+          <div class="cc-image-source" id="cc-image-source">引擎：本地图像分析（在 AI 设置中配置视觉模型可精确匹配五官）</div>
+          <div class="cc-modal-actions">
+            <button id="cc-image-clear">清除照片</button>
+            <button class="primary" id="cc-image-go">生成角色形象</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div id="click-to-play" class="hidden"><div><kbd>点击画面</kbd> 锁定鼠标 · 或左键拖动移动视角 / 右键拖动旋转</div></div>

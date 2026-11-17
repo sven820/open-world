@@ -165,6 +165,37 @@ export async function putGroup(group) {
   return group;
 }
 
+/* ---------------- 组合资产（任意模型 + 任意子部件） ---------------- */
+
+// parts 只存「引用 + 位姿」，不内嵌子模型几何：
+//   { id, assetId, name, pos:[x,y,z], rotY, scale, role, content? }
+// role="billboard" 的部件由 BillboardManager 生成真正能播内容的屏，
+// 其余部件由 assetMesh 模板克隆渲染。这样换一个子资产/改一次规格全城同步生效。
+const partNum = (v, def) => (Number.isFinite(+v) && +v !== 0 ? +v : def);
+export function normalizeParts(parts) {
+  if (!Array.isArray(parts)) return [];
+  return parts.slice(0, 64).filter((p) => p && p.assetId).map((p, i) => ({
+    id: String(p.id || `cp:${i}`),
+    assetId: String(p.assetId),
+    name: String(p.name || "组合部件"),
+    pos: [partNum(p.pos?.[0], 0), partNum(p.pos?.[1], 0), partNum(p.pos?.[2], 0)],
+    rotY: partNum(p.rotY != null ? p.rotY : p.rot, 0),
+    scale: Math.max(0.001, partNum(p.scale, 1)),
+    role: p.role === "billboard" ? "billboard" : "prop",
+    content: p.content || null,
+    // 屏幕规格覆盖：部件可自带宽/高/离地高度/左右屏长（不写死在子资产里）
+    spec: p.spec && typeof p.spec === "object" ? {
+      w: partNum(p.spec.w, 14), h: partNum(p.spec.h, 8), y: partNum(p.spec.y, 9),
+      wA: partNum(p.spec.wA, p.spec.w || 14), wB: partNum(p.spec.wB, p.spec.w || 14),
+      mount: p.spec.mount || undefined,
+    } : null,
+  }));
+}
+
+export function newPartId() {
+  return `cp:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 7)}`;
+}
+
 /* ---------------- 放置尺寸智能推断 ---------------- */
 
 // GLB 的数字没有物理单位：建模按米、厘米、或被缩放 100 倍都很常见。

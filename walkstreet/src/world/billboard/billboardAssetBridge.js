@@ -13,11 +13,13 @@ import * as THREE from "three";
 import { getMount, normalizeSpec, editorScreenMaterial, editorCornerScreenMaterial } from "./mounts.js";
 import { billboardSpecFromAsset, billboardParamsFor } from "../../data/billboardAsset.js";
 
-/** 资产记录 → 可渲染的 Object3D（局部坐标，原点 = 底面中心，pos/rot 归零）。 */
-export function buildBillboardAssetObject(asset, screenMat = null) {
+/** 资产记录 → 可渲染的 Object3D（局部坐标，原点 = 底面中心，pos/rot 归零）。
+ *  opts.attached = 组合挂件模式：只保留屏体，不带塔体/立柱/底座。 */
+export function buildBillboardAssetObject(asset, screenMat = null, opts = {}) {
   if (!asset || !asset.billboard) return null;
   const raw = billboardSpecFromAsset(asset);
-  const spec = normalizeSpec(raw);
+  // opts.spec = 组合部件 / UI 的规格覆盖（宽高、离地、左右屏长）
+  const spec = normalizeSpec({ ...raw, ...(opts.spec || {}), attached: !!opts.attached });
   // 3D 转角一体屏：用跨两面的全景占位画面，配合 split UV 读起来是一整块折角屏
   const sm = screenMat || (spec.mount === "corner3d" ? editorCornerScreenMaterial() : editorScreenMaterial());
   const built = getMount(spec.mount).build(spec, [sm, sm], { pos: [0, 0], rot: 0 });
@@ -54,6 +56,23 @@ export function buildBillboardAssetObject(asset, screenMat = null) {
   root.userData.billboardSpec = { ...spec, autoSnap: raw.autoSnap, screenFaces: raw.screenFaces };
   root.userData.sharedTpl = true; // 模板几何/材质共享，宿主重建时不得 dispose
   return root;
+}
+
+/** 组合资产里的广告屏部件：只显示「纯屏 + 薄边框」的占位节点。
+ *  MOUNTS 的几何原点在地面、屏面中心位于 spec.y；这里把节点下移 spec.y，
+ *  让组合锚点 = 屏心 —— 工坊里拖到墙面哪里，屏就贴在哪里；
+ *  运行时 BillboardManager 用同一个 y 生成真屏（占位节点会被隐藏）。 */
+export function buildCompositeScreenNode(asset, overrideSpec = null) {
+  const node = buildBillboardAssetObject(asset, null, { attached: true, spec: overrideSpec });
+  if (!node) return null;
+  const spec = normalizeSpec({ ...billboardSpecFromAsset(asset), ...(overrideSpec || {}) });
+  node.position.y = -spec.y;
+  // 挂件的朝向完全由组合部件的 rotY 决定；资产里的 poseYaw 只是单独浏览时的展示角，
+  // 保留它会让「自动贴合的转角屏」再转 180° 背对墙面
+  node.rotation.y = 0;
+  node.userData.billboardProxy = true;
+  node.userData.compositeScreenSpec = { y: spec.y, mount: spec.mount };
+  return node;
 }
 
 /** 取 root 下的圆角控制器（工坊直接构建的广告牌模型才有；模板克隆没有） */

@@ -21,6 +21,7 @@ import { CornerArcScreen, clampArcRadius, cornerArcSamples, ARC_R_MAX } from "./
 const HOUSING = 0x262a30;   // 塔体/边框深灰
 const SCREEN_OFFSET = 0.08; // 屏面凸出背板的距离
 const FACADE_STANDOFF = 0.9; // 立面屏屏面离墙距离（避开建筑凸窗/阳台等凸出物）
+const WALL_CLEARANCE = 0.5;  // 挂件屏面离宿主墙面的安装间隙：太贴会与窗框/墙面穿插
 
 const clampN = (v, min, max, def) =>
   (typeof v === "number" && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def);
@@ -68,11 +69,15 @@ export const MOUNTS = {
     build(spec, mats) {
       const screenMat = mats[0];
       const w = spec.w, h = spec.h, y = spec.y;
+      // attached = 作为组合部件挂到别的模型上：只保留屏体，不要底座/立柱
+      const attached = !!spec.attached;
       const bottom = y - h / 2;
       const group = new THREE.Group();
       // 底座 + 立柱
-      group.add(mesh(new THREE.BoxGeometry(2.8, 0.6, 2.0), housingMat(), 0, 0.3, 0));
-      group.add(mesh(new THREE.BoxGeometry(1.2, Math.max(0.5, bottom), 0.9), housingMat(), 0, Math.max(0.5, bottom) / 2, 0));
+      if (!attached) {
+        group.add(mesh(new THREE.BoxGeometry(2.8, 0.6, 2.0), housingMat(), 0, 0.3, 0));
+        group.add(mesh(new THREE.BoxGeometry(1.2, Math.max(0.5, bottom), 0.9), housingMat(), 0, Math.max(0.5, bottom) / 2, 0));
+      }
       // 中空边框（替代实心背板，含顶部檐口亮条）：背面透出屏面内容
       const frameG = frame(w + 0.8, h + 0.7, 0.5, housingMat());
       frameG.position.set(0, y, -0.25);
@@ -87,9 +92,12 @@ export const MOUNTS = {
       back.rotation.y = Math.PI;
       back.castShadow = false;
       group.add(front, back);
-      // 碰撞：立柱 + 底座；屏底 <2.5m 时屏体整块挡人
-      const collider = { x0: -1.6, z0: -1.1, x1: 1.6, z1: 1.1, top: y + h / 2 + 0.4 };
-      if (bottom < 2.5) { collider.x0 = -w / 2 - 0.4; collider.x1 = w / 2 + 0.4; collider.z0 = -0.6; collider.z1 = 0.6; }
+      // 碰撞：立柱 + 底座；屏底 <2.5m 时屏体整块挡人（挂件由宿主建筑负责碰撞）
+      let collider = null;
+      if (!attached) {
+        collider = { x0: -1.6, z0: -1.1, x1: 1.6, z1: 1.1, top: y + h / 2 + 0.4 };
+        if (bottom < 2.5) { collider.x0 = -w / 2 - 0.4; collider.x1 = w / 2 + 0.4; collider.z0 = -0.6; collider.z1 = 0.6; }
+      }
       return { faceGroups: [group], screenMats: [screenMat], collider };
     },
   },
@@ -104,7 +112,8 @@ export const MOUNTS = {
       const group = new THREE.Group();
       // 屏面悬挑在墙外 STANDOFF 处（躲开建筑凸窗/雨棚/空调外机等墙面凸出物，
       // 否则凸出物会把屏面切开 —— 表现为"内容只能看到一部分"）。
-      const screenZ = 0.3 + FACADE_STANDOFF;
+      // 挂件悬在宿主墙外 WALL_CLEARANCE；机箱背板正好落在墙面上，屏面不穿插窗框
+      const screenZ = 0.3 + (spec.attached ? WALL_CLEARANCE + 0.1 : FACADE_STANDOFF);
       // 墙侧只留小安装座 + 细悬臂，不再放贴墙大框：侧面看不会像"第二块屏"
       const armZ = screenZ - 0.28;
       for (const sy of [y + h / 2 - 0.35, y - h / 2 + 0.35]) {
@@ -132,7 +141,8 @@ export const MOUNTS = {
       const front = mesh(new THREE.PlaneGeometry(w, h), screenMat, 0, y, screenZ);
       front.castShadow = false;
       group.add(front);
-      const collider = { x0: -w / 2 - 0.35, z0: -0.1, x1: w / 2 + 0.35, z1: screenZ + 0.1, top: y + h / 2 };
+      const collider = spec.attached ? null
+        : { x0: -w / 2 - 0.35, z0: -0.1, x1: w / 2 + 0.35, z1: screenZ + 0.1, top: y + h / 2 };
       return { faceGroups: [group], screenMats: [screenMat], collider };
     },
   },
@@ -145,25 +155,37 @@ export const MOUNTS = {
       const w = spec.w, h = spec.h, y = spec.y;
       const towerW = w + 1.4;
       const totalH = y + h / 2 + 0.6; // 塔体从地面到屏顶 + 上边框
-      const off = towerW / 2 + SCREEN_OFFSET;
+      // 挂件模式没有塔体：屏面从塔体外侧拉回，并留 WALL_CLEARANCE 安装间隙
+      const off = spec.attached ? SCREEN_OFFSET + WALL_CLEARANCE : towerW / 2 + SCREEN_OFFSET;
       // 两面各自独立成组：每组自带一份塔体 + 檐口，便于运行时注册为两块独立屏
-      const mkFace = (faceMat, rotY, px, pz) => {
+      const mkFace = (faceMat, rotY, px, pz, faceW) => {
         const g = new THREE.Group();
-        g.add(mesh(new THREE.BoxGeometry(towerW, totalH, towerW), housingMat(), 0, totalH / 2, 0));
-        const trim = mesh(new THREE.BoxGeometry(towerW + 0.3, 0.5, towerW + 0.3), trimMat(), 0, totalH + 0.25, 0);
-        trim.castShadow = false;
-        g.add(trim);
-        const face = mesh(new THREE.PlaneGeometry(w, h), faceMat, px, y, pz);
+        // 挂件模式：不再自带黑色塔体，屏面直接贴宿主模型的转角
+        if (!spec.attached) {
+          g.add(mesh(new THREE.BoxGeometry(towerW, totalH, towerW), housingMat(), 0, totalH / 2, 0));
+          const trim = mesh(new THREE.BoxGeometry(towerW + 0.3, 0.5, towerW + 0.3), trimMat(), 0, totalH + 0.25, 0);
+          trim.castShadow = false;
+          g.add(trim);
+        }
+        const face = mesh(new THREE.PlaneGeometry(faceW, h), faceMat, px, y, pz);
         face.rotation.y = rotY;
         face.castShadow = false;
         g.add(face);
+        // 挂件模式没有塔体挡背：单面片背面会被 FrontSide 剔除，必须补一块薄的不透明背板
+        if (spec.attached) {
+          const back = px !== 0
+            ? mesh(new THREE.BoxGeometry(0.16, h + 0.3, faceW + 0.3), backPanelMat(), -off + 0.14, y, 0)
+            : mesh(new THREE.BoxGeometry(faceW + 0.3, h + 0.3, 0.16), backPanelMat(), 0, y, -off + 0.14);
+          back.castShadow = false;
+          g.add(back);
+        }
         return g;
       };
-      // 朝局部 -Z（转角 A 面）与 -X（转角 B 面），各用独立材质
-      const gA = mkFace(mats[0], Math.PI, 0, -off);
-      const gB = mkFace(mats[1] || mats[0], -Math.PI / 2, -off, 0);
+      // 朝局部 -Z（转角 A 面）与 -X（转角 B 面），各用独立材质与长度
+      const gA = mkFace(mats[0], Math.PI, 0, -off, spec.wA || w);
+      const gB = mkFace(mats[1] || mats[0], -Math.PI / 2, -off, 0, spec.wB || w);
       const half = towerW / 2;
-      const collider = { x0: -half, z0: -half, x1: half, z1: half, top: totalH };
+      const collider = spec.attached ? null : { x0: -half, z0: -half, x1: half, z1: half, top: totalH };
       return { faceGroups: [gA, gB], screenMats: [mats[0], mats[1] || mats[0]], collider };
     },
   },
@@ -193,7 +215,7 @@ export const MOUNTS = {
       const towerW = w + 1.4;
       const totalH = y + h / 2 + 0.6;
       const half = towerW / 2;
-      const collider = { x0: -half, z0: -half, x1: half, z1: half, top: totalH };
+      const collider = spec.attached ? null : { x0: -half, z0: -half, x1: half, z1: half, top: totalH };
       return {
         faceGroups: [ctl.group],
         screenMats: [matA, matB],
@@ -229,11 +251,14 @@ export function quadGeom(pa, pb, pc, pd) {
 export function corner3dFaceDefs(spec) {
   const w = spec.w, h = spec.h, y = spec.y;
   const D = (w + 1.4) / 2 + SCREEN_OFFSET;
+  // 挂件屏面已回移并留安装间隙，参考面必须完全跟随几何
+  const sh = spec.attached ? D - WALL_CLEARANCE : 0;
   const y0 = y - h / 2, y1 = y + h / 2;
-  const x1 = -D + w, z1 = -D + w;
+  const wa = spec.wA || w, wb = spec.wB || w;
+  const x1 = -D + wa + sh, z1 = -D + wb + sh, zA = -D + sh, xB = -D + sh;
   return [
-    { i: 0, pa: new THREE.Vector3(x1, y0, -D), pb: new THREE.Vector3(-D, y0, -D), pc: new THREE.Vector3(x1, y1, -D), pd: new THREE.Vector3(-D, y1, -D) },
-    { i: 1, pa: new THREE.Vector3(-D, y0, -D), pb: new THREE.Vector3(-D, y0, z1), pc: new THREE.Vector3(-D, y1, -D), pd: new THREE.Vector3(-D, y1, z1) },
+    { i: 0, pa: new THREE.Vector3(x1, y0, zA), pb: new THREE.Vector3(xB, y0, zA), pc: new THREE.Vector3(x1, y1, zA), pd: new THREE.Vector3(xB, y1, zA) },
+    { i: 1, pa: new THREE.Vector3(xB, y0, zA), pb: new THREE.Vector3(xB, y0, z1), pc: new THREE.Vector3(xB, y1, zA), pd: new THREE.Vector3(xB, y1, z1) },
   ];
 }
 
@@ -274,7 +299,12 @@ export function normalizeSpec(params = {}) {
     w: clampN(params.w, 4, 40, def.w),
     h: clampN(params.h, 2, 30, def.h),
     y: clampN(params.y, 3, 120, def.y),
+    // 转角左右两面各自的长度（立面/独立屏用不到，但保持同一份规格结构）
+    wA: clampN(params.wA != null ? params.wA : params.w, 4, 40, def.w),
+    wB: clampN(params.wB != null ? params.wB : params.w, 4, 40, def.w),
     arc: 0,
+    // 组合挂件：屏作为别的模型的子部件时只保留屏体（无塔体/立柱/底座）
+    attached: !!params.attached,
   };
   // 转角弧度只对 3D转角包柱屏 生效（其它承载形式的转角是两块独立屏，无从圆角）
   if (known === "corner3d") spec.arc = clampArcRadius(spec, clampN(params.arc, 0, ARC_R_MAX, 0));

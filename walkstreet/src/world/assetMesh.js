@@ -13,7 +13,7 @@
 
 import * as THREE from "three";
 import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "./materials.js";
-import { parseGLB } from "../data/assetStore.js"; // 含 DRACOLoader（Draco 压缩 GLB）
+import { parseGLB, getAsset, normalizeParts } from "../data/assetStore.js"; // 含 DRACOLoader（Draco 压缩 GLB）
 
 const _templates = new Map(); // id → THREE.Group（已绑库材质、已对齐 base-center）
 const _boxes = new Map();     // id → THREE.Box3（模板局部包围盒）
@@ -42,6 +42,18 @@ export async function preloadAssetTemplatesFromMap(data) {
   if (!ids.size) return;
   const { getAsset } = await import("../data/assetStore.js");
   const assets = (await Promise.all([...ids].map((id) => getAsset(id)))).filter(Boolean);
+  // 组合资产的子部件也是资产引用：递归把记录填进同步缓存并预热模板。
+  // BillboardManager 构建期同步读 getAssetRecordSync(子屏资产) 才能拿到规格。
+  const queue = assets.slice();
+  while (queue.length) {
+    const a = queue.shift();
+    for (const p of normalizeParts(a && a.parts)) {
+      if (ids.has(p.assetId)) continue;
+      ids.add(p.assetId);
+      const child = await getAsset(p.assetId);
+      if (child) { assets.push(child); queue.push(child); }
+    }
+  }
   await preloadAssetTemplates(assets);
 }
 
@@ -62,6 +74,47 @@ export function getAssetLocalBox(id) {
   return _boxes.get(id) || null;
 }
 
+// 组合部件：按 parts 里的 assetId 引用，把子资产实例挂到「组合容器」上。
+// 容器是零变换的模板根节点：原 GLB/描边模板的贴地偏移留在它的子节点里，
+// 因此 parts.pos 恒以「资产底面中心」为原点 —— 工坊拖放、编辑器幽灵、
+// 运行时 BillboardManager 挂屏三处坐标完全一致。
+// 只存引用不内嵌几何 —— 子资产在工坊里改了，所有组合自动跟着变。
+// billboard 部件在编辑器/工坊显示纯屏占位，运行时由 BillboardManager 换成真屏。
+const _composing = new Set(); // 防 A→B→A 循环引用
+const partsRefs = (asset) => normalizeParts(asset && asset.parts).map((p) => p.assetId);
+async function attachCompositeParts(asset, holder) {
+  const parts = normalizeParts(asset.parts);
+  if (!parts.length || _composing.has(asset.id)) return;
+  _composing.add(asset.id);
+  try {
+    for (const p of parts) {
+      if (p.assetId === asset.id) continue;
+      const child = await getAsset(p.assetId);
+      if (!child) continue;
+      let node = null;
+      if (child.source === "billboard" && child.billboard) {
+        const { buildCompositeScreenNode } = await import("./billboard/billboardAssetBridge.js");
+        node = buildCompositeScreenNode(child, p.spec); // 纯屏 + 规格覆盖 + 屏心对齐
+      } else {
+        await warmAssetTemplate(child);
+        const ct = _templates.get(child.id);
+        if (ct) node = ct.clone();
+      }
+      if (!node) continue;
+      const g = new THREE.Group();
+      g.name = `组合 · ${p.name}`;
+      g.userData.compositePart = { ...p };
+      g.position.set(p.pos[0], p.pos[1], p.pos[2]);
+      g.rotation.y = p.rotY;
+      g.scale.setScalar(p.scale);
+      g.add(node);
+      holder.add(g);
+    }
+  } finally {
+    _composing.delete(asset.id);
+  }
+}
+
 // 预热单个资产（去重）
 export function warmAssetTemplate(asset) {
   if (_templates.has(asset.id)) return Promise.resolve(_templates.get(asset.id));
@@ -79,7 +132,18 @@ export function warmAssetTemplate(asset) {
       } else if (asset.glb) {
         tpl = await buildGLBObject(asset);
       } else {
-        return null;
+        // 空白工作台（source=studio）：只有组合部件时也要能构建
+        if (Array.isArray(asset.parts) && asset.parts.length) tpl = new THREE.Group();
+        else return null;
+      }
+      if (asset.parts && asset.parts.length) {
+        const holder = new THREE.Group();
+        holder.name = "composite-root";
+        holder.userData.compositeHolder = true;
+        holder.userData.compositeRefs = partsRefs(asset); // 子资产改动时级联失效
+        if (tpl.children.length) holder.add(tpl); // 贴地偏移 / poseYaw 留在原模板子节点里
+        await attachCompositeParts(asset, holder);
+        tpl = holder;
       }
       _templates.set(asset.id, tpl);
       _boxes.set(asset.id, new THREE.Box3().setFromObject(tpl));
@@ -100,11 +164,15 @@ export function warmAssetTemplate(asset) {
 // 单位 = 模型本地单位）。position 是父空间量，不受节点自身 scale 缩放 ——
 // 所以缩放必须加在外层 Group 上；若加在内层，缩小模型时贴地偏移保持原值，
 // 模型会飞到天上（本地 211 单位的偏移 × 0.05 缩放场景 = 200m 高空）。
-export function assetInstance(asset, { pos, rot = 0, scale = 1 } = {}) {
+export function assetInstance(asset, { pos, rot = 0, scale = 1, hideBillboardProxies = false } = {}) {
   const tpl = _templates.get(asset.id);
   if (!tpl) return null;
   const inst = tpl.clone(); // 内层：保留贴地偏移，恒为单位缩放
   inst.userData.sharedTpl = true; // 标记：几何/材质与模板缓存共享，宿主重建时不得 dispose
+  // 运行时隐藏组合里的广告牌占位屏：BillboardManager 会在同一位姿生成真屏播内容
+  if (hideBillboardProxies) {
+    inst.traverse((o) => { if (o.userData && o.userData.billboardProxy) o.visible = false; });
+  }
   const root = new THREE.Group(); // 外层：承载放置位姿（pos/rot/scale 绕底面中心）
   root.add(inst);
   const s = scale == null ? 1 : scale;
@@ -170,13 +238,21 @@ export function assetWorldAABB(asset, { pos, rot = 0, scale = 1 } = {}) {
   return { minX, maxX, minZ, maxZ, minY: Math.min(...ys), maxY: Math.max(...ys) };
 }
 
-// 清除某个资产的缓存（Studio 保存后调用，下次重建用新几何）
+// 清除某个资产的缓存（Studio 保存后调用，下次重建用新几何）。
+// 组合资产引用子资产：子资产改了规格/几何，引用它的组合模板也要一起失效，
+// 否则「改一次子模型、所有组合同步更新」要等刷新页面才生效。
 export function invalidateAssetTemplate(id) {
+  const cascade = [];
+  for (const [tid, tpl] of _templates) {
+    const refs = tpl.userData && tpl.userData.compositeRefs;
+    if (tid !== id && refs && refs.includes(id)) cascade.push(tid);
+  }
   _templates.delete(id);
   _boxes.delete(id);
   _loading.delete(id);
   _clips.delete(id);
   _animCfg.delete(id);
+  for (const tid of cascade) invalidateAssetTemplate(tid);
 }
 
 /* ---------------- GLB 资产构建 ---------------- */
@@ -185,12 +261,16 @@ async function buildGLBObject(asset) {
   const buf = await asset.glb.arrayBuffer();
   const gltf = await parseGLB(buf);
   const root = gltf.scene;
+  // 组合资产导出的「底座 GLB」已按资产根（底面中心）坐标系摆好：跳过居中，
+  // 否则 GLB 往返会平移底座，组合部件 parts 的局部坐标就跟工坊拖放位置对不上
+  const preAligned = !!(root.userData && root.userData.compositeBase)
+    || root.children.some((c) => c.userData && c.userData.compositeBase);
   applyMaterialBindings(root, asset.materialBindings || {});
   // 有名材质 → 绑定键 = 材质名；无名（旧版导出）留给 Studio 按序迁移
   root.traverse((o) => {
     if (o.isMesh && o.material.name) o.userData.bindingKey = o.material.name;
   });
-  alignBaseCenter(root);
+  if (!preAligned) alignBaseCenter(root);
   enableShadows(root);
   // 动画：GLB 内建片段（如 LittlestTokyo 的火车环线）随模板缓存，实例化时播放；
   // 播放配置（启用哪些片段/速度）在构建时从资产记录快照，运行时以最小 ref 实例化也能拿到

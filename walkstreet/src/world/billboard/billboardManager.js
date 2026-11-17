@@ -4,8 +4,8 @@ import { buildPlacedBillboard, phaseFor } from "./billboard.js";
 import { normalizeSpec, corner3dWorldFaces, corner3dWorldArcSamples } from "./mounts.js";
 import { defaultContent, normalizeContent, contentKey, scheduleFrom } from "./contentConfig.js";
 import { getRenderSettings } from "../../config/renderSettings.js";
-import { getAssetRecordSync } from "../../data/assetStore.js";
-import { billboardParamsFor } from "../../data/billboardAsset.js";
+import { getAssetRecordSync, normalizeParts } from "../../data/assetStore.js";
+import { billboardParamsFor, billboardSpecFromAsset } from "../../data/billboardAsset.js";
 
 /* ---------------- 广告大屏管理器 ----------------
  * 唯一来源：编辑器手动放置（map.objects 里 type==="billboard"）。
@@ -37,6 +37,24 @@ export class BillboardManager {
     scene.add(this.group);
     this.screens = [];
     this._build(city);
+  }
+
+  /** 完整屏位清单：后台按 id 绑定内容；模型/地图层只定义「屏位」，不提供内容配置。
+   *  包含组合资产 parts 生成的虚拟屏（source=composite），id 稳定（宿主对象 id + 部件 id）。 */
+  getSlotManifest() {
+    return this.screens.map((s, i) => ({
+      id: s.id,
+      name: s.name || `${i + 1} 号屏`,
+      mount: s.mount,
+      w: s.w, h: s.h, y: s.y,
+      x: Math.round(s.x * 10) / 10,
+      z: Math.round(s.z * 10) / 10,
+      rot: Math.round((s.rot || 0) * 100) / 100,
+      assetId: s.assetId || null,
+      hostId: s.hostId || null,
+      source: s.hostId ? "composite" : "map",
+      contentMode: "admin",
+    }));
   }
 
   /** 3D 裸眼上下文：renderer + 主场景（内容层放这里，layer 隔离）+ 两面屏世界坐标四角 */
@@ -175,11 +193,60 @@ export class BillboardManager {
     return { ...item, pos: [Math.round(px * 10) / 10, Math.round(pz * 10) / 10] };
   }
 
+  /** 组合资产里的广告牌部件 → 虚拟 billboard 记录。
+   *  子屏不写进地图 JSON，位姿来自资产 parts；宿主 = 地图里的组合模型实例。
+   *  因此任意建筑模型都能挂任意数量/类型的屏，且改子资产规格全城同步。
+   *  坐标约定：parts.pos 以资产底面中心为原点、部件拖放点 = 屏心；
+   *  _hostTransform 再把宿主的 pos/rot 与放置缩放叠加上去。 */
+  _compositeBillboards(city) {
+    const out = [];
+    for (const o of ((city.data && city.data.objects) || [])) {
+      if (!o || o.type !== "asset" || !o.assetId) continue;
+      const host = getAssetRecordSync(o.assetId);
+      const parts = normalizeParts(host && host.parts);
+      if (!parts.length) continue;
+      const hs = o.scale == null ? 1 : (+o.scale || 1);
+      for (const p of parts) {
+        if (p.role !== "billboard") continue;
+        const child = getAssetRecordSync(p.assetId);
+        if (!child || !child.billboard) continue;
+        const cs = billboardSpecFromAsset(child);
+        const sp = p.spec || {};
+        const k = p.scale || 1;
+        // 部件上直接设置的规格优先；未设置时退回子资产规格 × 部件缩放
+        const w = sp.w || (cs.w || 14) * k;
+        const h = sp.h || (cs.h || 8) * k;
+        const screenY = (sp.y || (p.pos[1] > 0 ? p.pos[1] : (cs.y || 9))) * hs;
+        out.push({
+          id: `${o.id}__${p.id}`,
+          type: "billboard",
+          assetId: p.assetId,
+          hostId: o.id,
+          pos: o.pos || [0, 0],
+          rot: 0,
+          params: {
+            content: p.content || null,
+            // attached：屏作为挂件只留屏体；autoSnap=false 不再找最近的墙
+            override: {
+              autoSnap: false, attached: true,
+              w: w * hs, h: h * hs, y: screenY,
+              wA: (sp.wA || w) * hs, wB: (sp.wB || w) * hs,
+            },
+          },
+          // 挂件朝向完全由 parts.rotY 决定（资产的 poseYaw 只是单独浏览时的展示角）
+          local: { pos: [p.pos[0] * hs, 0, p.pos[2] * hs], rot: p.rotY },
+        });
+      }
+    }
+    return out;
+  }
+
   _build(city) {
     // 只认地图里手动放置的记录；没有就一块都不建（默认街区亦然）。
     // 新记录只存 { assetId, contentRef }，几何规格从资产库同步缓存读（预热阶段已填）；
     // 老记录内联 params 仍然兼容 —— 存量地图不会失效。
-    const placed = ((city.data && city.data.objects) || []).filter((o) => o && o.type === "billboard");
+    const placed = ((city.data && city.data.objects) || []).filter((o) => o && o.type === "billboard")
+      .concat(this._compositeBillboards(city));
     if (!placed.length) return;
     // 立面屏贴墙；落地屏用建城阶段算好的路缘落点（建筑空地已预留）。
     // placements 缺失时（老地图 / 非 City 调用）退回旧的「撞楼推开」兜底。

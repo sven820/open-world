@@ -23,6 +23,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
 const SCREEN_OFFSET = 0.08;   // 屏面凸出塔体（与 mounts.js 同名常量同值）
 const TOWER_EXTRA = 1.4;      // 塔体宽 = 屏宽 + 1.4（与 mounts.js 一致）
+const WALL_CLEARANCE = 0.5;   // 挂件屏面离宿主墙面的安装间隙（与 mounts.js 同值）
 const ARC_SEG = 24;           // 单面弧段细分段数（两面合计 90°，共 48 段）
 const PLANE_SEG = 16;         // 单面平面段细分段数（实验台 NA/NB=16 同款）
 const NEAR = 0.12, FAR = 400; // 与 content3d.js 离轴相机同一组远近平面
@@ -65,7 +66,7 @@ function arcPolys(spec, R) {
   const D = cornerD(spec);
   const ox = -D + R, oz = -D + R;
   const pt = (t) => ({ x: ox + R * Math.cos(t), z: oz + R * Math.sin(t) });
-  const x1 = -D + spec.w, z1 = -D + spec.w;
+  const x1 = -D + (spec.wA || spec.w), z1 = -D + (spec.wB || spec.w);
   const A = [], B = [];
   /* 平面段也必须细分：离轴 UV 是投影变换，屏面渲染时 GPU 按主相机 w 做透视
    * 校正插值，一条横跨 11 m 的大条带会把圆环 / 球网折成波浪。拆成等长小条带
@@ -89,10 +90,13 @@ export function cornerArcSamples(spec, radius) {
   if (!R) return null;
   const y0 = spec.y - spec.h / 2, y1 = spec.y + spec.h / 2;
   const { A, B } = arcPolys(spec, R);
+  // 挂件模式：屏面几何会整体平移到转角棱线（资产锚点），采样点必须同步，
+  // 否则 content3d 的取景框跟实际屏面对不上
+  const sh = spec.attached ? cornerD(spec) - WALL_CLEARANCE : 0;
   const pack = (poly) => {
     const out = [];
     for (const p of poly) {
-      out.push(new THREE.Vector3(p.x, y0, p.z), new THREE.Vector3(p.x, y1, p.z));
+      out.push(new THREE.Vector3(p.x + sh, y0, p.z + sh), new THREE.Vector3(p.x + sh, y1, p.z + sh));
     }
     return out;
   };
@@ -110,7 +114,11 @@ export class CornerArcScreen {
    *   corner3dFaceDefs(spec) 的局部四角（未含 pos/rot），离轴取景的参考平面。
    */
   constructor(spec, mats, opts = {}) {
-    this.spec = { w: spec.w, h: spec.h, y: spec.y };
+    this.spec = { w: spec.w, h: spec.h, y: spec.y, wA: spec.wA || spec.w, wB: spec.wB || spec.w };
+    this.attached = !!spec.attached; // 组合挂件：不建自带塔体，屏面直接贴宿主楼角
+    // 有塔体时屏面在塔体外侧 D 处；挂件没有塔体，把整块屏拉回资产锚点（转角棱线），
+    // 否则自动贴墙后屏还悬在墙外 D≈屏宽/2 的地方
+    this.shift = this.attached ? cornerD(this.spec) - WALL_CLEARANCE : 0;
     this.mats = [mats[0], mats[1] || mats[0]];
     const pos = opts.pos || [0, 0];
     this.pos = [pos[0] || 0, pos[1] || 0];
@@ -209,6 +217,10 @@ export class CornerArcScreen {
     this._disposeBuilt();
     if (radius === 0) this._buildSharp();
     else this._buildArc(radius);
+    if (this.shift) {
+      for (const rec of this._records) this._shiftGeom(rec.geom);
+      for (const m of this._built) if (m.geometry) this._shiftGeom(m.geometry);
+    }
     this._writeUv();
   }
 
@@ -233,35 +245,49 @@ export class CornerArcScreen {
     return m;
   }
 
+  /** 挂件：几何顶点整体回移到转角棱线，UV 与投影矩阵不受平移影响 */
+  _shiftGeom(geom) {
+    const pos = geom.attributes.position;
+    if (!pos) return;
+    for (let i = 0; i < pos.count; i++) {
+      pos.setXYZ(i, pos.getX(i) + this.shift, pos.getY(i), pos.getZ(i) + this.shift);
+    }
+    pos.needsUpdate = true;
+    if (geom.computeBoundingSphere) geom.computeBoundingSphere();
+  }
+
   /** 直角路径：与移植前 mounts.js 的 corner3d 逐项一致（方盒塔体 + 檐口 + 两块面片） */
   _buildSharp() {
     const { w, h, y } = this.spec;
     const towerW = w + TOWER_EXTRA;
     const totalH = y + h / 2 + 0.6;
-    this._housing = housingMat();
-    this._trimMat = trimMat();
+    if (!this.attached) {
+      this._housing = housingMat();
+      this._trimMat = trimMat();
 
-    const box = new THREE.Mesh(new THREE.BoxGeometry(towerW, totalH, towerW), this._housing);
-    box.name = "corner3d-housing";
-    box.userData.bindingKey = "housing";
-    box.position.set(0, totalH / 2, 0);
-    box.castShadow = true; box.receiveShadow = true;
-    this._addBuilt(box);
+      const box = new THREE.Mesh(new THREE.BoxGeometry(towerW, totalH, towerW), this._housing);
+      box.name = "corner3d-housing";
+      box.userData.bindingKey = "housing";
+      box.position.set(0, totalH / 2, 0);
+      box.castShadow = true; box.receiveShadow = true;
+      this._addBuilt(box);
 
-    const trim = new THREE.Mesh(new THREE.BoxGeometry(towerW + 0.3, 0.5, towerW + 0.3), this._trimMat);
-    trim.name = "corner3d-trim";
-    trim.userData.bindingKey = "trim";
-    trim.position.set(0, totalH + 0.25, 0);
-    trim.castShadow = false; trim.receiveShadow = true;
-    this._addBuilt(trim);
+      const trim = new THREE.Mesh(new THREE.BoxGeometry(towerW + 0.3, 0.5, towerW + 0.3), this._trimMat);
+      trim.name = "corner3d-trim";
+      trim.userData.bindingKey = "trim";
+      trim.position.set(0, totalH + 0.25, 0);
+      trim.castShadow = false; trim.receiveShadow = true;
+      this._addBuilt(trim);
+    }
 
     const D = cornerD(this.spec);
     const y0 = y - h / 2, y1 = y + h / 2;
-    const x1 = -D + w;
+    const wa = this.spec.wA || w, wb = this.spec.wB || w;
+    const x1 = -D + wa, z1 = -D + wb;
     // A 面朝 -Z（右缘 = 转角棱线）、B 面朝 -X（左缘 = 转角棱线），两面共享棱线 (-D,-D)
     const quads = [
       { face: 0, pa: [x1, -D], pb: [-D, -D] },
-      { face: 1, pa: [-D, -D], pb: [-D, x1] },
+      { face: 1, pa: [-D, -D], pb: [-D, z1] },
     ];
     for (const q of quads) {
       // 直角面片横跨整面，必须细分：离轴 UV 是投影变换，单个大四边形会被
@@ -273,13 +299,17 @@ export class CornerArcScreen {
       mesh.userData.bindingKey = "screen";
       mesh.castShadow = false;
       this.group.add(mesh);
+      if (this.attached) this._addAttachedBacking(geom);
       const attr = geom.attributes.uv;
       const { up, vp } = geom.userData, n = up.length;
       const full = new Float32Array(n * 2), plane = new Float32Array(n * 2);
-      const off = q.face === 0 ? 0 : 0.5;
+      // 整屏平铺时两面按各自长度分配 UV，左右屏长度不同也不会把画面拉伸
+      const fa = wa / (wa + wb);
+      const off = q.face === 0 ? 0 : fa;
+      const span = q.face === 0 ? fa : 1 - fa;
       for (let i = 0; i < n; i++) {
         full[i * 2] = up[i]; full[i * 2 + 1] = vp[i];
-        plane[i * 2] = off + up[i] * 0.5; plane[i * 2 + 1] = vp[i];
+        plane[i * 2] = off + up[i] * span; plane[i * 2 + 1] = vp[i];
       }
       this._records.push({
         mesh, geom, face: q.face, attr,
@@ -299,7 +329,7 @@ export class CornerArcScreen {
 
     this._buildFaceStrips(0, A, y0, y1);
     this._buildFaceStrips(1, B, y0, y1);
-    this._buildRoundedTower(half, D, R, totalH);
+    if (!this.attached) this._buildRoundedTower(half, D, R, totalH);
   }
 
   _buildFaceStrips(faceIndex, poly, y0, y1) {
@@ -309,7 +339,11 @@ export class CornerArcScreen {
       s.push(s[i - 1] + Math.hypot(poly[i].x - poly[i - 1].x, poly[i].z - poly[i - 1].z));
     }
     const total = s[s.length - 1] || 1;
-    const off = faceIndex === 0 ? 0 : 0.5;   // 整屏平面：A 取画布左半、B 取右半
+    // 整屏平铺：A/B 按各自长度分配画布，左右屏不等长时画面不变形
+    const wa = this.spec.wA || this.spec.w, wb = this.spec.wB || this.spec.w;
+    const fa = wa / (wa + wb);
+    const off = faceIndex === 0 ? 0 : fa;
+    const span = faceIndex === 0 ? fa : 1 - fa;
     const geos = [], ups = [], vps = [], fulls = [], planes = [];
 
     for (let i = 0; i < poly.length - 1; i++) {
@@ -321,7 +355,7 @@ export class CornerArcScreen {
       for (let k = 0; k < n; k++) {
         const u = u0 + (u1 - u0) * up[k];
         full[k * 2] = u; full[k * 2 + 1] = vp[k];
-        plane[k * 2] = off + u * 0.5; plane[k * 2 + 1] = vp[k];
+        plane[k * 2] = off + u * span; plane[k * 2 + 1] = vp[k];
       }
       geos.push(geom); ups.push(up); vps.push(vp); fulls.push(full); planes.push(plane);
     }
@@ -348,7 +382,32 @@ export class CornerArcScreen {
     mesh.userData.bindingKey = "screen";
     mesh.castShadow = false;
     this.group.add(mesh);
+    if (this.attached) this._addAttachedBacking(geom);
     this._records.push({ mesh, geom, face, attr: geom.attributes.uv, full, plane, proj: full.slice() });
+  }
+
+  /** 挂件模式的薄背板：把屏面几何沿自身顶点法线往里推 0.16m，
+   *  得到一层贴着屏面的不透明壳 —— 背面不再看穿，但不会像塔体那样鼓出一大块。
+   *  front 面片仍走 FrontSide 显示内容，背板双面渲染挡住背侧视线。 */
+  _addAttachedBacking(screenGeom) {
+    const geom = screenGeom.clone();
+    const pos = geom.attributes.position, nor = geom.attributes.normal;
+    if (!nor) { geom.dispose(); return; }
+    for (let i = 0; i < pos.count; i++) {
+      pos.setXYZ(i, pos.getX(i) - nor.getX(i) * 0.16, pos.getY(i), pos.getZ(i) - nor.getZ(i) * 0.16);
+    }
+    pos.needsUpdate = true;
+    if (!this._housing) {
+      // 与立面屏背板同色：恒定深灰蓝，不受夜间光照影响变纯黑
+      this._housing = new THREE.MeshBasicMaterial({
+        color: 0x3b4453, toneMapped: false, side: THREE.DoubleSide,
+      });
+    }
+    const back = new THREE.Mesh(geom, this._housing);
+    back.name = "corner3d-attached-backing";
+    back.castShadow = true;
+    back.receiveShadow = true;
+    this._addBuilt(back);
   }
 
   /** 圆角塔体：屏面折线沿法线内缩 SCREEN_OFFSET 后的轮廓沿 Y 挤出 */

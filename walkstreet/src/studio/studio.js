@@ -10,12 +10,13 @@ import {
   listAssets, getAsset, putAsset, deleteAsset,
   listGroups, putGroup,
   importAssetFromGLB, exportAssetGLB, exportObjectGLB, renderThumb, saveAssetThumb,
-  isMemoryOnly,
+  isMemoryOnly, normalizeParts, newPartId,
 } from "../data/assetStore.js";
 import { listMaterials, getMaterial } from "../world/materials.js";
-import { getAssetTemplate, invalidateAssetTemplate, updateAssetAnimations, playAssetClips, stopAssetMixer, getAssetClipNames } from "../world/assetMesh.js";
+import { getAssetTemplate, invalidateAssetTemplate, updateAssetAnimations, playAssetClips, stopAssetMixer, getAssetClipNames, buildTracedObject } from "../world/assetMesh.js";
 import { ensureBillboardAssets, BILLBOARD_TEMPLATES } from "../data/billboardAsset.js";
-import { buildBillboardAssetObject, getCornerArc } from "../world/billboard/billboardAssetBridge.js";
+import { buildBillboardAssetObject, buildCompositeScreenNode, getCornerArc } from "../world/billboard/billboardAssetBridge.js";
+import { analyzeSurfaces, fitScreenToModel, refineFitOnModel } from "./surfaceFit.js";
 import "./studio.css";
 
 export class ModelStudio {
@@ -26,6 +27,8 @@ export class ModelStudio {
     this.workspace = null; // { asset, root, bindings, geometryDirty, isNew }
     this.sel = null;       // 当前选中的 Mesh
     this._previewMode = "day"; // 视口预览模式：day / night（昼/夜光照预设）
+    this._autoFit = true;      // 广告屏拖入时自动找单面墙 / L 形转角并适配尺寸
+    this._surfacesCache = null;
   }
 
   /* ---------------- 生命周期 ---------------- */
@@ -36,6 +39,7 @@ export class ModelStudio {
     this._wireKeys();
     await ensureBillboardAssets(); // 首次进工坊自动播种四种广告牌模型资产
     await this._refreshAssetList();
+    this._updateDropHint();
     if (isMemoryOnly()) this._setStatus("注意：IndexedDB 不可用，资产仅保存在内存中（刷新即丢）");
     if (this.opts.initialAssetId) {
       const a = await getAsset(this.opts.initialAssetId);
@@ -108,6 +112,10 @@ export class ModelStudio {
           </div>
         </div>
         <div class="ms3-sel-label" id="ms3-sel-label"></div>
+        <div class="ms3-drop-hint" id="ms3-drop-hint" hidden>
+          <b>把左侧模型拖到这里</b>
+          <span>打开任意建筑模型，再把广告屏资产拖进画布即可自由组合<br>拖到模型表面会自动贴墙，也可用右侧面板精调位姿</span>
+        </div>
         <div class="ms3-status" id="ms3-status">左键旋转视角 · 滚轮缩放 · 右键平移 · 点选部件编辑（青色框 = 当前部件）</div>
       </div>
       <div class="ms3-side">
@@ -192,7 +200,12 @@ export class ModelStudio {
     tc.addEventListener("mouseUp", () => {
       orbit.enabled = true;
       this._endGizmoDrag();
-      this._geometryDirty = true;
+      // 拖的是组合部件：只回写 parts 位姿，底座几何没变，不用重导 GLB
+      if (this.sel && this.sel.userData && this.sel.userData.compositePart) this._syncCompositeParts();
+      else if (this.workspace) {
+        this.workspace.geometryDirty = true;
+        this._surfacesCache = null; // 底座几何变了，立面候选要重算
+      }
       this._renderProps();
     });
     scene.add(tc.getHelper());
@@ -262,6 +275,45 @@ export class ModelStudio {
     this._renderTree();
   }
 
+  /** 广告牌资产自身的规格编辑（与组合部件同一套字段） */
+  _billboardAssetSpecHtml(a) {
+    const b = a.billboard || {};
+    const s = b.spec || {};
+    const w = +s.w || 14, h = +s.h || 8, y = +s.y || 9;
+    const isCorner = b.mount === "corner" || b.mount === "corner3d";
+    const label = { standalone: "独立广告牌", facade: "建筑立面屏", corner: "转角包柱屏", corner3d: "3D 转角包柱屏" }[b.mount] || b.mount || "?";
+    const field = (id, labelText, value, min, max, step) =>
+      `<label>${labelText}(m) <input id="ba-${id}" type="number" step="${step}" min="${min}" max="${max}" value="${+(+value).toFixed(2)}" /></label>`;
+    return `<div class="ms3-part-editor">
+      <div class="ms3-part-editor-head">屏体规格 <span>${esc(label)}</span></div>
+      <div class="ms3-part-grid">
+        ${field("w", "屏宽", w, 4, 40, 0.1)}
+        ${field("h", "屏高", h, 2, 30, 0.1)}
+        ${isCorner ? `${field("wa", "左屏长", s.wA || w, 4, 40, 0.1)}${field("wb", "右屏长", s.wB || w, 4, 40, 0.1)}` : ""}
+        ${field("y", "离地高度", y, 3, 120, 0.5)}
+      </div>
+      <div class="ms3-hint">${isCorner ? "左右屏长分别控制两面屏；" : ""}改动即时重建预览，点「保存资产」后写入模型，引用它的组合同步更新。</div>
+    </div>`;
+  }
+
+  /** 广告牌资产改规格：替换工作台底座节点（保留已挂的组合部件），标记待保存 */
+  _setBillboardSpec(key, value) {
+    const a = this.workspace && this.workspace.asset;
+    if (!a || !a.billboard) return;
+    a.billboard.spec = { ...(a.billboard.spec || {}), [key]: value };
+    const holder = this.workspace.root.children.find((c) => c.userData && c.userData.compositeHolder) || this.workspace.root;
+    const oldBase = holder.children.find((c) => !(c.userData && c.userData.compositePart));
+    const fresh = buildBillboardAssetObject(a);
+    if (!fresh) return;
+    if (oldBase) holder.remove(oldBase);
+    holder.add(fresh);
+    this.workspace.geometryDirty = true;
+    invalidateAssetTemplate(a.id);
+    this._applyNightEmissive();
+    this._renderTree();
+    this._setStatus(`屏体规格已改（${key}=${value}）· 画布实时预览，保存资产后写入模型`);
+  }
+
   /** 当前视口机位（相机相对 orbit 目标的方向），保存时给缩略图用 */
   _thumbDirection() {
     const t = this._three;
@@ -326,15 +378,36 @@ export class ModelStudio {
     const makeCard = (a, parent) => {
       const card = document.createElement("div");
       card.className = "ms3-card" + (this.workspace && this.workspace.asset.id === a.id ? " active" : "");
-      const srcZh = { glb: "GLB", traced: "描边", studio: "自建" }[a.source] || a.source;
+      // 组合模式：左侧资产可拖进画布作为子部件（引用资产 ID，不复制几何）
+      card.draggable = true;
+      card.title = "单击打开模型 · 拖到画布 / 点 ＋ 加入当前模型的组合";
+      card.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/x-model-asset", a.id);
+        e.dataTransfer.effectAllowed = "copy";
+        this._dragAssetId = a.id;
+        card.classList.add("dragging");
+        this._setStatus(`把「${a.name || "未命名"}」拖到画布 · 松手即加入组合（吸附模型表面）`);
+      });
+      card.addEventListener("dragend", () => {
+        this._dragAssetId = null;
+        card.classList.remove("dragging");
+        this._el.querySelector(".ms3-canvas-wrap")?.classList.remove("drag-over");
+      });
+      const srcZh = { glb: "GLB", traced: "描边", studio: "自建", billboard: "广告屏" }[a.source] || a.source;
       card.innerHTML = `
         ${a.thumb ? `<img src="${this._thumbUrls[a.id] || (this._thumbUrls[a.id] = URL.createObjectURL(a.thumb))}" />` : `<img src="" style="opacity:.2" />`}
         <div class="ms3-card-info"><b>${esc(a.name || "未命名")}</b>
-        <small>${srcZh}${a.meshCount ? " · " + a.meshCount + " mesh" : ""}</small></div>
+        <small>${srcZh}${a.meshCount ? " · " + a.meshCount + " mesh" : ""}${a.composite ? " · 组合" : ""}</small></div>
+        <button class="ms3-card-add" title="加入当前模型的组合（也可直接拖到画布）">＋</button>
         <button class="ms3-card-del" title="删除资产">×</button>`;
       card.addEventListener("click", async () => {
         const fresh = await getAsset(a.id);
         if (fresh) await this._loadAsset(fresh);
+      });
+      card.querySelector(".ms3-card-add").addEventListener("click", async (e) => {
+        e.stopPropagation(); // 别触发卡片载入
+        const fresh = await getAsset(a.id);
+        if (fresh) await this._addAssetToCanvas(fresh);
       });
       card.querySelector(".ms3-card-del").addEventListener("click", (e) => {
         e.stopPropagation(); // 别触发卡片载入
@@ -489,10 +562,13 @@ export class ModelStudio {
       // 描边资产：标记绑定键（wall/roof），供材质绑定 UI 与保存回写用
       if (asset.source === "traced") {
         inst.traverse((o) => {
-          if (o.isMesh) o.userData.bindingKey = isRoofMesh(o) ? "roof" : "wall";
+          if (o.isMesh && !isInsideCompositePart(o)) o.userData.bindingKey = isRoofMesh(o) ? "roof" : "wall";
         });
       }
       root.add(inst);
+      // 组合里的广告屏部件：模板 clone 会丢掉 poseYaw 欧拉角（π→0）与圆角控制器，
+      // 屏面会转到背面。按子资产重建纯屏占位，保证工坊里所见即所得。
+      await this._refreshCompositeScreens(root, normalizeParts(asset.parts));
       // GLB 内建动画（如小火车）在工作台同步演示；配置随资产记录（勾选片段/倍速）
       this._clipNames = getAssetClipNames(asset.id);
       this._wsMixer = playAssetClips(asset.id, root, asset.animation);
@@ -507,7 +583,9 @@ export class ModelStudio {
       // 逐个迁回（本工作台导出的 mesh 顺序 = 绑定键插入顺序，可靠对应），
       // 保存时材质名会随重导出写回 GLB，自此往返闭环
       const unnamed = [];
-      root.traverse((o) => { if (o.isMesh && !o.userData.bindingKey) unnamed.push(o); });
+      root.traverse((o) => {
+        if (o.isMesh && !o.userData.bindingKey && !isInsideCompositePart(o)) unnamed.push(o);
+      });
       if (unnamed.length) {
         const entries = Object.entries(bindings);
         unnamed.forEach((mesh, i) => {
@@ -530,8 +608,15 @@ export class ModelStudio {
         // 不能用 tpl.clone() 的 rotation：three 的 clone 会把 π 欧拉角丢成 ~0，
         // 广告面就转到背面去了。fresh 由桥接产物构建，poseYaw 由资产数据直接写入。
         const inner = root.children[0];
-        if (inner) root.remove(inner);
-        root.add(fresh);
+        if (inner && inner.userData && inner.userData.compositeHolder) {
+          // 组合资产：保留容器（里面还有挂上去的部件），只换掉底座节点
+          const base = inner.children.find((c) => !(c.userData && c.userData.compositePart));
+          if (base) inner.remove(base);
+          inner.add(fresh);
+        } else {
+          if (inner) root.remove(inner);
+          root.add(fresh);
+        }
       }
     }
     this.workspace = {
@@ -595,8 +680,17 @@ export class ModelStudio {
       collider: { mode: "aabb" },
       unitSize: { x: t.mount === "corner" || t.mount === "corner3d" ? t.spec.w + 1.4 : t.spec.w + 0.8, y: t.spec.y + t.spec.h / 2 + 0.6, z: 2 },
     };
-    const root = buildBillboardAssetObject(asset);
-    if (!root) return;
+    const base = buildBillboardAssetObject(asset);
+    if (!base) return;
+    // 与组合资产模板同构：零变换工作台根 → 组合容器（底座与拖入的部件都是它的子节点），
+    // 这样带 poseYaw 的屏体不会把组合部件的坐标系一起转掉
+    const root = new THREE.Group();
+    root.name = "asset-root";
+    const holder = new THREE.Group();
+    holder.name = "composite-root";
+    holder.userData.compositeHolder = true;
+    holder.add(base);
+    root.add(holder);
     this.workspace = { asset, root, bindings: { screen: "" }, geometryDirty: false, isNew: true };
     this._workspaceRoot.add(root);
     this._renderProps();
@@ -611,6 +705,7 @@ export class ModelStudio {
     this._clipNames = [];
     this._workspaceRoot.clear();
     this.workspace = null;
+    this._surfacesCache = null;
     this._renderProps();
   }
 
@@ -640,6 +735,9 @@ export class ModelStudio {
   /* ---------------- 选择 / 变换 ---------------- */
 
   _select(obj) {
+    // 组合部件内部的网格一律归到整个组合组：Gizmo / 删除 / 右侧面板都以整块部件
+    // 为单位，也避免误改子资产模板的共享材质
+    if (obj) obj = compositeRootOf(obj) || obj;
     this.sel = obj || null;
     const tc = this._three.tc;
     tc.detach();
@@ -776,6 +874,255 @@ export class ModelStudio {
       const hit = hits.find((h) => h.object.isMesh);
       this._select(hit ? hit.object : null);
     });
+
+    // 组合模式：把左侧资产拖进画布成为子部件。
+    // 落点优先吸附到已有模型表面（贴墙挂屏），没命中就落在地面网格。
+    const wrap = this._el.querySelector(".ms3-canvas-wrap");
+    wrap.addEventListener("dragover", (e) => {
+      if (!this._dragAssetId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      wrap.classList.add("drag-over");
+    });
+    wrap.addEventListener("dragleave", (e) => {
+      if (e.target === wrap || !wrap.contains(e.relatedTarget)) wrap.classList.remove("drag-over");
+    });
+    wrap.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      wrap.classList.remove("drag-over");
+      const id = e.dataTransfer.getData("text/x-model-asset") || this._dragAssetId;
+      this._dragAssetId = null;
+      if (!id) return;
+      const child = await getAsset(id);
+      if (!child) { this._setStatus("找不到该资产"); return; }
+      if (!this.workspace) this._newWorkspace("custom");
+      const { point, rotY } = this._pickDropPoint(e.clientX, e.clientY);
+      await this._addCompositePart(child, point, rotY);
+    });
+  }
+
+  /** 屏幕坐标 → 画布落点：优先吸附已有模型表面（贴墙挂屏），否则落在地面。
+   *  忽略组合部件自己的占位屏，往已有屏附近拖时仍然吸到它后面的墙。 */
+  _pickDropPoint(clientX, clientY) {
+    const rect = this._three.renderer.domElement.getBoundingClientRect();
+    const rc = new THREE.Raycaster();
+    rc.setFromCamera(new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    ), this._three.camera);
+    let point = null, rotY = 0;
+    const targets = this._workspaceRoot.children.filter((o) => !isInsideCompositePart(o));
+    const hits = rc.intersectObjects(targets, true)
+      .filter((h) => h.object.isMesh && !isInsideCompositePart(h.object));
+    if (hits.length) {
+      const h = hits[0];
+      point = h.point.clone();
+      const n = h.face ? h.face.normal.clone().transformDirection(h.object.matrixWorld) : null;
+      if (n && Math.abs(n.y) < 0.7) {
+        rotY = Math.atan2(n.x, n.z);       // 屏面 +Z 对齐墙面外法线
+        point.addScaledVector(n, 0.12);    // 只留一点避免 Z-fighting，不悬在墙外
+      }
+    }
+    if (!point) {
+      const p = new THREE.Vector3();
+      if (rc.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), p)) point = p;
+    }
+    return { point: point || new THREE.Vector3(0, 0, 0), rotY };
+  }
+
+  /** 卡片上的「＋」：不拖拽也能加入，落点取当前视口中心 */
+  async _addAssetToCanvas(child) {
+    if (!child) return;
+    if (!this.workspace) this._newWorkspace("custom");
+    const rect = this._three.renderer.domElement.getBoundingClientRect();
+    const { point, rotY } = this._pickDropPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    await this._addCompositePart(child, point, rotY, false); // 点 ＋ 时选面积最大的面
+  }
+
+  /** 对已选中的广告屏部件重新找面适配（改了模型 / 想换一面时用） */
+  async _refitSelected() {
+    const sel = this.sel;
+    if (!sel || !sel.userData || !sel.userData.compositePart || sel.userData.compositePart.role !== "billboard") return;
+    const d = sel.userData.compositePart;
+    const child = await getAsset(d.assetId);
+    if (!child || !child.billboard) { this._setStatus("找不到该广告屏资产"); return; }
+    if (!this._surfacesCache) this._surfacesCache = analyzeSurfaces(this.workspace.root);
+    let fit = fitScreenToModel(this._surfacesCache, child, sel.position.clone());
+    if (!fit) { this._setStatus("当前模型上没找到合适的单面墙或转角面"); return; }
+    // 分析结果再对着渲染出来的模型实测一遍，屏不会伸到墙面以外
+    fit = refineFitOnModel(this.workspace.root, fit, child, sel.position.clone());
+    const local = this._partsContainer().worldToLocal(fit.point.clone());
+    sel.position.copy(local);
+    sel.rotation.y = fit.rotY;
+    sel.scale.setScalar(1); // 规格已含最终尺寸
+    d.spec = { ...(fit.spec || d.spec), mount: child.billboard.mount };
+    const fresh = buildCompositeScreenNode(child, d.spec);
+    if (fresh) { for (const c of sel.children.slice()) sel.remove(c); sel.add(fresh); }
+    this._syncCompositeParts();
+    this._renderProps();
+    this._setStatus(`已按落点重新适配到${fit.surface.type === "corner" ? "L 形转角" : "单面墙"} · 屏 ${d.spec.w}×${d.spec.h}m · 离地 ${d.spec.y}m`);
+  }
+
+  /** 屏幕规格改了：按新规格重建占位屏，离地高度同步到部件锚点 */
+  async _rebuildCompositeScreen(sel) {
+    const d = sel && sel.userData && sel.userData.compositePart;
+    if (!d || !d.spec) return;
+    // 左右屏长不能超过所挂墙面的可用长度：超了自动收缩到与墙等宽
+    let wallNote = "";
+    if (d.spec.mount === "corner" || d.spec.mount === "corner3d") {
+      if (!this._surfacesCache) this._surfacesCache = analyzeSurfaces(this.workspace.root);
+      const near = this._surfacesCache.corners.slice()
+        .sort((a, b) => a.center.distanceToSquared(sel.position) - b.center.distanceToSquared(sel.position))[0];
+      if (near) {
+        const limA = Math.max(4, near.lenA - 1.6), limB = Math.max(4, near.lenB - 1.6);
+        if (d.spec.wA > limA || d.spec.wB > limB) {
+          d.spec.wA = +Math.min(d.spec.wA, limA).toFixed(2);
+          d.spec.wB = +Math.min(d.spec.wB, limB).toFixed(2);
+          wallNote = ` · 已按墙面可用长度收缩到 ${d.spec.wA}m / ${d.spec.wB}m`;
+        }
+      }
+    }
+    const child = await getAsset(d.assetId);
+    if (!child || !child.billboard) return;
+    const fresh = buildCompositeScreenNode(child, d.spec);
+    if (!fresh) return;
+    for (const c of sel.children.slice()) sel.remove(c);
+    sel.add(fresh);
+    sel.scale.setScalar(1);
+    sel.position.y = d.spec.y; // 离地高度就是锚点（屏心）高度
+    this._syncCompositeParts();
+    this._renderProps();
+    this._setStatus(`「${d.name}」规格已更新${wallNote} · 保存后随模型生效`);
+  }
+
+  /* ---------------- 组合资产（任意模型 + 任意广告屏） ---------------- */
+
+  /** 组合容器：已加载资产用模板里的零变换容器，空白工作台用工作台根。
+   *  parts 恒为容器的「直接子节点」，坐标以资产底面中心为原点 —— 与
+   *  assetMesh 重建模板、BillboardManager 运行时挂屏的坐标系完全一致。 */
+  _partsContainer() {
+    if (!this.workspace) return null;
+    const holder = this.workspace.root.children.find((c) => c.userData && c.userData.compositeHolder);
+    return holder || this.workspace.root;
+  }
+
+  /** 从场景节点回写 parts（位姿以节点变换为准，Gizmo / 面板改完立即同步） */
+  _syncCompositeParts() {
+    const container = this._partsContainer();
+    if (!container) return [];
+    const prev = normalizeParts(this.workspace.asset.parts);
+    const byId = new Map(prev.map((p) => [p.id, p]));
+    const out = [];
+    for (const o of container.children) {
+      const d = o.userData && o.userData.compositePart;
+      if (!d) continue;
+      const base = byId.get(d.id) || {};
+      out.push({
+        ...base, ...d,
+        name: String(o.name || "").replace(/^组合\s*·\s*/, "") || d.name || "组合部件",
+        pos: [+o.position.x.toFixed(3), +o.position.y.toFixed(3), +o.position.z.toFixed(3)],
+        rotY: +o.rotation.y.toFixed(4),
+        scale: +o.scale.x.toFixed(4),
+      });
+    }
+    this.workspace.asset.parts = out;
+    return out;
+  }
+
+  /** 载入已保存的组合资产：按子资产重建屏幕占位（clone 会丢 poseYaw / 圆角控制器） */
+  async _refreshCompositeScreens(root, parts) {
+    const holder = root.children.find((c) => c.userData && c.userData.compositeHolder) || root;
+    for (const p of parts) {
+      if (p.role !== "billboard") continue;
+      const target = holder.children.find((o) => o.userData && o.userData.compositePart && o.userData.compositePart.id === p.id);
+      if (!target) continue;
+      const child = await getAsset(p.assetId);
+      if (!child || !child.billboard) continue;
+      const fresh = buildCompositeScreenNode(child, p.spec);
+      if (!fresh) continue;
+      for (const c of target.children.slice()) target.remove(c);
+      target.add(fresh);
+    }
+  }
+
+  async _addCompositePart(child, worldPoint, rotY = 0, autoFitHint = true) {
+    if (!this.workspace || !child) return;
+    const curId = this.workspace.asset.id;
+    if (child.id === curId) { this._setStatus("不能把资产组合到它自己里"); return; }
+    const childParts = normalizeParts(child.parts);
+    if (curId && childParts.some((p) => p.assetId === curId)) {
+      this._setStatus("会形成循环引用：该资产已经包含当前模型"); return;
+    }
+    if (childParts.some((p) => p.role === "billboard")) {
+      this._setStatus("该资产里已有组合广告屏，暂不支持嵌套组合；请直接拖入单个广告屏模型"); return;
+    }
+    const isScreen = child.source === "billboard" && !!child.billboard;
+    // 广告屏自动适配：按资产类型（单面 / L 形转角）挑最合适的墙面，
+    // 落点、朝向与缩放一次配好；分析失败则退回原来的「拖到哪贴哪」。
+    // 必须在构建占位屏之前算好规格 —— 占位屏几何要按它来生成
+    let fit = null;
+    if (isScreen && this._autoFit !== false) {
+      if (!this._surfacesCache) this._surfacesCache = analyzeSurfaces(this.workspace.root);
+      fit = fitScreenToModel(this._surfacesCache, child, autoFitHint ? worldPoint : null);
+      if (fit) {
+        // 再按实际渲染几何实测墙段：屏宽高、中心都以「射线量到的连续墙面」为准
+        fit = refineFitOnModel(this.workspace.root, fit, child, autoFitHint ? worldPoint : null);
+        worldPoint = fit.point.clone();
+        rotY = fit.rotY;
+      }
+    }
+    if (isScreen && !fit && (child.billboard.mount === "corner" || child.billboard.mount === "corner3d")) {
+      rotY += Math.PI; // 转角屏几何基准朝 -Z/-X，手动贴墙时转过来
+    }
+    // 没自动适配且拖到空地时给一个合理高度（贴墙时落点本身就有高度）
+    if (isScreen && worldPoint.y < 1) worldPoint.y = +(child.billboard?.spec?.y || 9);
+    let node;
+    if (isScreen) {
+      // 占位屏必须按适配后的规格构建：不带 spec 会永远渲染资产默认尺寸，
+      // 画布上看起来就是「屏比墙面大」，而保存的 parts.spec 却是对的
+      node = buildCompositeScreenNode(child, fit ? fit.spec : null); // 纯屏（无自带塔体）+ 屏心对齐
+    } else if (child.source === "traced" && child.traced) {
+      node = buildTracedObject(child);
+    } else {
+      const tpl = await getAssetTemplate(child);
+      node = tpl ? tpl.clone() : null;
+    }
+    if (!node) {
+      node = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), new THREE.MeshBasicMaterial({ color: 0x3a72b0, wireframe: true }));
+      this._setStatus(`「${child.name || "部件"}」几何不可用，已放置占位框`);
+    }
+    const container = this._partsContainer();
+    container.updateWorldMatrix(true, false);
+    const local = container.worldToLocal(worldPoint.clone());
+    const g = new THREE.Group();
+    g.name = `组合 · ${child.name || "部件"}`;
+    // spec 里已经是最终屏幕尺寸，节点不再叠加缩放（否则工坊预览会二次缩小）
+    const scale = 1;
+    g.position.copy(local);
+    g.rotation.y = rotY;
+    g.scale.setScalar(scale);
+    const s0 = (child.billboard && child.billboard.spec) || {};
+    g.userData.compositePart = {
+      id: newPartId(), assetId: child.id, name: child.name || "部件",
+      role: isScreen ? "billboard" : "prop",
+      pos: [local.x, local.y, local.z], rotY, scale, content: null,
+      spec: isScreen ? {
+        ...(fit ? fit.spec : {
+          w: s0.w || 14, h: s0.h || 8, y: s0.y || 9,
+          wA: s0.wA || s0.w || 14, wB: s0.wB || s0.w || 14,
+        }),
+        mount: child.billboard.mount,
+      } : null,
+    };
+    g.userData.sharedTpl = true; // 几何/材质与子资产模板共享，重建时不要 dispose
+    g.add(node);
+    container.add(g);
+    this._syncCompositeParts(); // 只改 parts，不标 geometryDirty：底座 GLB 不用重导
+    this._select(g);
+    const fitMsg = fit
+      ? `已按落点适配到${fit.surface.type === "corner" ? "L 形转角" : "单面墙"}（屏 ${fit.spec.w}×${fit.spec.h}m · 离地 ${fit.spec.y}m）· `
+      : "";
+    this._setStatus(`${fitMsg}已把「${child.name || "部件"}」加入「${this.workspace.asset.name || "新模型"}」· W/E/R 可微调 · 内容由后台按屏位配置`);
   }
 
   /* ---------------- 参数建模（P2） ---------------- */
@@ -804,26 +1151,27 @@ export class ModelStudio {
   _nextPartKey() { return `part:${(this._partSeq || 0) + 1}`; }
 
   _duplicateSelected() {
-    if (!this.sel) return;
-    const copy = this.sel.clone();
-    copy.material = this.sel.material;
+    if (!this.sel || !this.workspace) return;
+    const src = this.sel;
+    const isPart = !!(src.userData && src.userData.compositePart);
+    const copy = this._clonePart(src, src.name + "-copy");
     copy.position.x += 3;
-    copy.name = this.sel.name + "-copy";
-    copy.userData = { ...this.sel.userData, bindingKey: this._nextPartKey() };
-    copy.material = this.sel.material.clone();
-    copy.material.name = copy.userData.bindingKey;
-    this.workspace.root.add(copy);
-    this.workspace.geometryDirty = true;
+    (src.parent || this.workspace.root).add(copy);
+    if (isPart) this._syncCompositeParts();
+    else this.workspace.geometryDirty = true;
     this._select(copy);
+    this._setStatus(isPart ? "已复制组合部件：引用同一个子资产，可单独设内容与位姿" : "已复制部件");
   }
 
   _deleteSelected() {
     if (!this.sel || !this.workspace) return;
-    this.workspace.root.remove(this.sel);
-    this.workspace.geometryDirty = true;
-    this._deselect();
-    this._renderTree();
-    this._setStatus("已删除部件");
+    const obj = this.sel;
+    const isPart = !!(obj.userData && obj.userData.compositePart);
+    if (obj.parent) obj.parent.remove(obj); // 组合部件挂在容器下，不一定是工作台根的直接子
+    if (isPart) this._syncCompositeParts();
+    else this.workspace.geometryDirty = true;
+    this._deselect(); // 内部会重绘属性面板与场景树
+    this._setStatus(isPart ? "已从组合中移除该部件" : "已删除部件");
   }
 
   /* ---------------- 阵列 / 镜像（M5，纯 three 实现不引 CSG 依赖） ---------------- */
@@ -836,16 +1184,18 @@ export class ModelStudio {
     const size = box.isEmpty() ? new THREE.Vector3(4, 0, 4) : box.getSize(new THREE.Vector3());
     const sx = size.x + 0.5, sz = size.z + 0.5;
     let n = 0;
+    const parent = src.parent || this.workspace.root;
     for (let ix = -1; ix <= 1; ix++) {
       for (let iz = -1; iz <= 1; iz++) {
         if (!ix && !iz) continue;
         const copy = this._clonePart(src, src.name + `-a${++n}`);
         copy.position.x += ix * sx;
         copy.position.z += iz * sz;
-        this.workspace.root.add(copy);
+        parent.add(copy);
       }
     }
-    this.workspace.geometryDirty = true;
+    if (src.userData && src.userData.compositePart) this._syncCompositeParts();
+    else this.workspace.geometryDirty = true;
     this._renderTree();
     this._setStatus(`已生成 3×3 阵列（+8 个部件）· 各部件可单独选中调整`);
   }
@@ -854,6 +1204,9 @@ export class ModelStudio {
   _mirrorSelected() {
     if (!this.sel || !this.workspace) return;
     const src = this.sel;
+    if ((src.userData && src.userData.compositePart) || !src.geometry) {
+      this._setStatus("组合部件（引用子资产）请用「复制」；几何镜像只支持工作台基础体"); return;
+    }
     const copy = this._clonePart(src, src.name + "-mirror");
     copy.geometry = mirroredGeometry(src.geometry);
     const box = new THREE.Box3().setFromObject(src);
@@ -868,16 +1221,22 @@ export class ModelStudio {
   _clonePart(src, name) {
     const copy = src.clone();
     copy.name = name;
-    copy.userData = { ...src.userData, bindingKey: this._nextPartKey() };
-    copy.material = src.material.clone();
-    copy.material.name = copy.userData.bindingKey;
+    copy.userData = { ...src.userData };
+    if (copy.userData.compositePart) {
+      // 组合部件：新实例 id，避免两个部件共用同一条 parts 记录
+      copy.userData.compositePart = { ...copy.userData.compositePart, id: newPartId() };
+    } else if (src.isMesh && src.material) {
+      copy.userData.bindingKey = this._nextPartKey();
+      copy.material = src.material.clone();
+      copy.material.name = copy.userData.bindingKey;
+    }
     return copy;
   }
 
   /* ---------------- 材质绑定 ---------------- */
 
   _bindMaterial(libId) {
-    if (!this.sel) return;
+    if (!this.sel || !this.sel.material) return; // 组合部件是 Group，材质跟随子资产
     const key = this.sel.userData.bindingKey || this.sel.material.name || "unnamed";
     this.sel.userData.bindingKey = key;
     if (libId) {
@@ -905,12 +1264,35 @@ export class ModelStudio {
     const catInput = this._el.querySelector("#ms3-cat");
     if (catInput) this.workspace.asset.category = catInput.value;
     this.workspace.asset.materialBindings = { ...this.workspace.bindings };
+    const parts = this._syncCompositeParts();
+    const hasParts = parts.length > 0;
+    this.workspace.asset.parts = parts;
+    if (hasParts) this.workspace.asset.composite = true;
+    else delete this.workspace.asset.composite;
 
     try {
       // 广告牌资产只存规格（mount + w/h/y/arc），几何由 MOUNTS 现场重建 ——
       // 不导出 GLB，避免把屏面占位材质固化进模型（每屏运行时要独立播内容）。
       const isBillboard = this.workspace.asset.source === "billboard";
-      if (!isBillboard && (this.workspace.isNew || this.workspace.geometryDirty || this.workspace.needsExport)) {
+      const baseDirty = this.workspace.isNew || this.workspace.geometryDirty || this.workspace.needsExport;
+      if (hasParts) {
+        // 组合资产：子部件只存引用。底座几何真有变化时才重导 GLB，
+        // 导出副本递归剔除组合部件（否则子资产改了不同步、屏也没法独立播内容）。
+        // 只加/移/拖动屏幕不会标底座脏，原 GLB（含动画与材质）原样保留。
+        if (!isBillboard && baseDirty && hasNonPartMesh(this.workspace.root)) {
+          this.workspace.asset.glb = await exportObjectGLB(this._exportRoot(true));
+          this.workspace.asset.source = "glb";
+          this.workspace.asset.traced = undefined;
+        }
+        const box = new THREE.Box3().setFromObject(this.workspace.root);
+        if (!box.isEmpty()) {
+          const s = box.getSize(new THREE.Vector3());
+          this.workspace.asset.unitSize = { x: +s.x.toFixed(2), y: +s.y.toFixed(2), z: +s.z.toFixed(2) };
+        }
+        this.workspace.geometryDirty = false;
+        this.workspace.needsExport = false;
+        this.workspace.isNew = false;
+      } else if (!isBillboard && baseDirty) {
         // 几何/绑定有变（或新建）：整个工作台导出为 GLB，资产升级为 glb 存储。
         // 导出副本把每个 mesh 的材质改名为绑定键（part:1 / wall / roof）——
         // 共享库实例没有名字，直接导出会让 GLB 往返丢失绑定关系
@@ -931,7 +1313,9 @@ export class ModelStudio {
       invalidateAssetTemplate(saved.id);
       // 缩略图：克隆工作台（renderThumb 会把对象加进临时场景）
       await this._renderCover(saved.id); // 旧 objectURL 已在内部失效，列表显示新图
-      this._setStatus(`已保存「${saved.name}」· 可在 3D 地图编辑器的「我的模型」中放置`);
+      this._setStatus(hasParts
+        ? `已保存「${saved.name}」· ${parts.length} 个组合部件 · 放置到地图后屏位由后台统一配置内容`
+        : `已保存「${saved.name}」· 可在 3D 地图编辑器的「我的模型」中放置`);
       this._refreshAssetList();
       this._renderProps();
     } catch (e) {
@@ -944,7 +1328,11 @@ export class ModelStudio {
     if (!this.workspace) return;
     try {
       let blob;
-      if (this.workspace.geometryDirty || this.workspace.needsExport || this.workspace.isNew) {
+      if (normalizeParts(this.workspace.asset.parts).length) {
+        // 组合资产：导出「画布所见」的完整外形（含占位屏）供备份 / Blender 二次加工；
+        // 资产库内部仍只存底座 GLB + parts 引用，不影响运行时的动态组合
+        blob = await exportObjectGLB(this._exportRoot(false));
+      } else if (this.workspace.geometryDirty || this.workspace.needsExport || this.workspace.isNew) {
         blob = await exportObjectGLB(this._exportRoot());
       } else {
         blob = await exportAssetGLB(this.workspace.asset.id);
@@ -962,8 +1350,19 @@ export class ModelStudio {
   }
 
   // 导出用工作台副本：mesh 材质克隆并改名为绑定键，供重导入时按名匹配
-  _exportRoot() {
+  // excludeParts=true：组合资产只导出「底座模型」，子部件以 parts 引用保存，
+  // 不把占位屏 / 子模型几何烘进 GLB（否则子资产改了不会同步、屏也没法播内容）。
+  _exportRoot(excludeParts = false) {
     const copy = this.workspace.root.clone(true);
+    if (excludeParts) {
+      // 组合部件可能嵌在模板容器里，必须递归剔除（含嵌套的子树）
+      const rm = [];
+      copy.traverse((o) => { if (o.userData && o.userData.compositePart) rm.push(o); });
+      for (const o of rm) if (o.parent) o.parent.remove(o);
+      // 底座已按资产根（底面中心）坐标系摆好：模板重建时不要再 alignBaseCenter，
+      // 否则 GLB 往返会把底座平移，parts 的局部坐标就对不上了
+      copy.userData.compositeBase = true;
+    }
     copy.traverse((o) => {
       if (!o.isMesh) return;
       const key = o.userData.bindingKey;
@@ -977,9 +1376,112 @@ export class ModelStudio {
 
   /* ---------------- 右侧面板 ---------------- */
 
+  /** 组合部件面板：列表 + 选中部件的位姿/内容/删除，友好地管理动态组合 */
+  _partsPanelHtml() {
+    if (!this.workspace) return "";
+    const parts = normalizeParts(this.workspace.asset.parts);
+    const sel = this.sel && this.sel.userData && this.sel.userData.compositePart ? this.sel : null;
+    const d = sel ? sel.userData.compositePart : null;
+    const rows = parts.length ? parts.map((p) => `
+      <div class="ms3-part-row${d && d.id === p.id ? " active" : ""}" data-part="${esc(p.id)}" title="点击选中画布中的该部件">
+        <span class="ms3-part-icon${p.role === "billboard" ? " screen" : ""}">${p.role === "billboard" ? "▣" : "▧"}</span>
+        <b>${esc(p.name || "部件")}</b>
+        <span class="ms3-part-role">${p.role === "billboard" ? "广告屏" : "模型"}</span>
+        <button class="ms3-part-del" data-del="${esc(p.id)}" title="从组合中移除">×</button>
+      </div>`).join("") : `<div class="ms3-part-empty">还没有组合部件<br><small>打开任意建筑模型，把左侧广告屏拖到画布<br>或点资产卡片上的 ＋</small></div>`;
+    const sp = d && d.role === "billboard"
+      ? (d.spec || { w: 14, h: 8, y: 9, wA: 14, wB: 14 })
+      : null;
+    const isCorner = sp && (sp.mount === "corner" || sp.mount === "corner3d");
+    const editor = sel ? `
+      <div class="ms3-part-editor">
+        <div class="ms3-part-editor-head">正在编辑 <b>${esc(d.name || "部件")}</b>
+          <span>${sp ? "广告屏 · 内容由后台配置" : "模型 · 引用子资产"}</span></div>
+        ${sp ? `
+        <div class="ms3-part-grid">
+          <label>屏宽(m) <input id="ps-w" type="number" step="0.1" min="4" max="40" value="${+(+sp.w).toFixed(2)}" /></label>
+          <label>屏高(m) <input id="ps-h" type="number" step="0.1" min="2" max="30" value="${+(+sp.h).toFixed(2)}" /></label>
+          ${isCorner ? `
+          <label>左屏长(m) <input id="ps-wa" type="number" step="0.1" min="4" max="40" value="${+(+sp.wA).toFixed(2)}" /></label>
+          <label>右屏长(m) <input id="ps-wb" type="number" step="0.1" min="4" max="40" value="${+(+sp.wB).toFixed(2)}" /></label>` : ""}
+          <label>离地高度(m) <input id="ps-y" type="number" step="0.5" min="3" max="120" value="${+(+sp.y).toFixed(2)}" /></label>
+        </div>
+        <div class="ms3-hint">${isCorner
+          ? "左右屏长可分别设置，平铺画面按长度比例分配。"
+          : "屏宽 / 屏高决定画面尺寸。"}位置由自动找面确定，不用填坐标；改完即时更新画布，保存后随模型生效。</div>` : `<div class="ms3-hint">模型部件引用子资产的几何与材质，位置由自动找面确定。</div>`}
+        <div class="ms3-row">
+          ${sp ? `<button class="ms3-btn" id="ms3-part-refit">重新找面适配</button>` : ""}
+          <button class="ms3-btn" id="ms3-part-dup">复制部件</button>
+        </div>
+        <button class="ms3-btn danger" id="ms3-part-remove" style="width:100%;margin-top:6px">移除该部件</button>
+      </div>` : "";
+    return `<h4 class="ms3-part-title">组合部件 <small>${parts.length}</small></h4>
+      <label class="ms3-check" style="border:none;padding:0 0 6px"><input type="checkbox" id="ms3-autofit" ${this._autoFit ? "checked" : ""} />拖入广告屏时自动找面并适配尺寸</label>
+      <div class="ms3-hint">任意模型 + 任意广告屏自由组合：左侧资产可拖进画布（或点 ＋）。部件存资产引用，改一次子模型全城同步。<b>模型层只定义屏位与规格，播放内容由后台统一配置。</b></div>
+      <div class="ms3-part-list">${rows}</div>${editor}`;
+  }
+
+  _wirePartsPanel(box) {
+    const autoFit = box.querySelector("#ms3-autofit");
+    if (autoFit) autoFit.addEventListener("change", () => {
+      this._autoFit = autoFit.checked;
+      this._setStatus(autoFit.checked
+        ? "自动适配已开启：拖入广告屏会自动靠到单面墙 / L 形转角并按面积适配大小"
+        : "自动适配已关闭：广告屏将放在拖放位置，可用 W/E/R 与右侧数值手动调整");
+    });
+    const findPart = (id) => {
+      const container = this._partsContainer();
+      return container && container.children.find((o) => o.userData && o.userData.compositePart && o.userData.compositePart.id === id);
+    };
+    for (const row of box.querySelectorAll(".ms3-part-row")) {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest(".ms3-part-del")) return;
+        const found = findPart(row.dataset.part);
+        if (found) this._select(found);
+      });
+    }
+    for (const btn of box.querySelectorAll(".ms3-part-del")) {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const found = findPart(btn.dataset.del);
+        if (!found) return;
+        if (found.parent) found.parent.remove(found);
+        if (this.sel === found) this._deselect();
+        this._syncCompositeParts();
+        this._renderProps();
+        this._setStatus("已从组合中移除该部件");
+      });
+    }
+    const sel = this.sel && this.sel.userData && this.sel.userData.compositePart ? this.sel : null;
+    if (!sel) return;
+    // 广告屏部件：只编辑屏幕规格（宽 / 高 / 左右屏长 / 离地高度），
+    // 落点与朝向由自动找面决定，不再暴露模型本地坐标
+    for (const [id, key, min, max] of [
+      ["#ps-w", "w", 4, 40], ["#ps-h", "h", 2, 30],
+      ["#ps-wa", "wA", 4, 40], ["#ps-wb", "wB", 4, 40],
+      ["#ps-y", "y", 3, 120],
+    ]) {
+      const n = box.querySelector(id);
+      if (!n) continue;
+      n.addEventListener("change", () => {
+        const d = sel.userData.compositePart;
+        if (!d.spec) return;
+        d.spec = { ...d.spec, [key]: Math.min(max, Math.max(min, +n.value || min)) };
+        this._rebuildCompositeScreen(sel);
+      });
+    }
+    const rm = box.querySelector("#ms3-part-remove");
+    if (rm) rm.addEventListener("click", () => this._deleteSelected());
+    const dup = box.querySelector("#ms3-part-dup");
+    if (dup) dup.addEventListener("click", () => this._duplicateSelected());
+    const refit = box.querySelector("#ms3-part-refit");
+    if (refit) refit.addEventListener("click", () => this._refitSelected());
+  }
+
   _renderProps() {
     const box = this._el.querySelector("#ms3-props");
     const badge = this._el.querySelector("#ms3-asset-badge");
+    this._updateDropHint();
     if (!this.workspace) {
       badge.textContent = "";
       box.innerHTML = `<div class="ms3-empty">从左侧资产库选择一个资产<br>或导入 GLB / 新建参数模型开始设计</div>`;
@@ -997,7 +1499,10 @@ export class ModelStudio {
       ? `<div class="ms3-field">
            <label>选中部件：${esc(this.sel.name || "(未命名 mesh)")}${this.sel.isMesh ? "" : "（组）"}</label>
            <div class="ms3-row"><input id="ms3-part-name" value="${esc(this.sel.name || "")}" maxlength="32" placeholder="部件名称" /><button class="ms3-btn" id="ms3-part-rename">改名</button></div>
-           ${selMat ? `<select id="ms3-mat"><option value="">（保留原材质 · 未绑定）</option>${this._materialOptions(this.workspace.bindings[selKey])}</select>` : `<div class="ms3-hint">组节点：展开/收起子部件、整组重命名；材质绑定请选具体 mesh。</div>`}
+           ${selMat ? `<select id="ms3-mat"><option value="">（保留原材质 · 未绑定）</option>${this._materialOptions(this.workspace.bindings[selKey])}</select>`
+             : this.sel.userData && this.sel.userData.compositePart
+               ? `<div class="ms3-hint">组合部件：几何与材质跟随子资产（改一次子模型全城同步）；在下方调整屏幕规格，播放内容由后台统一配置。</div>`
+               : `<div class="ms3-hint">组节点：展开/收起子部件、整组重命名；材质绑定请选具体 mesh。</div>`}
          </div>
          <div class="ms3-row">
            <button class="ms3-btn" id="ms3-dup">复制</button>
@@ -1030,8 +1535,8 @@ export class ModelStudio {
       <div class="ms3-field"><label>名称</label><input id="ms3-name" value="${esc(a.name || "")}" maxlength="24" /></div>
       <div class="ms3-field"><label>分类</label><select id="ms3-cat">${cats.map((g) => `<option value="${esc(g.id)}"${a.category === g.id ? " selected" : ""}>${esc(g.name)}</option>`).join("")}</select></div>
       <div class="ms3-field"><label>来源</label><input value="${{ glb: "GLB 模型", traced: "描边建筑", studio: "参数建模", billboard: "广告牌模型" }[a.source] || a.source}" disabled /></div>
-      ${isBillboard ? `<div class="ms3-hint">广告牌模型：几何由承载形式 + 屏体规格现场重建，不存 GLB。<b>内容 / 素材 / 后台内容源与模型完全解耦</b>——在地图编辑器选中广告牌后单独编辑显示内容，任意广告牌可挂到别的建筑模型上。</div>
-        <div class="ms3-hint">${(() => { const b = a.billboard || {}; const s = b.spec || {}; return `承载形式：${b.mount || "?"} · 屏宽 ${s.w || "?"}m · 屏高 ${s.h || "?"}m · 屏心高度 ${s.y || "?"}m`; })()}</div>
+      ${isBillboard ? `<div class="ms3-hint">广告牌模型：几何由承载形式 + 屏体规格现场重建，不存 GLB。<b>内容 / 素材 / 后台内容源与模型完全解耦</b>——模型层只定义屏位规格，播放内容由后台统一配置。</div>
+        ${this._billboardAssetSpecHtml(a)}
         ${isBillboard && a.billboard && a.billboard.mount === "corner3d" ? `
         <div class="ms3-field"><label>转角弧度 · 圆角半径（米）<span id="ms3-arc-val">${(+((a.billboard.spec || {}).arc) || 0).toFixed(1)}</span></label>
           <input id="ms3-arc" type="range" min="0" max="5" step="0.1" value="${(+((a.billboard.spec || {}).arc) || 0)}" style="--fill:${Math.round(((+((a.billboard.spec || {}).arc) || 0) / 5) * 100)}%" />
@@ -1061,10 +1566,12 @@ export class ModelStudio {
         </div>
         <div class="ms3-hint">部件类型：盒/圆柱/球/薄板 = 参数化基础体，适合搭建筑体块；GLB 导入的部件 = 原模型网格。每个部件有绑定键，用于绑材质与夜景亮度。</div>
       </div>`}
+      ${this._partsPanelHtml()}
       <h4 style="border:none;padding-left:0">场景部件</h4>
       <div id="ms3-tree" style="margin-bottom:10px"></div>
       ${selInfo}`;
     // wire
+    this._wirePartsPanel(box);
     const on = (id, fn) => { const n = box.querySelector(id); if (n) n.addEventListener("click", fn); };
     on("#ms3-add-box", () => this._addPrimitive("box"));
     on("#ms3-add-cyl", () => this._addPrimitive("cylinder"));
@@ -1101,6 +1608,19 @@ export class ModelStudio {
       this._setBillboardArc(r);
       this._setStatus(`转角弧度 ${r.toFixed(1)}m · 视口实时预览，保存资产后写入模型`);
     });
+    // 广告牌资产自身的屏幕规格：与组合部件同一套字段，改动即时重建预览
+    for (const [id, key, min, max] of [
+      ["#ba-w", "w", 4, 40], ["#ba-h", "h", 2, 30],
+      ["#ba-wa", "wA", 4, 40], ["#ba-wb", "wB", 4, 40],
+      ["#ba-y", "y", 3, 120],
+    ]) {
+      const n = box.querySelector(id);
+      if (!n) continue;
+      n.addEventListener("change", () => {
+        this._setBillboardSpec(key, Math.min(max, Math.max(min, +n.value || min)));
+        this._renderProps();
+      });
+    }
     // 动画配置：勾选片段 / 调速度 → 实时重启工作台预览；写入资产记录后「保存」持久化
     const speedInput = box.querySelector("#ms3-anim-speed");
     if (speedInput) {
@@ -1343,6 +1863,7 @@ export class ModelStudio {
         const collapsed = this._treeCollapsed.has(child.uuid);
         const key = child.userData ? child.userData.bindingKey : null;
         const bound = key && this.workspace.bindings[key];
+        const cp = child.userData ? child.userData.compositePart : null;
         const disp = child.name || (child.isMesh ? `Mesh #${++anon}` : child.type);
         const fullPath = `${path}/${disp}`;
         const item = document.createElement("div");
@@ -1351,7 +1872,7 @@ export class ModelStudio {
         item.title = fullPath;
         item.innerHTML = `${hasKids
           ? `<span class="ms3-tree-toggle" title="展开/收起">${collapsed ? "▸" : "▾"}</span>`
-          : `<span class="ms3-tree-dot"></span>`}${esc(disp)}${child.isMesh && key ? `<span class="mat-chip${bound ? "" : " unbound"}">${esc(bound || key)}</span>` : ""}`;
+          : `<span class="ms3-tree-dot"></span>`}${esc(disp)}${cp ? `<span class="ms3-tree-chip${cp.role === "billboard" ? " screen" : ""}">${cp.role === "billboard" ? "广告屏" : "组合模型"}</span>` : ""}${child.isMesh && key ? `<span class="mat-chip${bound ? "" : " unbound"}">${esc(bound || key)}</span>` : ""}`;
         item.addEventListener("click", () => this._select(child));
         if (hasKids) {
           item.querySelector(".ms3-tree-toggle").addEventListener("click", (e) => {
@@ -1377,9 +1898,34 @@ export class ModelStudio {
     const el = this._el && this._el.querySelector("#ms3-status");
     if (el) el.textContent = msg;
   }
+
+  /** 空白工作台时才显示「拖资产到这里」引导，避免挡住已有模型 */
+  _updateDropHint() {
+    const hint = this._el && this._el.querySelector("#ms3-drop-hint");
+    if (!hint) return;
+    hint.hidden = !!(this.workspace && this.workspace.root.children.length);
+  }
 }
 
 /* ---------------- helpers ---------------- */
+
+/** 命中的网格若属于组合部件，返回整个组合组（点选 / Gizmo / 删除的最小单位） */
+function compositeRootOf(obj) {
+  for (let o = obj; o; o = o.parent) {
+    if (o.userData && o.userData.compositePart) return o;
+  }
+  return null;
+}
+function isInsideCompositePart(obj) { return !!compositeRootOf(obj); }
+
+/** 工作台里是否存在「非组合部件」的底座网格（决定保存时要不要重导底座 GLB） */
+function hasNonPartMesh(root) {
+  let found = false;
+  root.traverse((o) => {
+    if (!found && o.isMesh && !isInsideCompositePart(o)) found = true;
+  });
+  return found;
+}
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));

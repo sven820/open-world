@@ -4,6 +4,7 @@ import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { makePedRig, pedPartGeometry, PED_PARTS } from "./models.js";
 import { activeSpawn } from "../data/cityData.js";
+import { captureRigState, applyFaceParams, clampConfig } from "../creator/faceParams.js";
 
 const skin = new THREE.MeshStandardMaterial({ color: 0xe8b98f, roughness: 0.85 });
 const hair = new THREE.MeshStandardMaterial({ color: 0x1b1714, roughness: 0.8 });
@@ -23,7 +24,7 @@ const normBone = (s) => s.replace(/[\s_]/g, "").toLowerCase();
 // 共享加载器：每次重建世界都新建 KTX2/GLTF loader 会产生
 // "Multiple active KTX2 loaders" 警告并偶发加载失败（退化成程序化模型）
 let _sharedGLTF = null;
-function sharedGLTFLoader(renderer) {
+export function sharedGLTFLoader(renderer) {
   if (!_sharedGLTF) {
     const ktx2 = new KTX2Loader().setTranscoderPath("/basis/").detectSupport(renderer);
     _sharedGLTF = new GLTFLoader().setKTX2Loader(ktx2).setMeshoptDecoder(MeshoptDecoder);
@@ -97,6 +98,9 @@ export class Player {
 
     // glb avatar state
     this.avatar = null;
+    this.avatarRest = null;
+    this.avatarConfig = null;
+    this._loadedAvatarUrl = null;
     this.bones = {};
     this.boneRest = {};
     this.poseRest = null;   // 烘焙后的基准姿势（手臂下垂）
@@ -109,18 +113,18 @@ export class Player {
     this.ready = this._loadAvatar();
   }
 
-  async _loadAvatar() {
+  async _loadAvatar(url = "/avatars/jie.glb") {
     try {
       const loader = sharedGLTFLoader(this.renderer);
       if (MeshoptDecoder.ready) await MeshoptDecoder.ready;
 
       let gltf;
       try {
-        gltf = await loader.loadAsync("/avatars/jie.glb");
+        gltf = await loader.loadAsync(url);
       } catch {
         // 一次重试：dev server 冷启动/瞬时网络问题导致的失败
         await new Promise((r) => setTimeout(r, 800));
-        gltf = await loader.loadAsync("/avatars/jie.glb");
+        gltf = await loader.loadAsync(url);
       }
       const model = gltf.scene;
 
@@ -180,8 +184,31 @@ export class Player {
       this.root.remove(this.proc.root);
       this.avatar = model;
       this.root.add(model);
+      this._loadedAvatarUrl = url;
+      this.avatarRest = captureRigState(model);
+      this._applyAvatarConfig();
     } catch (e) {
       console.warn("[player] glb avatar unavailable, keeping procedural rig:", e);
+    }
+  }
+
+  /** 应用捏脸工坊保存的角色配置；基底模型不同则自动重新加载 */
+  async setAvatarConfig(config) {
+    this.avatarConfig = config ? clampConfig(config) : null;
+    if (!this.avatarConfig) return;
+    if (!this.avatar || this._loadedAvatarUrl !== this.avatarConfig.avatar) {
+      await this._loadAvatar(this.avatarConfig.avatar);
+      return;
+    }
+    this._applyAvatarConfig();
+  }
+
+  _applyAvatarConfig() {
+    if (!this.avatarRest || !this.avatarConfig) return;
+    try {
+      applyFaceParams(this.avatarRest, this.avatarConfig);
+    } catch (e) {
+      console.warn("[player] apply avatar config failed:", e);
     }
   }
 

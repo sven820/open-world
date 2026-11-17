@@ -3,6 +3,7 @@ import {
   PRESETS, getRenderSettings, updateRenderSettings, applyPreset, resetRenderSettings,
   onRenderSettingsChange,
 } from "../config/renderSettings.js";
+import { AISettingsPanel } from "./aiSettingsPanel.js";
 
 const PRESET_ORDER = ["low", "medium", "high", "ultra"];
 
@@ -56,8 +57,17 @@ export class RenderSettingsPanel {
     this._controls = [];
     this._presetBtns = new Map();
     this._statsTimer = null;
+    this.activeTab = "graphics";
 
     this._build();
+    // 画面设置与 AI 设置共用一个弹窗，通过 tab 切换；AI 配置本身是可复用组件
+    this.tabs = [...this.root.querySelectorAll("[data-set-tab]")];
+    this.panes = [...this.root.querySelectorAll("[data-set-pane]")];
+    for (const btn of this.tabs) {
+      btn.addEventListener("click", () => this.setTab(btn.dataset.setTab));
+    }
+    this.aiPanel = new AISettingsPanel("#ai-settings-panel");
+
     document.getElementById("rs-close").addEventListener("click", () => this.close());
     document.getElementById("rs-reset").addEventListener("click", () => resetRenderSettings());
     this.root.addEventListener("click", (e) => {
@@ -65,6 +75,12 @@ export class RenderSettingsPanel {
     });
     this._unsub = onRenderSettingsChange(() => this.sync());
     this.sync();
+  }
+
+  setTab(name) {
+    this.activeTab = name;
+    for (const btn of this.tabs) btn.classList.toggle("active", btn.dataset.setTab === name);
+    for (const pane of this.panes) pane.classList.toggle("hidden", pane.dataset.setPane !== name);
   }
 
   _build() {
@@ -189,9 +205,11 @@ export class RenderSettingsPanel {
     this.statsEl.textContent = parts.join(" · ") || "—";
   }
 
-  open() {
+  open(tab) {
+    this.setTab(tab === "ai" ? "ai" : "graphics");
     this.root.classList.remove("hidden");
     this.sync();
+    this.aiPanel.sync();
     this._tickStats();
     if (!this._statsTimer) this._statsTimer = setInterval(() => this._tickStats(), 500);
   }

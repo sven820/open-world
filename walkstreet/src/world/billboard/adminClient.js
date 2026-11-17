@@ -116,25 +116,28 @@ export class AdminSync {
     return data;
   }
 
-  /** 上报当前地图的所有屏位（ID 与 3D 编辑器 objects[].id 一致） */
+  /** 上报当前地图的全部屏位：后台据此知道「有多少屏、分别在哪、什么规格」，
+   *  再按 id 在发布快照里绑定内容。组合资产里的屏也在清单里（source=composite）。 */
   async report() {
     if (!this.endpoint || !this.billboards) return null;
-    const screens = this.billboards.screens.map((s, i) => ({
-      id: s.id,
-      name: s.name || `${i + 1} 号屏`,
-      mount: s.mount, w: s.w, h: s.h,
-      x: Math.round(s.x * 10) / 10, z: Math.round(s.z * 10) / 10,
+    const slots = typeof this.billboards.getSlotManifest === "function"
+      ? this.billboards.getSlotManifest()
+      : this.billboards.screens.map((s, i) => ({
+        id: s.id, name: s.name || `${i + 1} 号屏`, mount: s.mount, w: s.w, h: s.h,
+        x: Math.round(s.x * 10) / 10, z: Math.round(s.z * 10) / 10,
+        assetId: s.assetId || null, hostId: s.hostId || null,
+      }));
+    const screens = slots.map((s) => ({
+      ...s,
       mapId: this.meta.mapId || "default",
       mapName: this.meta.mapName || "默认街区",
-      // 屏位绑定的模型资产（解耦层 1）：后台可据此识别是哪一类广告牌
-      assetId: s.assetId || null,
-      hostId: s.hostId || null,
     }));
     this._lastReport = Date.now();
     try {
       const r = await this._fetch("/api/screens/report", {
         method: "POST", body: {
-          screens, mapId: this.meta.mapId, mapName: this.meta.mapName,
+          screens, slotCount: screens.length,
+          mapId: this.meta.mapId, mapName: this.meta.mapName,
           sessionId: this.sessionId, client: "walkstreet-web",
         },
       });
@@ -202,6 +205,8 @@ export class AdminSync {
       lastError: this.lastError,
       applied: this.applied,
       screenCount: this.billboards ? this.billboards.screens.length : 0,
+      slots: this.billboards && typeof this.billboards.getSlotManifest === "function"
+        ? this.billboards.getSlotManifest() : [],
       screens: this.billboards
         ? this.billboards.screens.map((s) => ({ id: s.id, mount: s.mount, aspect: Number(s.aspect.toFixed(2)), contentKey: s.contentKey }))
         : [],

@@ -1010,7 +1010,7 @@ export function buildCustomMap(data, colliders, junctions = []) {
       // 模型工坊资产：模板已在 city._init 预热（assetMesh 缓存），这里同步克隆。
       // 只传 {id} 即可 —— 实例化只读 id；未预热/已删除的资产静默跳过
       const ref = { id: o.assetId };
-      const inst = assetInstance(ref, { pos: o.pos, rot: o.rot, scale: o.scale });
+      const inst = assetInstance(ref, { pos: o.pos, rot: o.rot, scale: o.scale, hideBillboardProxies: true });
       if (inst) {
         group.add(inst);
         const aabb = assetWorldAABB(ref, { pos: o.pos, rot: o.rot, scale: o.scale });
