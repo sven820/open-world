@@ -2,7 +2,7 @@
 // - 天地图 DataServer 卫星影像(img_w) + 中文注记(cia_w)，tk 与图层瓦片地址统一在
 //   config/tianditu.js（优先 VITE_TIANDITU_KEY，未配置时用内置开发者 token，开箱即用）
 // - Esri World Imagery，免 key 备选（天地图对高频瓦片请求会封 IP）
-// - GeoQ 深色矢量图垫底（免 key，CORS 开放）
+// - GeoQ 深色矢量图（免 key，CORS 开放），作为可选图源之一
 // 天地图影像与注记同为 CGCS2000 ≈ WGS84，与项目局部米坐标锚点转换无需纠偏。
 // 图源选择由 3D 编辑器设置面板写入 localStorage，此处提供注册表 + 读写 + 构建三层 API。
 
@@ -28,6 +28,12 @@ export const basemapSources = [
     id: "tianditu_vec_anno",
     label: "天地图矢量 + 注记",
     desc: "官方图源 · 矢量底图含中文注记（vec_w/cva_w · 球面墨卡托）",
+    needKey: false,
+  },
+  {
+    id: "geoq",
+    label: "深色矢量 + 注记",
+    desc: "GeoQ · 免 key · 叠加天地图矢量注记（cva_w）",
     needKey: false,
   },
 ];
@@ -57,7 +63,7 @@ export function setBasemapSource(id) {
 // 图源元信息：credit 文案 + 就绪状态（天地图 tk 由 config/tianditu.js 常备，configured 恒 true；
 // builtinToken = 正在用内置公共 token，供 UI 提示可配专属 key）
 export function basemapInfo(sourceId = getBasemapSource()) {
-  const credit = sourceId === "esri" ? "Esri World Imagery" : "天地图";
+  const credit = sourceId === "esri" ? "Esri World Imagery" : sourceId === "geoq" ? "GeoQ 深色矢量" : "天地图";
   const builtinToken = sourceId === "tianditu" && !hasTiandituKey;
   return { id: sourceId, credit, configured: true, builtinToken };
 }
@@ -78,12 +84,10 @@ export const geoqVectorLayer = {
 
 /* ---------------- Provider 构建 ---------------- */
 
-// 生成 Cesium ImageryProvider 列表（顺序：GeoQ 垫底 → 卫星影像 → 注记）
+// 生成 Cesium ImageryProvider 列表（仅当前图源自身的层，不再强制 GeoQ 垫底）
 // sourceId 缺省时取当前生效图源；天地图瓦片模板/层级由 config/tianditu.js 提供。
 export function buildImageryLayers(Cesium, sourceId = getBasemapSource()) {
-  const providers = [
-    new Cesium.UrlTemplateImageryProvider({ url: geoqVectorLayer.url, maximumLevel: geoqVectorLayer.maximumLevel }),
-  ];
+  const providers = [];
   if (sourceId === "tianditu" || sourceId === "tianditu_vec_anno") {
     const preset = sourceId === "tianditu_vec_anno" ? "vector" : "satellite";
     for (const l of tiandituBasemapLayers(preset)) {
@@ -91,6 +95,13 @@ export function buildImageryLayers(Cesium, sourceId = getBasemapSource()) {
         url: l.url, subdomains: l.subdomains, maximumLevel: l.maximumLevel,
       }));
     }
+  } else if (sourceId === "geoq") {
+    // GeoQ 无自有注记层，叠加天地图矢量注记 cva_w（球面墨卡托，≈WGS84 无需纠偏）
+    providers.push(new Cesium.UrlTemplateImageryProvider({ url: geoqVectorLayer.url, maximumLevel: geoqVectorLayer.maximumLevel }));
+    const anno = tiandituBasemapLayers("cva_w")[0];
+    providers.push(new Cesium.UrlTemplateImageryProvider({
+      url: anno.url, subdomains: anno.subdomains, maximumLevel: anno.maximumLevel,
+    }));
   } else {
     providers.push(new Cesium.UrlTemplateImageryProvider({
       url: esriImageryLayer.url, maximumLevel: esriImageryLayer.maximumLevel,

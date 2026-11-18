@@ -99,7 +99,7 @@ export class MapEditor3d {
     this._cesiumOn = localStorage.getItem("tr_e3_basemap") !== "0"; // 记住上次选择
     // 图层显隐状态（图层控制面板）：默认全开；持久化用 v2 键，
     // 旧键 tr_e3_layers 里存有旧版勾选失效期间写入的错误状态，弃用不读
-    this._layerVis = { base: true, img: true, anno: true, area: true, skeleton: true, road: true, river: true, roadTile: true, object: true, origin: true, measure: true };
+    this._layerVis = { anno: true, area: true, skeleton: true, road: true, river: true, roadTile: true, object: true, origin: true, measure: true };
     try { Object.assign(this._layerVis, JSON.parse(localStorage.getItem("tr_e3_layers_v2") || "{}")); } catch { /* 忽略脏数据 */ }
     // 顶栏按钮等是 index.html 里的单例 DOM：监听挂到本实例 controller 上，
     // close() 一次性摘除。否则旧实例仍绑在同一个「保存」按钮上，保存时会把

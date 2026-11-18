@@ -107,7 +107,8 @@ export function rebuildBasemap(ed) {
   if (ed._cesiumOn) viewer.scene.requestRender();
 }
 
-// 底图影像层按 provider URL 分类显隐（GeoQ 垫底 / 天地图注记 / 其余=卫星影像）
+// 影像层显隐：注记层（cia/cva）受图层面板「中文注记」勾选控制，
+// 其余影像层常显（图源选择在设置面板，整体开关在顶栏「卫星底图」按钮）
 export function applyImageryVis(ed) {
   if (!ed._cesium) return;
   const { viewer } = ed._cesium;
@@ -117,8 +118,7 @@ export function applyImageryVis(ed) {
     const p = layer.imageryProvider || layer.provider || layer._imageryProvider;
     const url = String(p?.url || "");
     // cia/cva 均为天地图中文注记（影像注记/矢量注记），URL 被规范化时仍能命中
-    const key = url.includes("geoq") ? "base" : (url.includes("cia_w") || url.includes("cva_w")) ? "anno" : "img";
-    layer.show = ed._layerVis[key] !== false;
+    layer.show = url.includes("cia_w") || url.includes("cva_w") ? ed._layerVis.anno !== false : true;
   }
   if (ed._cesiumOn) { try { viewer.scene.requestRender(); } catch { /* 忽略 */ } }
 }

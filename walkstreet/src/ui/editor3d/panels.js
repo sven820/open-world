@@ -8,20 +8,19 @@ import { searchPlaces } from "../../config/placeSearch.js";
 import { fmtDist } from "./util.js";
 
 /* ================ 图层控制 ================ */
-// 底图影像层按 provider URL 分类（GeoQ 垫底 / 天地图注记 / 其余=卫星影像），
+// 底图影像只保留注记层开关（图源选择在设置面板，影像整体开关在顶栏按钮），
 // 场景内容层按分组节点与 wrapper kind 开关；显隐状态持久化在 localStorage。
 
 export function layerDefs(ed) {
-  const isTd = getBasemapSource() === "tianditu";
+  // 图源面板（设置 → 地图图源）已接管底图选择，这里只保留注记层显隐；
+  // 卫星影像/深色矢量不再单列（影像整体开关在顶栏「卫星底图」按钮）
+  const src = getBasemapSource();
+  const hasAnno = src === "tianditu" || src === "tianditu_vec_anno" || src === "geoq";
   return [
-    {
+    ...(hasAnno ? [{
       title: "底图影像",
-      items: [
-        { key: "base", label: "深色矢量垫底", hint: "GeoQ · 免 key" },
-        { key: "img", label: "卫星影像", hint: isTd ? "天地图 img_w" : "Esri World Imagery" },
-        ...(isTd ? [{ key: "anno", label: "中文注记", hint: "天地图 cia_w" }] : []),
-      ],
-    },
+      items: [{ key: "anno", label: "中文注记", hint: src === "geoq" ? "天地图 cva_w" : "天地图 cia_w/cva_w" }],
+    }] : []),
     {
       title: "场景内容",
       items: [
@@ -126,7 +125,7 @@ export function settingsSections(ed) {
           const row = document.createElement("button");
           row.type = "button";
           row.className = "e3-set-item" + (s.id === current ? " active" : "");
-          row.innerHTML = `<span class="e3-set-radio"></span><span class="e3-set-label">${s.label}<small>${s.desc}</small></span>`;
+          row.innerHTML = `<span class="e3-set-radio"></span><span class="e3-set-label">${s.label}</span>`;
           row.addEventListener("click", () => {
             if (s.id === getBasemapSource()) { closeSettings(ed); return; }
             setBasemapSource(s.id);
