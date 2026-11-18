@@ -636,25 +636,59 @@ export function footprintAABB(obj) {
   return { minX, maxX, minZ, maxZ };
 }
 
-function treeMesh(obj) {
+// 树/路灯几何与材质全项目共享缓存（编辑器 meshes.js 与运行时 treeMesh/lampMesh 用同一份）：
+// 实例 Mesh 只携带各自变换，几千棵树也只有 2 组几何 + 2 组材质；
+// userData.shared 标记让重建/销毁逻辑跳过 dispose，避免把共享缓存释放掉
+let _tlShared = null;
+function treeLampShared() {
+  if (!_tlShared) {
+    const shared = (o) => { o.userData.shared = true; return o; };
+    _tlShared = {
+      trunkGeo: shared(new THREE.CylinderGeometry(0.25, 0.35, 3, 6)),
+      trunkMat: shared(new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 1 })),
+      crownGeo: shared(new THREE.IcosahedronGeometry(2.2, 0)),
+      crownMat: shared(new THREE.MeshStandardMaterial({ color: 0x2f7a3f, roughness: 1, flatShading: true })),
+      poleGeo: shared(new THREE.CylinderGeometry(0.12, 0.16, 6.5, 6)),
+      poleMat: shared(new THREE.MeshStandardMaterial({ color: 0x3c4650, roughness: 0.6 })),
+      headGeo: shared(new THREE.SphereGeometry(0.45, 10, 8)),
+      headMat: shared(new THREE.MeshStandardMaterial({ color: 0xfff3c4, emissive: 0xffd873, emissiveIntensity: 1.4 })),
+    };
+  }
+  return _tlShared;
+}
+
+// 编辑器构建用（不定位，wrapper / 调用方负责位置缩放）
+export function buildTreeGroup() {
+  const s = treeLampShared();
   const g = new THREE.Group();
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.35, 3, 6), new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 1 }));
+  const trunk = new THREE.Mesh(s.trunkGeo, s.trunkMat);
   trunk.position.y = 1.5; trunk.castShadow = true;
-  const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(2.2, 0), new THREE.MeshStandardMaterial({ color: 0x2f7a3f, roughness: 1, flatShading: true }));
+  const crown = new THREE.Mesh(s.crownGeo, s.crownMat);
   crown.position.y = 4.6; crown.castShadow = true;
   g.add(trunk, crown);
+  return g;
+}
+
+export function buildLampGroup() {
+  const s = treeLampShared();
+  const g = new THREE.Group();
+  const pole = new THREE.Mesh(s.poleGeo, s.poleMat);
+  pole.position.y = 3.25; pole.castShadow = true;
+  const head = new THREE.Mesh(s.headGeo, s.headMat);
+  head.position.y = 6.6;
+  g.add(pole, head);
+  return g;
+}
+
+function treeMesh(obj) {
+  const g = buildTreeGroup();
   g.scale.setScalar(obj.sc || 1);
   g.position.set(obj.pos[0], obj.baseY || 0, obj.pos[1]);
   return g;
 }
 
 function lampMesh(obj) {
-  const g = new THREE.Group();
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 6.5, 6), new THREE.MeshStandardMaterial({ color: 0x3c4650, roughness: 0.6 }));
-  pole.position.y = 3.25; pole.castShadow = true;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.45, 10, 8), new THREE.MeshStandardMaterial({ color: 0xfff3c4, emissive: 0xffd873, emissiveIntensity: 1.4 }));
-  head.position.y = 6.6;
-  g.add(pole, head);
+  const g = buildLampGroup();
   g.position.set(obj.pos[0], 0, obj.pos[1]);
   return g;
 }

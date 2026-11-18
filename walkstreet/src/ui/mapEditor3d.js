@@ -1407,9 +1407,13 @@ export class MapEditor3d {
         this._three.scene.remove(w);
         // 资产实例（sharedTpl）的几何/材质与模板缓存共享，dispose 会把 GPU 缓冲
         // 一并释放，下次渲染重新上传 —— 资产多时每次重建都是卡顿尖峰，故跳过；
-        // 标准材料库共享材质（userData.shared）同样不随对象重建释放
+        // 标准材料库共享材质（material.userData.shared）与树/路灯共享几何
+        // （geometry.userData.shared）同样不随对象重建释放
         const shared = w.children[0] && w.children[0].userData && w.children[0].userData.sharedTpl;
-        if (!shared) w.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material && !(o.material.userData && o.material.userData.shared)) o.material.dispose(); });
+        if (!shared) w.traverse((o) => {
+          if (o.geometry && !(o.geometry.userData && o.geometry.userData.shared)) o.geometry.dispose();
+          if (o.material && !(o.material.userData && o.material.userData.shared)) o.material.dispose();
+        });
       }
     }
     for (const r of this.map.features.roads) {
@@ -1600,12 +1604,86 @@ export class MapEditor3d {
     this._compassTxt.textContent = `${Math.round(deg)}° ${dirs[Math.round(deg / 45) % 8]}`;
   }
 
-  _rebuildFeature(listName) {
-    // 简单起见：单类重建走全量重建（数据量小，成本可忽略）
-    this._rebuildAll();
+  // 销毁单个 wrapper：摘出场景 + 释放几何/材质（共享缓存除外，见 _rebuildAll 注释）
+  _disposeWrapper(w) {
+    this._wrappers.delete(w.data.id);
+    for (const m of w.pickMeshes) this._byPick.delete(m);
+    this._three.scene.remove(w.root);
+    const shared = w.root.children[0] && w.root.children[0].userData && w.root.children[0].userData.sharedTpl;
+    if (!shared) w.root.traverse((o) => {
+      if (o.geometry && !(o.geometry.userData && o.geometry.userData.shared)) o.geometry.dispose();
+      if (o.material && !(o.material.userData && o.material.userData.shared)) o.material.dispose();
+    });
   }
 
-  _rebuildObjects() { this._rebuildAll(); }
+  // 单类增量重建：只销毁/重建指定图层的 wrapper，其余图层与骨架原样保留。
+  // 旧实现 `_rebuildFeature`/`_rebuildObjects` 直接转 `_rebuildAll`——放一棵树都要
+  // 重建全部道路/河流/路块/物件/骨架，卡顿随地图规模线性放大；改成按类重建后
+  // 放置/微调成本只与本类元素数量相关。骨架（程序化路网预览）只依赖道路数据，
+  // 仅道路变化时才跟着重建
+  _rebuildKind(kind) {
+    for (const id of Array.from(this._wrappers.keys())) {
+      const w = this._wrappers.get(id);
+      if (w && w.kind === kind) this._disposeWrapper(w);
+    }
+    if (kind === "road") {
+      this._bbConstraints = null; // 道路变了，广告牌摆放约束需重算
+      for (const r of this.map.features.roads) {
+        this._makeWrapper("road", r, this._buildRoadMesh(r));
+      }
+      this._rebuildSkeleton(); // 描边道路的中心引导线画在骨架层
+    } else if (kind === "river") {
+      for (const r of this.map.features.rivers) {
+        this._makeWrapper("river", r, this._buildRiverMesh(r));
+      }
+    } else if (kind === "roadTile") {
+      this.map.features.roadTiles = this.map.features.roadTiles || []; // 旧地图补空
+      rtMarkDirty(this); // 端口缓存随数据整体失效
+      const rtM = rtMiters(this.map.features.roadTiles);
+      for (const t of this.map.features.roadTiles) {
+        this._makeWrapper("roadTile", t, buildRoadTileMesh(this, t, false, rtM));
+      }
+    } else if (kind === "object") {
+      this._bbConstraints = null; // 建筑/资产变了，摆放约束需重算
+      for (const o of this.map.objects) {
+        let m = null;
+        try {
+          m = this._buildObjectMesh(o);
+        } catch (err) {
+          // 单个物件数据异常不应拖垮整个场景重建（否则表现为"一大片内容消失"）
+          console.warn("[editor3d] 物件构建失败，已跳过：", o && o.type, err);
+        }
+        if (!m) continue;
+        this._makeWrapper("object", o, m);
+      }
+      this._updateBBSelection(); // 广告牌占位边界跟随新 wrapper
+    }
+    // 重建后旧 wrapper 已销毁：选中态接回同 id 的新 wrapper，
+    // 否则 TransformControls 还挂在已移出场景的对象上（每帧报错）
+    if (this.sel && this.sel.kind === kind && this.sel.data && this.sel.data.id) {
+      const w = this._wrappers.get(this.sel.data.id);
+      if (w && w !== this.sel) { this.sel = w; this._three.tc.attach(w.root); }
+      else if (!w) this._select(null);
+    }
+  }
+
+  // 资产预热/记录取回是异步的：N 个未热资产会各自回调一次重建，合并成
+  // 一帧一次（打开含大量新资产的地图时，N 次全量物件重建 → 1 次）
+  _scheduleObjectsRebuild() {
+    if (this._objectsRebuildPending || this._disposed) return;
+    this._objectsRebuildPending = true;
+    requestAnimationFrame(() => {
+      this._objectsRebuildPending = false;
+      if (!this._disposed) this._rebuildObjects();
+    });
+  }
+
+  _rebuildFeature(listName) {
+    // 单类增量重建（见 _rebuildKind）：只重建对应图层
+    this._rebuildKind(listName === "roads" ? "road" : listName === "rivers" ? "river" : "roadTile");
+  }
+
+  _rebuildObjects() { this._rebuildKind("object"); }
 
   _buildObjectMesh(o) {
     if (o.type === "asset") return this._buildAssetMesh(o);
@@ -1638,7 +1716,7 @@ export class MapEditor3d {
         this._assetFetchPending.add(o.assetId);
         getAsset(o.assetId).then((a) => {
           this._assetFetchPending.delete(o.assetId);
-          if (a) { this._assetCache.set(a.id, a); this._rebuildObjects(); }
+          if (a) { this._assetCache.set(a.id, a); this._scheduleObjectsRebuild(); }
         });
       }
       return null;
@@ -1652,7 +1730,7 @@ export class MapEditor3d {
     }
     const tpl = getAssetTemplateIfReady(asset.id);
     if (tpl) return assetInstance(asset, { scale: o.scale == null ? 1 : o.scale });
-    warmAssetTemplate(asset).then((t) => { if (t) this._rebuildObjects(); });
+    warmAssetTemplate(asset).then((t) => { if (t) this._scheduleObjectsRebuild(); });
     const s = asset.source === "traced" ? tracedUnitSize(asset) : (asset.unitSize || { x: 4, y: 4, z: 4 });
     const k = o.scale == null ? 1 : o.scale;
     const ph = new THREE.Mesh(

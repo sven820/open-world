@@ -10,6 +10,7 @@ import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { bendGeometry } from "../../config/curvature.js";
 import { makeAsphaltTexture, ASPHALT_TILE } from "../../world/textures.js";
 import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "../../world/materials.js";
+import { buildTreeGroup, buildLampGroup } from "../../world/customMap.js";
 import { buildBillboardGroup, editorScreenMaterial, editorCornerScreenMaterial } from "../../world/billboard/mounts.js";
 
 // 世界米制 planar UV（与运行时 customMap.planarUV 同式）：纹理按世界坐标对齐，
@@ -175,24 +176,14 @@ export function buildBuildingMesh(obj) {
   return group;
 }
 
+// 树/路灯复用运行时 customMap 的共享几何/材质（全项目同一份，userData.shared
+// 标记防 dispose）：编辑器放几百棵树也不会新建几何，重建也不再是卡顿尖峰
 export function buildTreeMesh() {
-  const g = new THREE.Group();
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.35, 3, 6), new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 1 }));
-  trunk.position.y = 1.5; trunk.castShadow = true;
-  const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(2.2, 0), new THREE.MeshStandardMaterial({ color: 0x2f7a3f, roughness: 1, flatShading: true }));
-  crown.position.y = 4.6; crown.castShadow = true;
-  g.add(trunk, crown);
-  return g;
+  return buildTreeGroup();
 }
 
 export function buildLampMesh() {
-  const g = new THREE.Group();
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 6.5, 6), new THREE.MeshStandardMaterial({ color: 0x3c4650, roughness: 0.6 }));
-  pole.position.y = 3.25; pole.castShadow = true;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.45, 10, 8), new THREE.MeshStandardMaterial({ color: 0xfff3c4, emissive: 0xffd873, emissiveIntensity: 1.4 }));
-  head.position.y = 6.6;
-  g.add(pole, head);
-  return g;
+  return buildLampGroup();
 }
 
 export function buildObjectMesh(ed, o) {
