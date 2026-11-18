@@ -66,6 +66,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   if (req.method === "GET" && path === "/api/ai/abilities") {
     return sendJson(res, 200, { result: listAbilities() });
   }
+  // 聊天频道可选模型清单（前端下拉展示用；只读配置，无业务逻辑）
+  if (req.method === "GET" && path === "/api/ai/chat/providers") {
+    return sendJson(res, 200, {
+      result: Object.entries(runtime.chatAgents).map(([id]) => {
+        const p = runtime.config.chatProviders[id];
+        return { id, model: p?.model || "" };
+      }),
+    });
+  }
 
   // ---- POST /api/ai/:ability/invoke ----
   const invokeMatch = path.match(/^\/api\/ai\/([^/]+)\/invoke$/);

@@ -198,7 +198,7 @@ export class RenderSettingsPanel {
     if (window.__fps) parts.push(`${window.__fps.toFixed(0)} FPS`);
     const fs = g && g.engine && g.engine.frameStats;
     if (fs) {
-      parts.push(`${fs.calls} draw call`);
+      parts.push(`${fs.calls} 绘制调用`);
       parts.push(`${(fs.triangles / 1000).toFixed(0)}K 三角面`);
     }
     if (g && g.city && g.city.chunks) parts.push(`分块 ${g.city.visibleChunks}/${g.city.chunks.length}`);

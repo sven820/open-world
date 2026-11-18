@@ -59,16 +59,34 @@
 
     <div class="hud-bc">
       <div class="prompt hidden" id="hud-prompt"><kbd>F</kbd><span>上车</span></div>
-      <div class="tip" id="hud-tip">WASD 移动 · 左键拖动平移镜头 · 右键拖动旋转视角 · 滚轮缩放（拉远自动升空俯瞰） · Shift 奔跑 · Space 跳跃 · F 上车 · M 地图</div>
-    </div>
-
-    <div class="hud-br">
-      <div class="controls-mini"><kbd>M</kbd> 地图　<kbd>F</kbd> 上下车　<kbd>C</kbd> 视角复位</div>
     </div>
 
     <div class="speedo hidden" id="speedo">
       <svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="sp-bg"/><circle cx="60" cy="60" r="52" class="sp-fg" id="sp-arc"/></svg>
       <div class="sp-val"><b id="sp-num">0</b><span>km/h</span></div>
+    </div>
+
+    <div id="chat-root">
+      <div id="chat-panel" class="hidden">
+        <div class="chat-head">
+          <div class="chat-tabs" id="chat-tabs"></div>
+          <span id="chat-close" title="关闭 (Esc)">✕</span>
+        </div>
+        <div class="chat-list" id="chat-list"></div>
+        <div class="chat-typing hidden" id="chat-typing"><span class="dots"><i></i><i></i><i></i></span>小漫正在输入…</div>
+        <div class="chat-input-row">
+          <input id="chat-input" placeholder="问问 AI 助手 小漫…" maxlength="200" autocomplete="off" />
+          <button id="chat-send">发送</button>
+        </div>
+        <div class="chat-foot">
+          <span class="cf-hint">Enter 发送 · Esc 关闭</span>
+          <div class="chat-model">
+            <button id="chat-model-btn" title="选择模型"><span class="cm-star">✦</span><b id="chat-model-name">DeepSeek</b><i class="cm-caret">▾</i></button>
+            <div id="chat-model-menu" class="hidden"></div>
+          </div>
+        </div>
+      </div>
+      <button id="chat-toggle" title="频道 (Enter)"><span>💬</span><i id="chat-badge" class="hidden">0</i></button>
     </div>
 
     <div class="notify" id="notify"></div>
@@ -132,23 +150,45 @@
   <div id="render-settings" class="hidden">
     <div class="ms-panel rs-panel">
       <div class="ms-head">
-        <h3>设置 <small>SETTINGS</small></h3>
+        <h3>设置</h3>
         <span id="rs-close">✕</span>
       </div>
       <div class="set-tabs" id="set-tabs">
-        <button class="set-tab active" data-set-tab="graphics">画面设置 <small>GRAPHICS</small></button>
-        <button class="set-tab" data-set-tab="ai">AI 设置 <small>AI MODEL</small></button>
+        <button class="set-tab active" data-set-tab="graphics">画面设置</button>
+        <button class="set-tab" data-set-tab="ai">AI 设置</button>
+        <button class="set-tab" data-set-tab="keys">快捷键</button>
       </div>
       <div class="set-pane" data-set-pane="graphics">
         <div class="rs-list" id="rs-list"></div>
         <div class="rs-foot">
           <span id="rs-stats">—</span>
-          <button class="bm-btn" id="rs-reset">恢复默认 <span>RESET</span></button>
+          <button class="bm-btn" id="rs-reset">恢复默认</button>
         </div>
         <p class="ms-note">设置即时生效并自动保存。渲染距离 / 阴影 / 泛光决定显卡负载；行人车流数量决定 CPU 负载。画面卡顿时优先降「渲染分辨率」与「实时阴影」。</p>
       </div>
       <div class="set-pane hidden" data-set-pane="ai">
         <div id="ai-settings-panel"></div>
+      </div>
+      <div class="set-pane hidden" data-set-pane="keys">
+        <div class="rs-list">
+          <h5 class="rs-sec">移动</h5>
+          <div class="key-row"><span class="key-keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span class="key-desc">移动（驾驶时 = 前进 / 刹车 + 转向）</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>Shift</kbd></span><span class="key-desc">奔跑</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>Space</kbd></span><span class="key-desc">跳跃（驾驶时 = 手刹）</span></div>
+          <h5 class="rs-sec">视角</h5>
+          <div class="key-row"><span class="key-keys"><kbd>左键拖动</kbd></span><span class="key-desc">平移镜头</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>右键拖动</kbd></span><span class="key-desc">旋转视角</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>滚轮</kbd></span><span class="key-desc">缩放（拉远自动升空俯瞰）</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>C</kbd></span><span class="key-desc">视角复位</span></div>
+          <h5 class="rs-sec">载具与地图</h5>
+          <div class="key-row"><span class="key-keys"><kbd>F</kbd></span><span class="key-desc">上车 / 下车（靠近载具时屏幕下方有提示）</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>M</kbd></span><span class="key-desc">打开 / 关闭大地图</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span class="key-desc">大地图内平移视图</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>左键拖动</kbd></span><span class="key-desc">大地图内平移</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>右键拖动</kbd></span><span class="key-desc">大地图内旋转</span></div>
+          <div class="key-row"><span class="key-keys"><kbd>滚轮</kbd></span><span class="key-desc">大地图内以光标为中心缩放</span></div>
+        </div>
+        <p class="ms-note">以上为游戏世界通用操作；地图编辑器 / 模型工坊内的编辑快捷键见各界面内的状态栏提示。</p>
       </div>
     </div>
   </div>

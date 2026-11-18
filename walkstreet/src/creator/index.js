@@ -1,9 +1,9 @@
 import { AvatarRig } from "./avatarRig.js";
-import { PARAM_GROUPS, COLOR_PARAMS, PRESETS, PARAM_MAP, defaultConfig, clampConfig, presetConfig, randomConfig } from "./faceParams.js";
+import { PARAM_GROUPS, COLOR_PARAMS, PRESETS, defaultConfig, clampConfig, presetConfig, randomConfig } from "./faceParams.js";
 import { AIStylist } from "./aiStylist.js";
-import { ImageAvatarGenerator, prepareImage } from "./imageAvatar.js";
+import { ImageAvatarGenerator } from "./imageAvatar.js";
 import { onAIConfigChange, configured, isVisionModel } from "../config/aiConfig.js";
-import { gatewayAvailable, invokeAbility } from "../ai/wsAiClient.js";
+import { gatewayAvailable } from "../ai/wsAiClient.js";
 import "./creator.css";
 
 const STORAGE_KEY = "ws_creator_avatar";
@@ -435,38 +435,8 @@ export class CharacterCreator {
     }
   }
 
-  /** 附件为图片：网关 image-avatar（vision）优先，回退旧直连/本地分析 */
+  /** 附件为图片：与「以图生成」弹窗统一走 ImageAvatarGenerator（网关 image-avatar → 旧直连 → 本地分析） */
   async _aiRefineImage(file, extraPrompt) {
-    try {
-      if (await gatewayAvailable()) {
-        const img = await prepareImage(file);
-        const data = await invokeAbility("image-avatar", {
-          imageBase64: img.base64,
-          extraPrompt: extraPrompt || "",
-          currentConfig: this.config,
-        });
-        const changes = data && data.changes && typeof data.changes === "object" ? data.changes : null;
-        if (data && data.ok !== false && changes && Object.keys(changes).length) {
-          const cfg = clampConfig(this.config);
-          for (const [id, raw] of Object.entries(changes)) {
-            const p = PARAM_MAP[id];
-            if (!p) continue;
-            const v = Number(raw);
-            if (!Number.isFinite(v)) continue;
-            cfg.params[id] = Math.min(p.max, Math.max(p.min, Math.round(v)));
-          }
-          cfg.name = "照片形象";
-          return { ok: true, source: "gateway", message: data.reply || "已按照片调整参数", config: cfg };
-        }
-        if (data && data.ok === false) {
-          return { ok: false, message: data.reply || "照片中未识别出有效特征" };
-        }
-        // 网关返回无效结果 → 走旧路径
-      }
-    } catch (e) {
-      // 网关不可用/失败 → 走旧路径（localRefine 式兜底在旧生成器里）
-    }
-    // 旧路径：直连视觉模型 / 本地图像分析（Key 在浏览器，历史行为保留）
     return this.imageGen.generate(file, this.config, { extraPrompt: extraPrompt || "" });
   }
 
@@ -487,8 +457,12 @@ export class CharacterCreator {
     $("#cc-image-modal", this.el).classList.remove("hidden");
   }
 
-  _updateImageSource() {
+  async _updateImageSource() {
     const el = $("#cc-image-source", this.el);
+    if (await gatewayAvailable()) {
+      el.textContent = "引擎：AI 网关 image-avatar（视觉模型，Key 在服务端；网关不可用时自动回退直连/本地分析）";
+      return;
+    }
     const c = this.ai.config;
     const vm = c.visionModel || "";
     if (!configured()) {

@@ -13,8 +13,12 @@ export class Input {
     this.dragLook = false;   // true while a mouse button is held → drag-to-look
     this._dragBtn = -1;
     this.onLockChange = null;
+    this._isTypingTarget = (t) =>
+      !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
     this._onKeyDown = (e) => {
       if (e.repeat) return;
+      // 焦点在输入控件（聊天框/编辑器表单等）时，按键属于 UI，不进游戏
+      if (this._isTypingTarget(e.target)) return;
       this.downKeys.add(e.code);
       this.pressedSet.add(e.code);
       // Layout-robust fallback: on some (non-QWERTY) layouts the letter printed

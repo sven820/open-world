@@ -34,6 +34,30 @@ export interface GatewayConfig {
     /** 视觉模型（可选；未配置时 image-avatar 回退主模型，主模型非 vision 会 502 → 前端走旧回退） */
     visionModel: string;
   };
+  /** 聊天频道可选模型 provider（chat 能力用），id 小写；
+   * 由 AI_CHAT_PROVIDER_<ID>_BASE_URL / _API_KEY / _MODEL 三件套定义，缺一不收 */
+  chatProviders: Record<string, ProviderConfig>;
+}
+
+export interface ProviderConfig {
+  baseURL: string;
+  apiKey: string;
+  model: string;
+}
+
+/** 解析 AI_CHAT_PROVIDER_<ID>_* 环境变量为 provider 映射 */
+function loadChatProviders(): Record<string, ProviderConfig> {
+  const map: Record<string, ProviderConfig> = {};
+  for (const key of Object.keys(process.env)) {
+    const m = key.match(/^AI_CHAT_PROVIDER_([A-Z0-9_]+)_BASE_URL$/);
+    if (!m) continue;
+    const id = m[1].toLowerCase();
+    const baseURL = (process.env[key] || "").replace(/\/+$/, "");
+    const apiKey = process.env[`AI_CHAT_PROVIDER_${m[1]}_API_KEY`] || "";
+    const model = process.env[`AI_CHAT_PROVIDER_${m[1]}_MODEL`] || "";
+    if (baseURL && apiKey && model) map[id] = { baseURL, apiKey, model };
+  }
+  return map;
 }
 
 export function loadConfig(): GatewayConfig {
@@ -42,7 +66,7 @@ export function loadConfig(): GatewayConfig {
   const apiKey = process.env.AI_PROVIDER_API_KEY || "";
   const model = process.env.AI_PROVIDER_MODEL || "";
   const visionModel = process.env.AI_PROVIDER_VISION_MODEL || "";
-  return { port, provider: { baseURL, apiKey, model, visionModel } };
+  return { port, provider: { baseURL, apiKey, model, visionModel }, chatProviders: loadChatProviders() };
 }
 
 export function modelConfigured(cfg: GatewayConfig): boolean {
@@ -57,12 +81,19 @@ export function createModel(cfg: GatewayConfig, opts: { vision?: boolean } = {})
     (err as any).status = 503;
     throw err;
   }
+  // 视觉模型未配置时回退主模型（如主模型不支持 vision，调用会 502，前端走旧回退）
+  if (opts.vision && cfg.provider.visionModel) {
+    return createModelFromProvider({ ...cfg.provider, model: cfg.provider.visionModel });
+  }
+  return createModelFromProvider(cfg.provider);
+}
+
+/** 由任意 provider 配置构造模型实例（chat 多 provider 复用） */
+export function createModelFromProvider(p: ProviderConfig) {
   const provider = createOpenAICompatible({
     name: "gateway-provider",
-    baseURL: cfg.provider.baseURL,
-    apiKey: cfg.provider.apiKey,
+    baseURL: p.baseURL,
+    apiKey: p.apiKey,
   });
-  // 视觉模型未配置时回退主模型（如主模型不支持 vision，调用会 502，前端走旧回退）
-  const modelId = opts.vision && cfg.provider.visionModel ? cfg.provider.visionModel : cfg.provider.model;
-  return provider(modelId);
+  return provider(p.model);
 }

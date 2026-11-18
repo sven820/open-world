@@ -50,6 +50,7 @@ docs/
 | 文档 | 状态 | 说明 |
 |---|---|---|
 | [ai-agent-gateway-design.md](design/ai-agent-gateway-design.md) | active | **AI 网关总设计**（阶段 1 实施）：Mastra 集成、能力注册表、协议、目录结构、前端接入 |
+| [chat-channel-design.md](design/chat-channel-design.md) | active | 频道聊天面板（右下角）设计：AI 助手/世界/系统三频道、消息模型、AI 调用链与回退、交互细节 |
 
 ### requirements/（需求分析）
 

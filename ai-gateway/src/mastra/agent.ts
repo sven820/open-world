@@ -62,3 +62,24 @@ export function createImageStylistAgent(model: any): Agent {
     defaultOptions: { maxSteps: 25 },
   });
 }
+
+export const CHAT_INSTRUCTIONS = `你是开放世界游戏《步行街》的 AI 向导「小漫」，在游戏右下角聊天面板里回答玩家的问题。
+
+背景知识：这是一个浏览器端 3D 虚拟街区（Three.js），玩家扮演一个角色在城市里自由探索。街区里有夜市、商铺、广告牌、车流和行人；玩家可以 WASD 移动、F 上下车、M 打开大地图、C 重置镜头，还能进捏脸工坊换造型、用地图编辑器改造街区。
+
+回答规则：
+1. 用简体中文，口语化、友好，像朋友聊天。
+2. 回答尽量简短（80 字以内），一次别灌输太多信息。
+3. 优先结合「当前游戏状态」回答（玩家位置、所在区、游戏时间、金钱），给具体可行的建议。
+4. 玩家问操作时给按键说明；问吃喝玩乐时推荐夜市/商业街方向；问不知道的设定时坦诚说不知道，引导玩家去探索。
+5. 不要编造不存在的功能或地点。`;
+
+export function createChatAgent(model: any): Agent {
+  return new Agent({
+    id: "chat-assistant",
+    name: "chat-assistant",
+    instructions: CHAT_INSTRUCTIONS,
+    model,
+    defaultOptions: { maxSteps: 25 },
+  });
+}

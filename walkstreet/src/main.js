@@ -12,6 +12,7 @@ import { Traffic } from "./entities/traffic.js";
 import { PedestrianCrowd } from "./entities/pedestrians.js";
 import { Player } from "./entities/player.js";
 import { Hud } from "./ui/hud.js";
+import { ChatPanel } from "./ui/chatPanel.js";
 import {
   listMaps, getMap, createMap, saveMapData, deleteMap,
   getActiveMapId, setActiveMapId, resolveActiveMap,
@@ -144,8 +145,9 @@ async function buildWorld(mapData, mapId) {
   await player.ready;
   await player.setAvatarConfig(loadSavedAvatar());
   const hud = new Hud(city, player, env);
+  const chat = new ChatPanel(hudEl); // 右下角频道聊天面板（设计见 docs/design/chat-channel-design.md）
   const mapName = mapData ? mapData.name : "默认街区 · 程序化城市";
-  world = { mapId, mapName, city, landmarkGroup, traffic, peds, player, hud, billboards };
+  world = { mapId, mapName, city, landmarkGroup, traffic, peds, player, hud, chat, billboards };
   window.__game = { engine, env, city, traffic, peds, player, hud, billboards, adminSync };
   adminSync.attach(billboards, { mapId, mapName });
 }
@@ -175,6 +177,7 @@ function disposeWorld() {
   const safe = (fn) => { try { fn(); } catch (e) { console.warn("[dispose]", e); } };
   if (w.player.driving) safe(() => w.player.exit());
   safe(() => w.hud.dispose());
+  safe(() => w.chat.dispose());
   safe(() => w.traffic.dispose());
   safe(() => w.peds.dispose());
   safe(() => w.player.dispose());
@@ -506,6 +509,7 @@ engine.onUpdate((dt, time) => {
   }
   if (started && w) {
     if (input.pressed("KeyM")) { bigOpen ? closeBigMap() : openBigMap(); }
+    if (input.pressed("Enter") && !bigOpen && w.chat) w.chat.toggleOpen(); // 呼出/收起频道聊天
     if (bigOpen) {
       const pan = 30 * dt / (w.hud._bigZoom || 1);
       if (input.down("KeyW")) w.hud.panBig(0, -pan);

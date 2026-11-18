@@ -1,17 +1,21 @@
 import { PARAM_MAP, COLOR_PARAMS, clampConfig } from "./faceParams.js";
 import { isVisionModel } from "../config/aiConfig.js";
+import { gatewayAvailable, invokeAbility } from "../ai/wsAiClient.js";
 
 /* ------------------------------------------------------------------ *
  * 以图捏脸：图片 → 角色形象
  *
- * 两条生成路径：
- *  1) 多模态视觉大模型（配置了 Key 时）：图片 + System Prompt 一起发给
- *     OpenAI 兼容的 vision 接口，模型直接读出五官特征并输出捏脸参数。
- *  2) 本地 Canvas 图像分析（无 Key / 调用失败时）：纯浏览器端采样肤色、
+ * 三条生成路径（回退链：网关 → 旧直连 → 本地分析）：
+ *  1) AI 网关 image-avatar 能力（网关可用时优先）：Key 只在服务端 .env，
+ *     浏览器不持有任何密钥。失败/无效结果自动落旧路径。
+ *  2) 旧直连视觉模型（历史行为保留，Key 在浏览器）：图片 + System Prompt
+ *     发给 OpenAI 兼容的 vision 接口，模型直接读出五官特征并输出捏脸参数。
+ *  3) 本地 Canvas 图像分析（无 Key / 全部失败时）：纯浏览器端采样肤色、
  *     发色、明暗对比，按人像统计特征生成形象，完全离线、不上传图片。
  *
- * 两条路径产出的都是本工坊的 0~100 参数配置，可直接套用到现有精细骨骼
- * 角色；这样既复用了项目资产，也让图片生成的结果能继续手动微调、保存、
+ * 捏脸工坊「以图生成」弹窗与 AI 输入栏图片附件统一走本类，路径一致。
+ * 产出的都是本工坊的 0~100 参数配置，可直接套用到现有精细骨骼角色；
+ * 这样既复用了项目资产，也让图片生成的结果能继续手动微调、保存、
  * 进入游戏。
  * ------------------------------------------------------------------ */
 
@@ -74,25 +78,87 @@ export class ImageAvatarGenerator {
   }
 
   /**
-   * 图片生成角色。优先视觉大模型；无 Key 或失败时回落本地分析。
+   * 图片生成角色。回退链：网关 image-avatar → 旧直连视觉模型 → 本地分析。
    * @returns {Promise<{ok, config, message, source, analysis}>}
    */
   async generate(file, currentConfig, { preferLocal = false, extraPrompt = "" } = {}) {
     const img = await prepareImage(file);
-    if (!preferLocal && this.ai.configured && this._supportsVision()) {
-      try {
-        const r = await this._visionGenerate(img, currentConfig, extraPrompt);
-        if (r) return r;
-      } catch (e) {
+
+    if (!preferLocal) {
+      // 1) 网关 image-avatar（Key 在服务端，优先走）
+      let gatewayError = null;
+      if (await gatewayAvailable()) {
+        try {
+          const r = await this._gatewayGenerate(img, currentConfig, extraPrompt);
+          if (r) return r; // ok:true 成功；ok:false 为明确业务失败（如照片无清晰人脸）
+          // r === null：网关可用但未产出有效参数 → 落旧直连
+        } catch (e) {
+          gatewayError = e; // 网关不可用/失败 → 落旧直连
+        }
+      }
+
+      // 2) 旧直连视觉模型（Key 在浏览器，历史行为保留）
+      if (this.ai.configured && this._supportsVision()) {
+        try {
+          const r = await this._visionGenerate(img, currentConfig, extraPrompt);
+          if (r) return r;
+        } catch (e) {
+          const reason = gatewayError
+            ? `网关调用失败（${gatewayError.message}），直连视觉模型也失败（${e.message}）`
+            : `视觉模型调用失败（${e.message}）`;
+          const local = this._localGenerate(img, currentConfig);
+          return { ...local, message: `${reason}，已用本地图像分析` };
+        }
+      }
+
+      if (gatewayError) {
         const local = this._localGenerate(img, currentConfig);
-        return { ...local, message: `视觉模型调用失败（${e.message}），已用本地图像分析` };
+        return { ...local, message: `网关调用失败（${gatewayError.message}），已用本地图像分析` };
+      }
+      if (this.ai.configured && !this._supportsVision()) {
+        const local = this._localGenerate(img, currentConfig);
+        return { ...local, message: `当前模型 ${this.ai.config.model} 未标记支持图片，已用本地分析；可在 AI 设置中换用视觉模型` };
       }
     }
-    if (this.ai.configured && !this._supportsVision()) {
-      const local = this._localGenerate(img, currentConfig);
-      return { ...local, message: `当前模型 ${this.ai.config.model} 未标记支持图片，已用本地分析；可在 AI 设置中换用视觉模型` };
-    }
+    // 3) 本地图像分析
     return this._localGenerate(img, currentConfig);
+  }
+
+  /**
+   * 网关 image-avatar 能力调用。
+   * 成功返回 {ok:true,...}；明确业务失败（照片无清晰人脸）返回 {ok:false,...}；
+   * 网关不可用/失败抛错、无效结果返回 null，由 generate 落旧路径。
+   */
+  async _gatewayGenerate(img, currentConfig, extraPrompt) {
+    const data = await invokeAbility("image-avatar", {
+      imageBase64: img.base64,
+      extraPrompt: extraPrompt || "",
+      currentConfig,
+    }, { timeoutMs: 45000 });
+
+    const changes = data && data.changes && typeof data.changes === "object" ? data.changes : null;
+    if (data && data.ok === false) {
+      return { ok: false, message: data.reply || "照片中未识别出有效特征" };
+    }
+    if (!changes || !Object.keys(changes).length) return null;
+
+    const cfg = clampConfig(currentConfig);
+    let count = 0;
+    for (const [id, raw] of Object.entries(changes)) {
+      const p = PARAM_MAP[id];
+      if (!p) continue;
+      const v = Number(raw);
+      if (!Number.isFinite(v)) continue;
+      cfg.params[id] = Math.min(p.max, Math.max(p.min, Math.round(v)));
+      count++;
+    }
+    if (!count) return null;
+    cfg.name = "照片形象";
+    return {
+      ok: true, source: "gateway", config: cfg,
+      message: data.reply || `已按照片调整 ${count} 项参数`,
+      analysis: data.reply || "",
+    };
   }
 
   _supportsVision() {
