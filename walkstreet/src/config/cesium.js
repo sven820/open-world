@@ -24,6 +24,12 @@ export const basemapSources = [
     desc: hasTiandituKey ? "官方图源 · 卫星影像含中文注记" : "内置公共 token · 可配专属 key（.env.local: VITE_TIANDITU_KEY）",
     needKey: false,
   },
+  {
+    id: "tianditu_vec_anno",
+    label: "天地图矢量 + 注记",
+    desc: "官方图源 · 矢量底图含中文注记（vec_w/cva_w · 球面墨卡托）",
+    needKey: false,
+  },
 ];
 
 /* ---------------- 图源选择（持久化） ---------------- */
@@ -51,7 +57,7 @@ export function setBasemapSource(id) {
 // 图源元信息：credit 文案 + 就绪状态（天地图 tk 由 config/tianditu.js 常备，configured 恒 true；
 // builtinToken = 正在用内置公共 token，供 UI 提示可配专属 key）
 export function basemapInfo(sourceId = getBasemapSource()) {
-  const credit = sourceId === "tianditu" ? "天地图" : "Esri World Imagery";
+  const credit = sourceId === "esri" ? "Esri World Imagery" : "天地图";
   const builtinToken = sourceId === "tianditu" && !hasTiandituKey;
   return { id: sourceId, credit, configured: true, builtinToken };
 }
@@ -78,8 +84,9 @@ export function buildImageryLayers(Cesium, sourceId = getBasemapSource()) {
   const providers = [
     new Cesium.UrlTemplateImageryProvider({ url: geoqVectorLayer.url, maximumLevel: geoqVectorLayer.maximumLevel }),
   ];
-  if (sourceId === "tianditu") {
-    for (const l of tiandituBasemapLayers("satellite")) {
+  if (sourceId === "tianditu" || sourceId === "tianditu_vec_anno") {
+    const preset = sourceId === "tianditu_vec_anno" ? "vector" : "satellite";
+    for (const l of tiandituBasemapLayers(preset)) {
       providers.push(new Cesium.UrlTemplateImageryProvider({
         url: l.url, subdomains: l.subdomains, maximumLevel: l.maximumLevel,
       }));
