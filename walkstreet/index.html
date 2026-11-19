@@ -140,7 +140,13 @@
       <div class="ms-list" id="ms-list"></div>
       <div class="ms-actions">
         <input id="ms-name" placeholder="新地图名称…" maxlength="16" />
-        <button id="ms-new">＋ 新增地图 <span>NEW</span></button>
+        <div class="ms-new-wrap">
+          <button id="ms-new">＋ 新增地图 <span>NEW</span></button>
+          <div id="ms-new-choose" class="hidden">
+            <button id="ms-new-3d">3D 编辑器 <span>3D</span></button>
+            <button id="ms-new-2d">普通编辑器 <span>2D</span></button>
+          </div>
+        </div>
         <button id="ms-studio">模型工坊 <span>STUDIO</span></button>
       </div>
       <p class="ms-note">默认地图为程序化街区。新增或编辑副本将打开地图编辑器，保存后可随时进入，之后仍可继续编辑保存。</p>

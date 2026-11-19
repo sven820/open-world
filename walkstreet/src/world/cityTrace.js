@@ -57,6 +57,36 @@ export function computeTraceJunctions(city) {
     const poly = c.pts;
     if (!poly || poly.length < 3) continue;
     stats.closedHandled++;
+    // 拼接路（roadTiles）：每块板是旋转矩形，走线形路求交，不走下面的面路多边形分支。
+    // 原因有二：① 板四边形只是整条链的一小段，按多边形截线求 A 组跨度会把斑马线
+    // 锁死在单块板内 —— 带线一出板（斜交时很常见）就截短甚至整组丢失；
+    // ② polyDirNear 对斜板会回退到 bbox 主轴方向（如 (0,1)），交点参数全错。
+    // 板自身的 rot 就是链向，宽度沿线恒定，直接按中心线 + 半宽解析求交即可。
+    if (c.tile) {
+      const t = c.tile, hl = (t.len || 3) / 2, hw = (t.w || 2) / 2;
+      const sn = Math.sin(t.rot || 0), cs = Math.cos(t.rot || 0);
+      for (const road of zs) {
+        if (Math.abs(cs) < 1e-6) continue;           // 链向纯 X，到不了 z = at
+        const L = (road.at - t.z) / cs;              // 交点在板中心线上的弧长参数
+        if (Math.abs(L) > hl) continue;
+        push({
+          x: t.x + sn * L, z: road.at, ux: sn, uz: cs,
+          roadHalf: hw, progHalf: asphaltHalf(road),
+          vx: 1, vz: 0, s: 0, roadIndex: c.index,
+        });
+      }
+      for (const road of xs) {
+        if (Math.abs(sn) < 1e-6) continue;           // 链向纯 Z，到不了 x = at
+        const L = (road.at - t.x) / sn;
+        if (Math.abs(L) > hl) continue;
+        push({
+          x: road.at, z: t.z + cs * L, ux: sn, uz: cs,
+          roadHalf: hw, progHalf: asphaltHalf(road),
+          vx: 0, vz: 1, s: 0, roadIndex: c.index,
+        });
+      }
+      continue;
+    }
     // 横路沿 X 延伸（z = at）：取多边形在 z = at 上的内部 x 区段
     for (const road of zs) {
       for (const [x0, x1] of polyClipX(poly, road.at)) {
@@ -215,10 +245,12 @@ export function buildTraceCrosswalks(city) {
     }
 
     // B 组：带线过 j + n·(±(边距+GAP))、方向 u；铺开范围 = 被穿路沥青在该带线上的真实区间。
-    // 面路两侧边界不对称，各侧各用实测边界。整条 yB=0.2：斜交时条纹长轴一端会伸进
-    // 主路描边路的路面（y=0.18），0.2 恰好浮在其上不被吃掉
+    // 面路两侧边界不对称，各侧各用实测边界（edgeNeg 为负号值，edgePos 为正号值，
+    // 都换算成正的边距幅值再乘 s 落到对应侧 —— GAP 必须加在幅值上，不能加在带符号值上，
+    // 否则无 edges 时 s=−1 会算出负距离，两条带叠到同一侧、对侧整组丢失）。
+    // 整条 yB=0.2：斜交时条纹长轴一端会伸进主路描边路的路面（y=0.18），0.2 恰好浮在其上不被吃掉
     for (const s of [-1, 1]) {
-      const lb = (s < 0 ? -(j.edgeNeg ?? j.roadHalf) : (j.edgePos ?? j.roadHalf)) + CW_GAP;
+      const lb = (s < 0 ? -(j.edgeNeg ?? -j.roadHalf) : (j.edgePos ?? j.roadHalf)) + CW_GAP;
       const o = { x: j.x + nx * s * lb, z: j.z + nz * s * lb };
       const t1 = lineHitT(o.x, o.z, ux, uz, j.x + mx * j.progHalf, j.z + mz * j.progHalf, vx, vz);
       const t2 = lineHitT(o.x, o.z, ux, uz, j.x - mx * j.progHalf, j.z - mz * j.progHalf, vx, vz);

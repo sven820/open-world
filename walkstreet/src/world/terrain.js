@@ -5,14 +5,14 @@
 // - 建筑/树/路灯/道路等所有静态内容：数据里只有 pos(x,z)，渲染高度一律现场
 //   采样高度场（terrainHeightAt / displaceGroup）—— 改地形后重建即全部重新
 //   落地，不会出现陷入地下或飘在空中；
-// - 三种生成模式：
-//   1. random 随机地形高：种子化分形值噪声（fbm），边缘向 0 衰减，与世界边界
-//      外的平地自然衔接；
-//   2. real 真实地形高：Cesium 高程源网格采样（ArcGIS 全球地形优先、Ion 兜底，
+// - 两种生成模式（旧版 random 随机地形已并入 custom：随机生成只是给 custom
+//   高度场填初始值的一种手段，生成后可继续笔刷雕刻）：
+//   1. real 真实地形高：Cesium 高程源网格采样（ArcGIS 全球地形优先、Ion 兜底，
 //      实现在 ui/editor3d/terrain.js），heights 存椭球高（与 Cesium 地形渲染同
 //      基准，编辑器底图挂同一 provider 保证影像贴合）；
-//   3. custom 自定义地形高：笔刷在网格上抬升/下压/抹平/平滑。
-// heights 为「绝对米制高度」：真实模式 = 椭球高；随机/自定义 = 相对局部 y=0 面。
+//   2. custom 自定义地形高：随机生成（种子化分形值噪声，fbm，边缘向 0 衰减，
+//      与世界边界外的平地自然衔接）或笔刷在网格上抬升/下压/抹平/平滑。
+// heights 为「绝对米制高度」：真实模式 = 椭球高；自定义 = 相对局部 y=0 面。
 // 地图无 terrain 字段 = 平面（所有 API 返回 0），旧地图零改动兼容。
 
 import * as THREE from "three";
@@ -44,6 +44,10 @@ export const ROAD_SHOULDER = 8;       // 窄路肩：只平整路面本身，不
 // 否则补丁三角面从下方顶穿路面 → 锯齿/缺口。下沉 0.42 + 补丁 -0.22 + 路面 0.14
 // ⇒ 路面-补丁 0.36m 余量、补丁-主地面 0.20m 仍填平壕沟。
 export const ROAD_BED_DROP = 0.42;
+// 路基补丁相对逻辑格点曲面的下沉量（city.js 里 bed.position.y = -BED_PATCH_LIFT）。
+// 贴地计算用 min(drop, BED_PATCH_LIFT)：补丁覆盖带内可见顶面是补丁（-0.23），
+// 补丁外主地面回到 -drop，两者取高者即为脚下实际顶面。
+export const BED_PATCH_LIFT = 0.23;
 const ROAD_CELL = 64;                 // 走廊段空间索引格边长（米）
 const LANE_W = 3.4;                   // 与 cityData.LANE_W 一致（避免反向依赖）
 const BED_TESS_EDGE = GROUND_STEP;    // displaceGroup 水平长面细分目标边长（与可见地面同精度，ADR-0005）
@@ -91,6 +95,18 @@ export function ensureTerrain(map) {
   const t = map && map.terrain;
   if (!t || !Array.isArray(t.heights) || !t.heights.length) return null;
   if (!(t.cols > 1) || !(t.rows > 1) || !(t.step > 0)) return null;
+  // 旧地图兼容：random 已并入 custom（随机生成 = custom 高度场的一种填充手段）。
+  // 就地改写模式，heights/seed/amplitude/scale 原样保留 → 旧随机地形打开即可笔刷雕刻
+  if (t.mode === "random") t.mode = "custom";
+  // 旧地图兼容：早期 blankTerrain 不写 x1/z1（高度场网格覆盖 bbox，可精确回填），
+  // 缺失时编辑器 buildGroundSurface 收到 NaN 直接返回 null → 自定义地形整片无地面
+  if (!Number.isFinite(t.x1) || !Number.isFinite(t.z1) || !Number.isFinite(t.x0) || !Number.isFinite(t.z0)) {
+    const bb = terrainBBox(map);
+    if (!Number.isFinite(t.x0)) t.x0 = Math.round(bb.x0);
+    if (!Number.isFinite(t.z0)) t.z0 = Math.round(bb.z0);
+    if (!Number.isFinite(t.x1)) t.x1 = bb.x1;
+    if (!Number.isFinite(t.z1)) t.z1 = bb.z1;
+  }
   return t;
 }
 
@@ -583,19 +599,26 @@ export function roadBedDropAt(map, x, z) {
   return q ? ROAD_BED_DROP * q.maxW : 0;
 }
 
-// 动态实体统一贴地：地形（含道路塑形）+ 所在表面层高。描边路 0.18 /
-// 人行道 0.24 / 街廓平台 0.16，与静态几何的层叠常量一致。
+// 动态实体统一贴地：按「实际可见顶面」分层取高（与静态几何的层叠常量一致）。
+// 层叠模型（ADR-0011）：逻辑格点曲面 gridHeightAt 之上，主地面/路基补丁在走廊带
+// 内下沉（主地面 -drop、补丁 -0.23），描边路条带 +0.18 / 拼接路条带 +0.19 /
+// 人行道条带 +0.24 / 街廓平台 +0.16。
+// - 默认（无条带覆盖）：主地面/补丁顶面 = grid - min(drop, 0.23)。贴逻辑高会在
+//   程序化路上恒浮 0.23m、路肩浮 0.2~0.4m（实测截图确认）。
+// - 描边路 / 拼接路条带：量到中心线距离（闭合板走廊的 segs 是周长，量周长会把
+//   板边外的路肩误判成路面）。
 export function surfaceHeightAt(map, x, z, city) {
-  const th = terrainHeightAt(map, x, z);
+  const th = gridHeightAt(map, x, z);
   if (!city) return th;
   const corridors = city.traceCorridors;
   if (corridors && corridors.length) {
     let best = Infinity, bestC = null;
     for (const c of corridors) {
-      if (!c._aabb) c._aabb = aabbOf(c.segs.flatMap((s) => [[s.ax, s.az], [s.bx, s.bz]]), c.edgeHalf + 1);
+      const segs = c.centerSegs || c.segs;
+      if (!c._aabb) c._aabb = aabbOf(segs.flatMap((s) => [[s.ax, s.az], [s.bx, s.bz]]), c.edgeHalf + 1);
       const bb = c._aabb;
       if (x < bb.minX || x > bb.maxX || z < bb.minZ || z > bb.maxZ) continue;
-      for (const s of c.segs) {
+      for (const s of segs) {
         const dx = s.bx - s.ax, dz = s.bz - s.az;
         const len2 = dx * dx + dz * dz;
         const u = clamp(len2 ? ((x - s.ax) * dx + (z - s.az) * dz) / len2 : 0, 0, 1);
@@ -605,13 +628,13 @@ export function surfaceHeightAt(map, x, z, city) {
     }
     if (bestC) {
       if (best <= bestC.roadHalf) return th + 0.18;
-      if (best <= bestC.edgeHalf) return th + 0.24;
+      if (bestC.sidewalk && best <= bestC.edgeHalf) return th + 0.24;
     }
   }
   for (const b of city.blocks || []) {
     if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1) return th + 0.16;
   }
-  return th;
+  return th - Math.min(roadBedDropAt(map, x, z), BED_PATCH_LIFT);
 }
 
 /* ---------------- 随机地形（种子化分形值噪声） ---------------- */
@@ -631,13 +654,15 @@ function noise2(x, z, seed) {
 }
 
 // 生成随机高度场：4 层 fbm（scale = 主起伏波长 m，amplitude = 峰谷幅度 m），
-// 范围边缘向 0 平滑衰减（防止世界边界出现断崖，也方便向外扩展平地）
-export function generateRandomTerrain(map, { seed = 1, amplitude = 60, scale = 500, step = TERRAIN_STEP_DEFAULT } = {}) {
+// 范围边缘平滑回落到基础高度 base（防止世界边界出现断崖，也方便向外扩展平地）。
+// mode = custom：随机生成只是自定义地形的一种填充手段，生成后可继续笔刷雕刻；
+// seed/amplitude/scale/baseHeight 留在地形对象上供面板回显与重新生成
+export function generateRandomTerrain(map, { seed = 1, amplitude = 60, scale = 500, base = 0, step = TERRAIN_STEP_DEFAULT } = {}) {
   const g = makeTerrainGrid(map, step);
   const { x0, z0, x1, z1, cols, rows } = g;
   const fall = clamp(Math.min(x1 - x0, z1 - z0) * 0.15, 120, 400); // 边缘衰减带宽
   const amp = clamp(amplitude, 2, 500);
-  const base = clamp(scale, 60, 4000);
+  const wl = clamp(scale, 60, 4000); // 主波长（原局部变量 base，避免与新参数重名改名）
   const heights = new Array(cols * rows);
   let k = 0;
   for (let j = 0; j < rows; j++) {
@@ -646,23 +671,25 @@ export function generateRandomTerrain(map, { seed = 1, amplitude = 60, scale = 5
       const x = x0 + i * g.step;
       let h = 0, f = 1, a = 1, norm = 0;
       for (let o = 0; o < 4; o++) {
-        h += noise2(x / (base / f), z / (base / f), seed + o * 101) * a;
+        h += noise2(x / (wl / f), z / (wl / f), seed + o * 101) * a;
         norm += a;
         f *= 2; a *= 0.5;
       }
       h = (h / norm - 0.5) * 2; // 归一到 [-1,1]
       const de = Math.min(x - x0, x1 - x, z - z0, z1 - z);
       const t = de >= fall ? 1 : de <= 0 ? 0 : (de / fall) * (de / fall) * (3 - 2 * (de / fall));
-      heights[k] = Math.round(h * amp * t * 10) / 10;
+      heights[k] = Math.round((base + h * amp * t) * 10) / 10;
     }
   }
-  return { mode: "random", seed: seed | 0, amplitude: amp, scale: base, ...g, heights, originH: 0 };
+  return { mode: "custom", seed: seed | 0, amplitude: amp, scale: wl, baseHeight: base, ...g, heights, originH: 0 };
 }
 
-// 空白高度场（custom 笔刷雕刻 / real 采样前的容器）
-export function blankTerrain(map, mode = "custom", step = TERRAIN_STEP_DEFAULT) {
+// 空白高度场（custom 笔刷雕刻 / real 采样前的容器）：
+// heights 全部填基础高度 base（编辑器自定义默认 10m 平地，可负 = 盆地）。
+// x0/z0/x1/z1 必须齐全（编辑器主地面按它取范围，缺 x1/z1 → NaN → 地面消失）
+export function blankTerrain(map, mode = "custom", step = TERRAIN_STEP_DEFAULT, base = 0) {
   const g = makeTerrainGrid(map, step);
-  return { mode, step: g.step, x0: g.x0, z0: g.z0, cols: g.cols, rows: g.rows, heights: new Array(g.cols * g.rows).fill(0), originH: 0 };
+  return { mode, step: g.step, x0: g.x0, z0: g.z0, x1: g.x1, z1: g.z1, cols: g.cols, rows: g.rows, heights: new Array(g.cols * g.rows).fill(base), baseHeight: base, originH: 0 };
 }
 
 /* ---------------- 自定义笔刷 ---------------- */
@@ -937,7 +964,11 @@ export function displaceGroup(map, group, opts = {}) {
     const pos = geo.attributes.position;
     for (let i = 0; i < pos.count; i++) {
       wp.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(o.matrixWorld);
-      wp.y += terrainHeightAt(map, wp.x, wp.z) - (bed ? roadBedDropAt(map, wp.x, wp.z) : 0);
+      // 顶起采样 gridHeightAt（ADR-0009 渲染曲面）而非连续 terrainHeightAt：
+      // 远景大地面 / 地形网格被细分到 ~8m 但相位与全局格网错开，按连续场顶起
+      // 仍是"另一张"分段线性曲面，凸坡上比格点曲面低最多 ~0.4m —— 人物按格点
+      // 曲面贴地就会在这些地方浮空。格点上两函数同值，主地面 / 补丁不受影响。
+      wp.y += gridHeightAt(map, wp.x, wp.z) - (bed ? roadBedDropAt(map, wp.x, wp.z) : 0);
       wp.applyMatrix4(inv);
       pos.setXYZ(i, wp.x, wp.y, wp.z);
     }
@@ -977,7 +1008,11 @@ export function gridHeightAt(map, x, z, step = GROUND_STEP) {
 
 // 凹曲面，两者各自的分段线性插值曲面互相穿插，粗者从下方顶穿补丁与路面，
 // 实测可高出 3.6m，表现就是「深绿底板盖住道路 / 路面断断续续」。
-export function buildGroundSurface(x0, z0, x1, z1, step = GROUND_STEP, tile = 16) {
+export function buildGroundSurface(x0, z0, x1, z1, step = GROUND_STEP, tile = 16, clipPoly = null) {
+  // 极大地图保护：顶点超上限时自动放粗步距（8→16→…→512m）保住可见地形面。
+  // 正常跨度（≤1.7 万米）在 8m 档从不触发，不影响 ADR-0005 的路基补丁同相位；
+  // 超限地图上粗地面与补丁的插值差可能顶穿路面——属可接受的降级（总比没有地形面好）
+  while (step < 512 && (Math.ceil((x1 - x0) / step) + 2) * (Math.ceil((z1 - z0) / step) + 2) > 800000) step *= 2;
   const i0 = Math.floor(x0 / step), i1 = Math.ceil(x1 / step);
   const j0 = Math.floor(z0 / step), j1 = Math.ceil(z1 / step);
   const cols = i1 - i0 + 1, rows = j1 - j0 + 1;
@@ -994,19 +1029,29 @@ export function buildGroundSurface(x0, z0, x1, z1, step = GROUND_STEP, tile = 16
       uv[k * 2] = x / tile; uv[k * 2 + 1] = z / tile;
     }
   }
+  // clipPoly（世界坐标 [[x,z]...]）：格点网格保持全局同相（顶点不动，与路基补丁
+  // 共享格点），只丢弃中心在多边形外的格子 → 地形面只铺在地图范围内。
+  // 顶点保留全集是为了与 buildRoadBedGeometry 同相位（ADR-0005），不能裁顶点。
+  const inPoly = clipPoly && clipPoly.length >= 3
+    ? (x, z) => pointInPoly(x, z, clipPoly)
+    : null;
   const idx = new Uint32Array((cols - 1) * (rows - 1) * 6);
   let t = 0;
   for (let j = 0; j < rows - 1; j++) {
     for (let i = 0; i < cols - 1; i++) {
+      if (inPoly && !inPoly((i0 + i + 0.5) * step, (j0 + j + 0.5) * step)) continue;
       const a = j * cols + i, b = a + 1, c = a + cols, d = c + 1;
       idx[t++] = a; idx[t++] = c; idx[t++] = b; // 俯视 CCW → 法线朝上
       idx[t++] = b; idx[t++] = c; idx[t++] = d;
     }
   }
+  if (!t) return null; // 裁剪后无格子（多边形不与范围相交）
+  // 裁剪丢弃了尾部格子 → 索引数组截断到实际用量（尾部 0 会变成退化三角形）
+  const index = t === idx.length ? idx : idx.slice(0, t);
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   g.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
-  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  g.setIndex(new THREE.BufferAttribute(index, 1));
   g.computeVertexNormals();
   return g;
 }

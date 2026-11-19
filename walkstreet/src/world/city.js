@@ -28,7 +28,7 @@ import {
 import { ColliderGrid } from "./colliderGrid.js";
 import {
   displaceGroup, ensureTerrain, buildRoadCorridors, buildRoadBedGeometry, buildGroundSurface,
-  terrainHeightAt as fieldHeightAt, terrainBBox, GROUND_STEP,
+  terrainHeightAt as fieldHeightAt, terrainBBox, GROUND_STEP, BED_PATCH_LIFT,
 } from "./terrain.js";
 import { buildTraceCorridors, collectConstraints, resolvePlacement, footprintBox } from "./billboard/placement.js";
 import { normalizeSpec } from "./billboard/mounts.js";
@@ -281,7 +281,7 @@ export class City {
       const bedGeo = buildRoadBedGeometry(this.data, ASPHALT_TILE);
       if (bedGeo) {
         const bed = new THREE.Mesh(bedGeo, mat);
-        bed.position.y = -0.23; // ADR-0011：高于下沉主地面(-0.42) 0.19m，低于路面 0.42m 杜绝顶穿
+        bed.position.y = -BED_PATCH_LIFT; // ADR-0011：高于下沉主地面 0.19m，低于路面 0.42m 杜绝顶穿
         bed.receiveShadow = true;
         bed.userData.terrainNormals = true;
         this.group.add(bed);

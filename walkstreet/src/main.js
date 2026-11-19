@@ -362,10 +362,28 @@ function takeMapName(fallback) {
 }
 
 function onNewMap() {
-  const map = createMap(takeMapName(""));
-  mapSelectEl().classList.add("hidden");
-  openEditor(map);
+  // 不直接进编辑器：先让用户选 3D / 普通，点其他区域自动收起
+  const choose = document.getElementById("ms-new-choose");
+  choose.classList.toggle("hidden");
 }
+
+function bindNewMapChoice() {
+  const choose = document.getElementById("ms-new-choose");
+  const create = async (mode) => {
+    const map = createMap(takeMapName(""));
+    choose.classList.add("hidden");
+    mapSelectEl().classList.add("hidden");
+    if (mode === "3d") await openEditor3d(map);
+    else openEditor(map);
+  };
+  document.getElementById("ms-new-3d").addEventListener("click", () => create("3d"));
+  document.getElementById("ms-new-2d").addEventListener("click", () => create("2d"));
+  document.addEventListener("pointerdown", (e) => {
+    if (choose.classList.contains("hidden")) return;
+    if (!choose.contains(e.target) && !e.target.closest("#ms-new")) choose.classList.add("hidden");
+  });
+}
+bindNewMapChoice();
 
 function openEditor(map) {
   closeEditor();

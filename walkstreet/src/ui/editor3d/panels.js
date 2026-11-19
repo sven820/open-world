@@ -86,7 +86,7 @@ export function closeLayers(ed) {
 
 export function setLayerVis(ed, key, on) {
   ed._layerVis[key] = on;
-  try { localStorage.setItem("tr_e3_layers_v3", JSON.stringify(ed._layerVis)); } catch { /* 忽略 */ }
+  try { localStorage.setItem("tr_e3_layers_v4", JSON.stringify(ed._layerVis)); } catch { /* 忽略 */ }
   try { ed._applyLayerVis(); } catch (e) { console.warn("[editor3d] 图层显隐应用失败：", e); }
 }
 

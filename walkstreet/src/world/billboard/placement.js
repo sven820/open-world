@@ -82,6 +82,7 @@ export function buildTraceCorridors(data) {
     out.push({
       index: ri, pts: ptsRaw, closed: !!r.closed, segs, samples,
       roadHalf, edgeHalf: roadHalf + sw, keepHalf: roadHalf + sw + 1.5,
+      sidewalk: sw > 0 && !r.closed, // 侧石人行道条带只沿开放路渲染；面路/拼接路不渲染（0.24 层高不适用）
     });
   }
   const tileDefs = (data && data.features && data.features.roadTiles) || [];
@@ -108,6 +109,10 @@ export function buildTraceCorridors(data) {
         return { ax: p[0], az: p[1], bx: q[0], bz: q[1] };
       }),
       samples, roadHalf: hw, edgeHalf: hw + 2, keepHalf: hw + 3.5,
+      // 中心线段：闭合板走廊的 segs 是四边周长，点到周长的距离不代表"在路面上"
+      // （板边外 1m 也会算进路内）——贴地高度必须量到中心线（terrain.surfaceHeightAt）
+      centerSegs: [{ ax: t.x - hl * s, az: t.z - hl * c, bx: t.x + hl * s, bz: t.z + hl * c }],
+      sidewalk: false, // 拼接路块不渲染人行道条带，edgeHalf 只作占位约束
     });
   }
   return out;

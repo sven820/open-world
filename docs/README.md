@@ -53,6 +53,7 @@ docs/
 | [ADR-0009 路面共用格点曲面](adr/ADR-0009-road-surface-grid-curve-parity.md) | accepted | 路面改采样 8m 格点渲染曲面 + 2m 细分，与补丁严格同曲面根治菱形/三角缺口（修正 ADR-0007/0008 的缓解方案） |
 | [ADR-0010 拼接路块横向细分](adr/ADR-0010-road-tile-cross-subdivision.md) | accepted | 拼接路 `rtTileQuadGeometry` 横向细分到 2m + 圆弧带径向细分，补齐 ADR-0009 遗漏的路面类别 |
 | [ADR-0011 路面分层余量](adr/ADR-0011-road-bed-layer-margin.md) | accepted | 主地面/补丁/路面三层垂直余量 > 8m 与 2m 剖分的面内偏差，根治三角面内部顶穿锯齿（修正 ADR-0009 的 lift 假设） |
+| [ADR-0012 随机地形并入自定义地形](adr/ADR-0012-merge-random-into-custom-terrain.md) | accepted | terrain.mode 收敛为 real/custom（ensureTerrain 惰性迁移旧 random），随机生成降级为 custom 填充手段；多边形范围补建裁剪主地面修复黑色区域不可雕刻（部分修正 ADR-0003） |
 
 ### design/（研发设计）
 
@@ -73,6 +74,7 @@ docs/
 | 文档 | 状态 | 说明 |
 |---|---|---|
 | [ai-agent-roadmap.md](plans/ai-agent-roadmap.md) | active | AI Agent 三阶段研发计划 + 当前进度跟踪 |
+| [terrain-optimization-plan.md](plans/terrain-optimization-plan.md) | draft | 地形与道路优化计划（源自 taipei-gta 逆向分析）：解析法线/高度缓存/远景解析地形/单 shader 地形/分级 LOD/隧道高架，按改造量从轻到重排序 |
 
 ### testing/（测试）
 

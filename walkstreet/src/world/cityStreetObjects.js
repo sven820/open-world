@@ -115,7 +115,9 @@ export function buildTrafficHeads(city) {
   for (const j of city.traceJunctions || []) {
     const nx = -j.uz, nz = j.ux;
     const mx = j.mx, mz = j.mz;
-    const lbPos = (j.edgePos ?? j.roadHalf) + 1.3, lbNeg = -(j.edgeNeg ?? j.roadHalf) + 1.3;
+    // 边距一律取正的幅值（edgeNeg 是负号值），负侧靠 c.sn 乘号落位；
+    // 若直接把负号值 ?? 进来，无实测边界的路口负侧杆会叠到正侧并缩进路面
+    const lbPos = (j.edgePos ?? j.roadHalf) + 1.3, lbNeg = -(j.edgeNeg ?? -j.roadHalf) + 1.3;
     // 相位归属：按两条路各自的大方向近似映射到南北 / 东西相位，与程序化路口共用同一循环
     const axisRoad = Math.abs(j.uz) >= Math.abs(j.ux) ? "z" : "x";
     const axisVia = Math.abs(j.vz) >= Math.abs(j.vx) ? "z" : "x";

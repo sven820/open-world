@@ -536,3 +536,37 @@ export function makeTileStripTexture() {
   for (let y = 8; y < S; y += 24) for (let x = 8; x < S; x += 24) ctx.fillRect(x, y, 10, 10);
   return canvasTexture(c);
 }
+
+// 地形表面斑驳噪声（编辑器地形底板用）：灰底 + 明暗 blotch + 细颗粒，
+// 让全平的基础地形也有「地表」质感（与随机地形的着色观感一致）。
+// uv 每 1.0 = 32m（编辑器 buildGroundSurface / 路基补丁 tile=32）→ 单个 blotch ≈ 1~8m；
+// 每个 blotch 按 3×3 环绕复制绘制，保证纹理无缝平铺。全局单例。
+let terrainTexCache = null;
+export function makeTerrainTexture() {
+  if (terrainTexCache) return terrainTexCache;
+  const S = 256;
+  const c = makeCanvas(S, S);
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#98a3af";
+  ctx.fillRect(0, 0, S, S);
+  const rand = rng(20261119);
+  for (let i = 0; i < 700; i++) {
+    const x = rand() * S, y = rand() * S, r = 4 + rand() * 22;
+    const light = rand() < 0.5;
+    const a = 0.05 + rand() * 0.12;
+    for (let dx = -S; dx <= S; dx += S) {
+      for (let dy = -S; dy <= S; dy += S) {
+        const g = ctx.createRadialGradient(x + dx, y + dy, 0, x + dx, y + dy, r);
+        g.addColorStop(0, light ? `rgba(214,224,234,${a})` : `rgba(44,56,68,${a})`);
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x + dx, y + dy, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+  noise(ctx, S, S, 14);
+  terrainTexCache = canvasTexture(c);
+  return terrainTexCache;
+}

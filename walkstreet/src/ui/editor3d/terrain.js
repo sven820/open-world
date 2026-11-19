@@ -1,14 +1,17 @@
 // 「地形编辑」工具（3D 编辑器左侧工具栏入口）：右侧模式面板 + 自定义笔刷 +
 // 真实高程采样 + Cesium 地形挂载。高度场本体在 world/terrain.js（与运行时共用）。
 //
-// 三种地形高模式（右侧面板单选）：
-//  1. 随机地形高度 —— 种子化分形噪声一键生成（幅度/起伏尺度/种子可调）；
-//  2. 使用真实地形高 —— 需打开卫星底图：Cesium 高程源网格采样，数据源复刻
-//     uav-inspection 的回退链（ArcGIS 全球地形优先 → Cesium Ion 兜底）；
-//     采样成功后把同一 provider 挂到编辑器底图 Cesium 球上，卫星影像贴合真实
-//     地形起伏，与 three.js 侧地形网格（同一份 heights）严丝合缝；
-//  3. 自定义地形高 —— 笔刷在高度场上雕刻（抬升/下压/抹平/平滑）。
-// 切到「平面」= 清除 terrain 字段，恢复全平世界。
+// 面板结构：
+//  - 「开启地形」总开关：关 = 全平世界（与没有地形编辑时一致）；开 = 先给一张
+//    基础平地，下面两种生成方式铺出起伏，生成结果都能继续笔刷雕刻：
+//    ① 随机地形 —— 分形噪声一键填充（幅度/起伏尺度/种子可调）；
+//    ② 真实地形 —— 按地图范围网格采样真实世界高程（需卫星底图，自动打开），
+//       数据源复刻 uav-inspection 的回退链（ArcGIS 全球地形优先 → Cesium Ion 兜底）；
+//       采样成功后把同一 provider 挂到编辑器底图 Cesium 球上，卫星影像贴合真实
+//       地形起伏，与 three.js 侧地形网格（同一份 heights）严丝合缝。
+//  - 笔刷（抬升/下压/抹平/平滑）对两种地形都生效；随机生成只是填充手段
+//    （旧版曾单列 random 模式，已并入 custom，旧地图由 ensureTerrain 就地迁移）。
+// 「清除地形」按钮 / 关闭总开关 = 清除 terrain 字段，恢复全平世界。
 
 import { RingGeometry, MeshBasicMaterial, Mesh, DoubleSide } from "three";
 import {
@@ -104,7 +107,7 @@ export async function sampleRealTerrain(ed) {
 
 /* ---------------- 面板 ---------------- */
 
-const MODE_LABEL = { flat: "平面（无地形）", random: "随机地形高度", real: "真实地形高", custom: "自定义地形高" };
+const MODE_LABEL = { flat: "平面（无地形）", random: "随机地形", real: "真实地形", custom: "自定义地形" };
 
 function statLine(ed) {
   const t = ensureTerrain(ed.map);
@@ -112,7 +115,8 @@ function statLine(ed) {
   let hMin = Infinity, hMax = -Infinity;
   for (const h of t.heights) { if (h < hMin) hMin = h; if (h > hMax) hMax = h; }
   return `当前：<b>${MODE_LABEL[t.mode] || t.mode}</b> · 格距 <b>${Math.round(t.step)}m</b> · 高差 <b>${Math.round(hMax - hMin)}m</b>` +
-    (t.mode === "real" ? ` · 平均高程 <b>${t.originH}m</b>` : "");
+    (t.mode === "real" ? ` · 平均高程 <b>${t.originH}m</b>` : "") +
+    (t.baseHeight != null ? ` · 基础高度 <b>${t.baseHeight}m</b>` : "");
 }
 
 export function terrainRenderPanel(ed) {
@@ -120,57 +124,74 @@ export function terrainRenderPanel(ed) {
   const t = ensureTerrain(ed.map);
   // 旧地图保存的 8% 是上一版削坡默认值，面板与算法一样按新贴地默认值展示
   const gradePct = Math.round((t && t.maxGrade > 0.2 ? t.maxGrade : ROAD_MAX_GRADE) * 100);
-  const mode = t ? t.mode : "flat";
   const br = ed._terrainBrush;
-  const amp = t && t.mode === "random" ? t.amplitude : 60;
-  const scale = t && t.mode === "random" ? t.scale : 500;
-  const seed = t && t.mode === "random" ? t.seed : Math.floor(Math.random() * 99999);
+  const amp = t ? (t.amplitude ?? 60) : 60;
+  const scale = t ? (t.scale ?? 500) : 500;
+  const seed = t ? (t.seed ?? Math.floor(Math.random() * 99999)) : Math.floor(Math.random() * 99999);
   const rStep = t && t.mode === "real" ? Math.round(t.step) : 80;
+  const baseH = t ? (t.baseHeight ?? 0) : 10;
+  // 分组折叠状态（面板重绘后保留）
+  const fold = (ed._terrainFold ??= { basic: false, random: false, real: false, brush: false, common: false });
+  const grp = (key, title, body) =>
+    `<div class="me-group${fold[key] ? " collapsed" : ""}" data-fold="${key}">
+      <div class="me-group-title">${title}</div>
+      <div class="me-group-body">${body}</div>
+    </div>`;
   el.innerHTML = `
     <h4>地形编辑 <small>TERRAIN</small></h4>
     <div class="me-stat">${statLine(ed)}</div>
-    <label class="me-check" data-tip="一键生成分形随机地形（山丘/谷地）。生成的地形与世界边缘平地平滑衔接，已放置的建筑/树木/道路会自动落到地形表面。"><input type="radio" name="ep-ter-mode" value="random" ${mode === "random" ? "checked" : ""} /> 随机地形高度</label>
-    <div id="ep-ter-random" ${mode === "random" ? "" : "hidden"}>
-      <div class="me-slider"><div class="me-slider-head"><span>起伏幅度</span><b id="ep-ter-amp-v">${amp}m</b></div>
-        <input id="ep-ter-amp" type="range" min="5" max="150" step="5" value="${amp}" style="--fill: ${(amp / 150) * 100}%" /></div>
-      <div class="me-slider"><div class="me-slider-head"><span>起伏尺度（主波长）</span><b id="ep-ter-scale-v">${scale}m</b></div>
-        <input id="ep-ter-scale" type="range" min="150" max="2000" step="50" value="${scale}" style="--fill: ${((scale - 150) / 1850) * 100}%" /></div>
-      <label class="me-slider"><div class="me-slider-head"><span>随机种子</span></div>
-        <input id="ep-ter-seed" type="number" min="0" max="999999" step="1" value="${seed}" style="width:100%;margin-top:8px" /></label>
-      <button class="me-btn" id="ep-ter-regen">重新生成随机地形</button>
-    </div>
-    <label class="me-check" data-tip="按地图范围网格采样真实世界高程。数据源：ArcGIS 全球地形优先（免 key），失败自动回退 Cesium Ion。需要先打开卫星底图（自动帮你打开）；采样成功后底图影像会贴合真实地形起伏。"><input type="radio" name="ep-ter-mode" value="real" ${mode === "real" ? "checked" : ""} /> 使用真实地形高（需打开卫星底图）</label>
-    <div id="ep-ter-real" ${mode === "real" ? "" : "hidden"}>
-      <label class="me-slider"><div class="me-slider-head"><span>采样格距（越大越快）</span></div>
-        <select id="ep-ter-rstep" style="width:100%;margin-top:8px">
-          ${[160, 80, 40, 20].map((s) => `<option value="${s}" ${rStep === s ? "selected" : ""}>${s}m</option>`).join("")}
-        </select></label>
-      <button class="me-btn" id="ep-ter-sample">采样真实高程</button>
-    </div>
-    <label class="me-check" data-tip="按住左键在地图上拖动雕刻地形：抬升/下压堆山挖谷，抹平压平场地，平滑消除毛刺。半径/强度在下方调整；Ctrl+Z 撤销整笔。"><input type="radio" name="ep-ter-mode" value="custom" ${mode === "custom" ? "checked" : ""} /> 自定义地形高（笔刷雕刻）</label>
-    <div id="ep-ter-custom" ${mode === "custom" ? "" : "hidden"}>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
-        ${[["raise", "抬升"], ["lower", "下压"], ["flatten", "抹平"], ["smooth", "平滑"]].map(([v, label]) =>
-          `<button class="me-btn" data-brush="${v}" style="margin-top:0;${br.mode === v ? "" : "opacity:.45"}">${label}</button>`).join("")}
-      </div>
-      <div class="me-slider"><div class="me-slider-head"><span>笔刷半径</span><b id="ep-ter-radius-v">${br.radius}m</b></div>
-        <input id="ep-ter-radius" type="range" min="10" max="300" step="5" value="${br.radius}" style="--fill: ${((br.radius - 10) / 290) * 100}%" /></div>
-      <div class="me-slider"><div class="me-slider-head"><span>笔刷强度</span><b id="ep-ter-strength-v">${br.strength}</b></div>
-        <input id="ep-ter-strength" type="range" min="0.1" max="5" step="0.1" value="${br.strength}" style="--fill: ${((br.strength - 0.1) / 4.9) * 100}%" /></div>
-    </div>
-    <label class="me-slider me-tiprow" data-tip="建筑地基自动平整：在地形上放置/拖动建筑时，自动把「建筑占地面积 × 系数」的范围压平到角点平均高度（外圈平滑过渡），坡地建筑不陷入地面。1.0 = 不扩大（贴合建筑轮廓），1.4 = 场地面积为建筑占地 1.4 倍。">
-      <div class="me-slider-head"><span>地基平整系数</span><b id="ep-ter-pad-v">${t ? (t.padFactor ?? 1.4) : 1.4}</b></div>
-      <input id="ep-ter-pad" type="range" min="1" max="2" step="0.1" value="${t ? (t.padFactor ?? 1.4) : 1.4}" style="--fill: ${((t ? (t.padFactor ?? 1.4) : 1.4) - 1) / 1 * 100}%" ${t ? "" : "disabled"} />
-    </label>
-    <label class="me-slider me-tiprow" data-tip="道路路基自动平整：道路占用的地面被整平为横向水平、纵向平顺的路基（与建筑地基同一机制），路基沿原地势起伏但坡度不超过此值，路肩平滑接回地形。描边路 / 拼接路块 / 程序化路网都生效。">
-      <div class="me-slider-head"><span>道路最大纵坡</span><b id="ep-ter-grade-v">${gradePct}%</b></div>
-      <input id="ep-ter-grade" type="range" min="5" max="50" step="1" value="${gradePct}" style="--fill: ${(gradePct - 5) / 45 * 100}%" ${t ? "" : "disabled"} />
-    </label>
-    <button class="me-del" id="ep-ter-clear">清除地形（恢复平面）</button>
-    <p class="me-hint">地形高度场与游戏世界共用：道路路基自动平整并随地势起伏，建筑/道路/树木/玩家/车辆都会自动贴合地形表面。放好地形再摆物件效果最佳；已有物件在重新保存/进游戏时自动重新落地。</p>`;
+    <label class="me-check" data-tip="地形总开关：关闭 = 全平世界（与没有地形编辑时一致）；打开后可用下面两种方式生成地形，生成结果都能继续笔刷雕刻。Ctrl+Z 撤销整笔。"><input type="checkbox" id="ep-ter-on" ${t ? "checked" : ""} /> 开启地形</label>
+    <div id="ep-ter-body" ${t ? "" : "hidden"}>
+      ${grp("basic", "基础", `
+        <div class="me-slider"><div class="me-slider-head"><span>地形基础高度（负值 = 盆地）</span><b id="ep-ter-base-v">${baseH}m</b></div>
+          <input id="ep-ter-base" type="range" min="-200" max="500" step="1" value="${baseH}" style="--fill: ${((baseH + 200) / 700) * 100}%" /></div>`)}
+      ${grp("random", "生成方式 ① 随机地形", `
+        <div class="me-slider"><div class="me-slider-head"><span>随机起伏幅度</span><b id="ep-ter-amp-v">${amp}m</b></div>
+          <input id="ep-ter-amp" type="range" min="5" max="150" step="5" value="${amp}" style="--fill: ${(amp / 150) * 100}%" /></div>
+        <div class="me-slider"><div class="me-slider-head"><span>随机起伏尺度（主波长）</span><b id="ep-ter-scale-v">${scale}m</b></div>
+          <input id="ep-ter-scale" type="range" min="150" max="2000" step="50" value="${scale}" style="--fill: ${((scale - 150) / 1850) * 100}%" /></div>
+        <label class="me-slider"><div class="me-slider-head"><span>随机种子</span></div>
+          <input id="ep-ter-seed" type="number" min="0" max="999999" step="1" value="${seed}" style="width:100%;margin-top:8px" /></label>
+        <button class="me-btn" id="ep-ter-regen">随机生成地形（覆盖当前雕刻）</button>`)}
+      ${grp("real", "生成方式 ② 真实地形", `
+        <label class="me-slider"><div class="me-slider-head"><span>采样格距（越大越快）</span></div>
+          <select id="ep-ter-rstep" style="width:100%;margin-top:8px">
+            ${[160, 80, 40, 20].map((s) => `<option value="${s}" ${rStep === s ? "selected" : ""}>${s}m</option>`).join("")}
+          </select></label>
+        <button class="me-btn" id="ep-ter-sample">采样真实高程（需卫星底图，自动打开）</button>`)}
+      ${grp("brush", "笔刷雕刻（两种地形都适用）", `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
+          ${[["raise", "抬升"], ["lower", "下压"], ["flatten", "抹平"], ["smooth", "平滑"]].map(([v, label]) =>
+            `<button class="me-btn" data-brush="${v}" style="margin-top:0;${br.mode === v ? "" : "opacity:.45"}">${label}</button>`).join("")}
+        </div>
+        <div class="me-slider"><div class="me-slider-head"><span>笔刷半径</span><b id="ep-ter-radius-v">${br.radius}m</b></div>
+          <input id="ep-ter-radius" type="range" min="10" max="300" step="5" value="${br.radius}" style="--fill: ${((br.radius - 10) / 290) * 100}%" /></div>
+        <div class="me-slider"><div class="me-slider-head"><span>笔刷强度</span><b id="ep-ter-strength-v">${br.strength}</b></div>
+          <input id="ep-ter-strength" type="range" min="0.1" max="5" step="0.1" value="${br.strength}" style="--fill: ${((br.strength - 0.1) / 4.9) * 100}%" /></div>`)}
+      ${grp("common", "通用", `
+        <label class="me-slider me-tiprow" data-tip="建筑地基自动平整：在地形上放置/拖动建筑时，自动把「建筑占地面积 × 系数」的范围压平到角点平均高度（外圈平滑过渡），坡地建筑不陷入地面。1.0 = 不扩大（贴合建筑轮廓），1.4 = 场地面积为建筑占地 1.4 倍。">
+          <div class="me-slider-head"><span>地基平整系数</span><b id="ep-ter-pad-v">${t ? (t.padFactor ?? 1.4) : 1.4}</b></div>
+          <input id="ep-ter-pad" type="range" min="1" max="2" step="0.1" value="${t ? (t.padFactor ?? 1.4) : 1.4}" style="--fill: ${((t ? (t.padFactor ?? 1.4) : 1.4) - 1) / 1 * 100}%" />
+        </label>
+        <label class="me-slider me-tiprow" data-tip="道路路基自动平整：道路占用的地面被整平为横向水平、纵向平顺的路基（与建筑地基同一机制），路基沿原地势起伏但坡度不超过此值，路肩平滑接回地形。描边路 / 拼接路块 / 程序化路网都生效。">
+          <div class="me-slider-head"><span>道路最大纵坡</span><b id="ep-ter-grade-v">${gradePct}%</b></div>
+          <input id="ep-ter-grade" type="range" min="5" max="50" step="1" value="${gradePct}" style="--fill: ${(gradePct - 5) / 45 * 100}%" />
+        </label>
+        <button class="me-del" id="ep-ter-clear">清除地形（恢复平面）</button>`)}
+      <p class="me-hint">地形高度场与游戏世界共用：道路路基自动平整并随地势起伏，建筑/道路/树木/玩家/车辆都会自动贴合地形表面。放好地形再摆物件效果最佳；已有物件在重新保存/进游戏时自动重新落地。</p>
+    </div>`;
 
-  el.querySelectorAll('input[name="ep-ter-mode"]').forEach((r) => {
-    r.addEventListener("change", () => setTerrainMode(ed, r.value));
+  el.querySelector("#ep-ter-on").addEventListener("change", (e) => {
+    toggleTerrain(ed, e.target.checked);
+  });
+
+  // 分组标题点击折叠/展开
+  el.querySelectorAll(".me-group-title").forEach((h) => {
+    h.addEventListener("click", () => {
+      const g = h.parentElement;
+      g.classList.toggle("collapsed");
+      fold[g.dataset.fold] = g.classList.contains("collapsed");
+    });
   });
 
   const bindRange = (id, fn, fmt = (v) => v) => {
@@ -192,7 +213,7 @@ export function terrainRenderPanel(ed) {
   });
   el.querySelector("#ep-ter-regen").addEventListener("click", () => {
     regenRandom(ed, { seed: Math.floor(Math.random() * 999999) + 1 });
-    ed.status(`已按新种子 ${ed.map.terrain.seed} 重新生成随机地形`);
+    ed.status(`已按新种子 ${ed.map.terrain.seed} 随机生成自定义地形 · 可继续笔刷雕刻`);
   });
 
   // 真实高程
@@ -215,15 +236,38 @@ export function terrainRenderPanel(ed) {
     terrainRenderPanel(ed);
   });
 
-  // 笔刷
+  // 笔刷：点选切换；再点已选中的按钮 = 取消选择（取消后按住左键不再雕刻）
   el.querySelectorAll("[data-brush]").forEach((b) => {
     b.addEventListener("click", () => {
-      ed._terrainBrush.mode = b.dataset.brush;
+      ed._terrainBrush.mode = ed._terrainBrush.mode === b.dataset.brush ? null : b.dataset.brush;
       terrainRenderPanel(ed);
+      if (!ed._terrainBrush.mode) ed.status("已取消笔刷选择：重新点选 抬升/下压/抹平/平滑 后才能雕刻（Esc 同效）");
     });
   });
   bindRange("#ep-ter-radius", (v) => { ed._terrainBrush.radius = v; if (ed._terrainCursor) ed._terrainCursor.scale.set(v, v, 1); }, (v) => v + "m");
   bindRange("#ep-ter-strength", (v) => { ed._terrainBrush.strength = v; });
+
+  // 地形基础高度：整体平移高度场（保留已雕刻的起伏），可负 = 盆地；
+  // change 事件提交（拖动中不重建），范围钳制 -200~500m
+  el.querySelector("#ep-ter-base").addEventListener("change", (e) => {
+    const t0 = ensureTerrain(ed.map);
+    if (!t0) return;
+    const nb = Math.max(-200, Math.min(500, Math.round(+e.target.value || 0)));
+    e.target.value = nb;
+    e.target.style.setProperty("--fill", ((nb + 200) / 700) * 100 + "%");
+    const delta = nb - (t0.baseHeight ?? 0);
+    if (!delta) return;
+    for (let i = 0; i < t0.heights.length; i++) t0.heights[i] = Math.round((t0.heights[i] + delta) * 100) / 100;
+    t0.baseHeight = nb;
+    ed._terrainBase = nb; // 之后重新勾选自定义时沿用
+    t0.pads = null; // pad 存绝对高度，已随平移失效（applyObjectPads 全量重算）
+    applyObjectPads(ed);
+    rebuildTerrain(ed);
+    ed._pushUndo("调整地形基础高度");
+    const lab = el.querySelector("#ep-ter-base-v");
+    if (lab) lab.textContent = nb + "m";
+    ed.status(`地形基础高度 → ${nb}m（整体平移，已保留雕刻起伏；负值 = 盆地）`);
+  });
 
   // 地基平整系数：调参即对全部建筑重新压平（新地形上重新落地）
   bindRange("#ep-ter-pad", (v) => {
@@ -266,11 +310,13 @@ export function applyObjectPads(ed) {
 
 function regenRandom(ed, patch) {
   const t = ensureTerrain(ed.map);
-  const seed = patch.seed ?? (t && t.mode === "random" ? t.seed : 1);
-  const amplitude = patch.amplitude ?? (t && t.mode === "random" ? t.amplitude : 60);
-  const scale = patch.scale ?? (t && t.mode === "random" ? t.scale : 500);
-  ed.map.terrain = generateRandomTerrain(ed.map, { seed, amplitude, scale });
+  const seed = patch.seed ?? (t && t.seed != null ? t.seed : 1);
+  const amplitude = patch.amplitude ?? (t && t.amplitude != null ? t.amplitude : 60);
+  const scale = patch.scale ?? (t && t.scale != null ? t.scale : 500);
+  const base = patch.base ?? (t && t.baseHeight != null ? t.baseHeight : (ed._terrainBase ?? 10));
+  ed.map.terrain = generateRandomTerrain(ed.map, { seed, amplitude, scale, base });
   if (t && t.padFactor) ed.map.terrain.padFactor = t.padFactor; // 平整系数跨重生成保留
+  if (t && t.maxGrade) ed.map.terrain.maxGrade = t.maxGrade;    // 道路最大纵坡跨重生成保留
   applyObjectPads(ed); // 已放置建筑的地基重新压平（贴新地形）
   syncEditorCesiumTerrain(ed);
   rebuildTerrain(ed);
@@ -279,47 +325,28 @@ function regenRandom(ed, patch) {
   if (stat) stat.innerHTML = statLine(ed); // 参数拖动实时刷新高差统计（不整面板重绘，避免打断滑杆）
 }
 
-function setTerrainMode(ed, mode) {
-  if (mode === "flat") {
+// 地形总开关：开启 = 无地形时先给一张基础平地（可再随机生成/采样/雕刻）；
+// 关闭 = 清除地形恢复平面（与「清除地形」按钮同效）
+function toggleTerrain(ed, on) {
+  if (!on) {
     ed.map.terrain = null;
+    ed._terrainStroke = null;
     syncEditorCesiumTerrain(ed);
     rebuildTerrain(ed);
-    ed._pushUndo("恢复平面地形");
+    ed._pushUndo("关闭地形");
     terrainRenderPanel(ed);
+    ed.status("已关闭地形：地图恢复平面");
     return;
   }
-  if (mode === "random") {
-    const t = ensureTerrain(ed.map);
-    regenRandom(ed, t && t.mode === "random" ? {} : { seed: Math.floor(Math.random() * 999999) + 1 });
-    ed._pushUndo("随机地形");
-    terrainRenderPanel(ed);
-    ed.status("随机地形已生成 · 右侧可调幅度/尺度/种子 · 建筑道路等保存后自动贴地");
-    return;
+  if (!ensureTerrain(ed.map)) {
+    // 基础高度默认 10m 平地（可负 = 盆地），直接笔刷雕刻或换生成方式铺起伏
+    ed.map.terrain = blankTerrain(ed.map, "custom", ed._terrainRealStep || TERRAIN_STEP_DEFAULT, ed._terrainBase ?? 10);
+    syncEditorCesiumTerrain(ed);
+    rebuildTerrain(ed);
   }
-  if (mode === "custom") {
-    const prev = ensureTerrain(ed.map);
-    if (!prev || prev.mode !== "custom") {
-      ed.map.terrain = blankTerrain(ed.map, "custom", ed._terrainRealStep || TERRAIN_STEP_DEFAULT);
-      syncEditorCesiumTerrain(ed);
-      rebuildTerrain(ed);
-    }
-    ed._pushUndo("自定义地形");
-    terrainRenderPanel(ed);
-    ed.status("自定义地形：按住左键拖动雕刻（抬升/下压/抹平/平滑，右侧可调半径与强度）");
-    return;
-  }
-  if (mode === "real") {
-    if (!ed._cesiumOn) ed._toggleBasemap(); // 真实地形需要卫星底图：自动打开
-    const prev = ensureTerrain(ed.map);
-    if (!prev || prev.mode !== "real") {
-      ed.map.terrain = blankTerrain(ed.map, "real", ed._terrainRealStep || TERRAIN_STEP_DEFAULT);
-      syncEditorCesiumTerrain(ed);
-      rebuildTerrain(ed);
-    }
-    ed._pushUndo("切换真实地形");
-    terrainRenderPanel(ed);
-    ed.status("真实地形：点击「采样真实高程」获取世界真实起伏（ArcGIS 优先 → Cesium Ion 兜底）");
-  }
+  ed._pushUndo("开启地形");
+  terrainRenderPanel(ed);
+  ed.status("已开启地形：基础平地可直接笔刷雕刻，或用「随机生成 / 采样真实高程」铺出起伏");
 }
 
 /* ---------------- 笔刷交互 ---------------- */
@@ -328,6 +355,7 @@ function setTerrainMode(ed, mode) {
 export function initTerrainTool(ed) {
   ed._terrainBrush = { mode: "raise", radius: 60, strength: 1.2 };
   ed._terrainRealStep = 80;
+  ed._terrainBase = 10; // 自定义地形默认基础高度（米，可负 = 盆地）
   ed._terrainStroke = null;
   const cursor = new Mesh(
     new RingGeometry(0.94, 1, 48),
@@ -378,7 +406,7 @@ function updateStrokeVisuals(ed, pt) {
 // 地形工具的按下/移动（mapEditor3d._onDown / _onMove 转发；pt 已绕过网格吸附）
 export function terrainOnDown(ed, e, pt) {
   const t = ensureTerrain(ed.map);
-  if (!t || t.mode !== "custom" || e.button !== 0 || !pt) return;
+  if (!t || e.button !== 0 || !pt || !ed._terrainBrush.mode) return; // 未开启地形/未选笔刷不雕刻
   ed._terrainStroke = { last: { x: pt.x, z: pt.z } };
   ed._three.orbit.enabled = false; // 笔画期间禁用视角旋转（左键拖动留给笔刷）
   brushStamp(ed.map, null, ed._terrainStroke.last, ed._terrainBrush);
@@ -388,9 +416,9 @@ export function terrainOnDown(ed, e, pt) {
 export function terrainOnMove(ed, e, pt) {
   const cursor = ed._terrainCursor;
   const t = ensureTerrain(ed.map);
-  const painting = ed._terrainStroke && t && t.mode === "custom";
+  const painting = ed._terrainStroke && t;
   if (cursor) {
-    const show = ed.tool === "terrain" && t && t.mode === "custom";
+    const show = ed.tool === "terrain" && t && ed._terrainBrush.mode; // 未选笔刷不显示光标环
     cursor.visible = !!show && !!pt;
     if (show && pt) {
       const r = Math.max(3, ed._terrainBrush.radius);
