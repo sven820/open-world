@@ -17,7 +17,9 @@
 import * as THREE from "three";
 import { uid } from "./util.js";
 import { makeRoadTileTexture } from "../../world/textures.js";
-import { rtPortPairs, rtMiters, rtTileQuadGeometry, rtEndKey } from "../../world/customMap.js";
+import { rtPortPairs, rtMiters, rtTileQuadGeometry } from "../../world/customMap.js";
+import { ensureTerrain, ROAD_GRADE_STEP } from "../../world/terrain.js";
+import { fitGeometryToTerrain } from "./meshes.js";
 
 export const TILE_STYLE_ZH = { dash: "白虚线", double: "双黄线", plain: "无标线" };
 
@@ -263,36 +265,43 @@ function tileMaterial(t) {
     m = new THREE.MeshStandardMaterial({
       map: makeRoadTileTexture(t.len || 3, t.w || 2, t.style || "dash", t.lanes || 1),
       roughness: 0.94, metalness: 0,
+      // ADR-0008：深度偏置让拼接路块强制盖住下沉主地面，消除边缘顶穿锯齿
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
     });
     tileMatCache.set(key, m);
   }
   return m;
 }
 
-// 端头几何缓存：相邻块转角相同 → 端头参数一致 → 命中同一几何。
-// 被 _rebuildAll dispose 是安全的：three 下次渲染自动重新上传
-const tileGeoCache = new Map();
-// 端记录 → 缓存键片段：复用 world/customMap.rtEndKey，端记录字段变化自动同步
-function tileGeometry(ed, t, miters) {
-  const len = t.len || 3, w = t.w || 2;
-  const mi = miters ? miters.get(t.id) : rtMiters(ed.map.features.roadTiles || []).get(t.id) || null;
-  const eA = mi && mi.a ? mi.a : null, eB = mi && mi.b ? mi.b : null;
-  const key = `${len}x${w}:${rtEndKey(eA)}:${rtEndKey(eB)}`;
-  let g = tileGeoCache.get(key);
-  if (!g) {
-    g = rtTileQuadGeometry(len, w, eA, eB, 0.06);
-    if (tileGeoCache.size >= 96) tileGeoCache.delete(tileGeoCache.keys().next().value); // FIFO 防累积
-    tileGeoCache.set(key, g);
-  }
-  return g;
-}
-
 // 单个路块网格：整块平面（贴图含路缘石/标线），中心为原点、沿本地 Z 前进。
 // 端头按相邻块转角斜切（miter），弯道外缘连续、内缘不重叠。
-// 编辑器层次：抬高到描边路条带（0.05）之上 1cm，避免重叠处 z-fighting
+// 编辑器层次：抬高到描边路条带（0.05）之上 1cm，避免重叠处 z-fighting。
+// 旧版按尺寸缓存四顶点平面（所有同尺寸块共享）→ 坡地上只能按中心整体抬升，
+// 必然一头插地一头悬空；现在每块独立几何、纵向细分后逐顶点烘焙真实地面高度，
+// 与描边道路 / 放置模型共用同一个 terrainHeightAt 高度权威。
 export function buildRoadTileMesh(ed, t, ghost = false, miters = null) {
   const len = t.len || 3, w = t.w || 2;
-  const geo = ghost ? new THREE.PlaneGeometry(w, len).rotateX(-Math.PI / 2).translate(0, 0.06, 0) : tileGeometry(ed, t, miters);
+  let geo;
+  if (ghost) {
+    geo = new THREE.PlaneGeometry(w, len).rotateX(-Math.PI / 2).translate(0, 0.15, 0);
+  } else {
+    const mi = miters ? miters.get(t.id) : rtMiters(ed.map.features.roadTiles || []).get(t.id) || null;
+    const eA = mi && mi.a ? mi.a : null, eB = mi && mi.b ? mi.b : null;
+    const hasTerrain = !!ensureTerrain(ed.map);
+    const seg = hasTerrain ? Math.max(1, Math.ceil(len / ROAD_GRADE_STEP)) : 1;
+    // ADR-0010：横向也必须细分到 2m（与 roadRibbon/补丁同一 8m 格点曲面精度），
+    // 否则 8m 宽路面中间采不到格点峰值 → 补丁顶穿 → 锯齿 / 显示不全。
+    const cross = hasTerrain ? Math.max(1, Math.ceil(w / 2)) : 1;
+    // 0.15：比横纵路 roadRibbon(0.14) 高 1cm，交汇重叠时不 z-fighting
+    geo = rtTileQuadGeometry(len, w, eA, eB, 0.15, seg, cross);
+    if (hasTerrain) {
+      // wrapper 已按路块中心抬到地形高度，扣掉它才是几何的局部 y
+      fitGeometryToTerrain(ed, geo, 0.15, {
+        x: t.x, z: t.z, rot: t.rot || 0,
+        y: -ed._curveOffset(t.x, t.z) + ed._terrainY(t.x, t.z),
+      });
+    }
+  }
   let mesh;
   if (ghost) {
     mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({

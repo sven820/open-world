@@ -8,6 +8,7 @@ import { Line2 } from "three/addons/lines/Line2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { bendGeometry } from "../../config/curvature.js";
+import { ensureTerrain, resamplePoints, ROAD_GRADE_STEP, GROUND_STEP, gridHeightAt, tessellateFlat } from "../../world/terrain.js";
 import { makeAsphaltTexture, ASPHALT_TILE } from "../../world/textures.js";
 import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "../../world/materials.js";
 import { buildTreeGroup, buildLampGroup } from "../../world/customMap.js";
@@ -31,7 +32,7 @@ function planarUV(geo) {
 // ox/oz：几何存储的相对原点（位置减去原点，曲率仍按绝对坐标计算）
 export function fatLine(ed, pts, widthPx, colorHex, opacity, lift, ox = 0, oz = 0) {
   const geo = new LineGeometry();
-  geo.setPositions(pts.flatMap((p) => [p.x - ox, lift - ed._curveOffset(p.x, p.z), p.z - oz]));
+  geo.setPositions(pts.flatMap((p) => [p.x - ox, lift - ed._curveOffset(p.x, p.z) + (ed._terrainY ? ed._terrainY(p.x, p.z) : 0), p.z - oz]));
   const mat = new LineMaterial({
     color: colorHex, linewidth: widthPx, transparent: true, opacity, depthWrite: false,
   });
@@ -47,16 +48,41 @@ export function fatLine(ed, pts, widthPx, colorHex, opacity, lift, ox = 0, oz = 
 // 不会出现屏幕空间胖线的段接缝亮斑 / 近轴向光斑
 export function roadRibbon(ed, pts, halfW, colorHex, opacity) {
   const pos = [], idx = [];
-  for (let i = 0; i < pts.length; i++) {
-    const p0 = pts[Math.max(i - 1, 0)], p1 = pts[Math.min(i + 1, pts.length - 1)];
+  // ADR-0009：路面必须采样「8m 格点渲染曲面」gridHeightAt（主地面/补丁用的同一张），
+  // 而非连续 terrainHeightAt。旧版两者是相位不同的三角网格各自插值同一高度函数，
+  // 补丁三角面从下方顶穿路面 → 规则菱形/三角缺口（实测 27% 顶穿、深 1m）。
+  // 采样同一曲面后，路面恒高于补丁 0.04m（lift 差）；再细分到 2m，把路带三角
+  // 内部的二阶插值误差压到 <0.04m，彻底消除残留穿插。
+  const SUB = 2; // 目标边长 2m（纵向沿路 + 横向）
+  // 纵向：把每段 8m 再细分成 2m
+  const path = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / SUB));
+    for (let k = 0; k < n; k++) path.push({ x: a.x + (b.x - a.x) * k / n, z: a.z + (b.z - a.z) * k / n });
+  }
+  path.push(pts[pts.length - 1]);
+  const cross = Math.max(1, Math.ceil((2 * halfW) / SUB));
+  const cols = cross + 1;
+  const hasT = !!(ed.map && ensureTerrain(ed.map));
+  for (let i = 0; i < path.length; i++) {
+    const p0 = path[Math.max(i - 1, 0)], p1 = path[Math.min(i + 1, path.length - 1)];
     const dx = p1.x - p0.x, dz = p1.z - p0.z;
     const len = Math.hypot(dx, dz) || 1;
-    const ox = (-dz / len) * halfW, oz = (dx / len) * halfW;
-    const y = 0.02 - ed._curveOffset(pts[i].x, pts[i].z);
-    pos.push(pts[i].x + ox, y, pts[i].z + oz, pts[i].x - ox, y, pts[i].z - oz);
-    if (i) {
-      const a = (i - 1) * 2;
-      idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    const nx = -dz / len, nz = dx / len; // 横向单位法向
+    for (let j = 0; j < cols; j++) {
+      const off = -halfW + (2 * halfW * j) / cross; // 从 -halfW 到 +halfW
+      const wx = path[i].x + nx * off, wz = path[i].z + nz * off;
+      // 采样补丁同款格点曲面；无地形时退化为连续高度（曲率仍由 _curveOffset 处理）
+      const h = hasT ? gridHeightAt(ed.map, wx, wz) : (ed._terrainY ? ed._terrainY(wx, wz) : 0);
+      const wy = 0.14 - ed._curveOffset(wx, wz) + h; // ADR-0011：0.14 - 补丁(-0.22) = 0.36m 余量
+      pos.push(wx, wy, wz);
+    }
+  }
+  for (let i = 0; i < path.length - 1; i++) {
+    for (let j = 0; j < cross; j++) {
+      const a = i * cols + j, b = a + 1, c = a + cols, d = c + 1;
+      idx.push(a, c, b, b, c, d); // 俯视绕序一致、法线朝上
     }
   }
   const geo = new THREE.BufferGeometry();
@@ -64,11 +90,16 @@ export function roadRibbon(ed, pts, halfW, colorHex, opacity) {
   geo.setIndex(idx);
   geo.computeVertexNormals();
   planarUV(geo);
-  // 贴图与「路块拼接」同一张沥青表面（tint 乘色：选中高亮 / 延伸路区分）；
-  // transparent + 不写深度：交叉路带间无 z-fighting，又能被上方路块/条带正确遮挡
+  // 贴图与「路块拼接」同一张沥青表面（tint 乘色：选中高亮 / 延伸路区分）。
+  // ADR-0008：不透明 + 写深度 + polygonOffset。旧版 transparent + depthWrite:false
+  // 依赖「路带几何恰好高于地面」的脆弱余量；陡峭地形 + 相位错开时，下沉主地面
+  // 的 8m 三角形在路带边缘插值后从下方顶穿路带 → 锯齿 / 路面被啃缺口。
+  // 改为不透明 + 深度偏置后路带强制渲染为可见最上层，彻底消除顶穿；
+  // 横纵路带同为 terrainHeightAt+lift（同一高度、相同 offset），路口共面不闪烁。
   const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
     map: makeAsphaltTexture(), color: colorHex, roughness: 0.94, metalness: 0.0,
-    transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide,
+    transparent: opacity < 1, opacity, depthWrite: true, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
   }));
   mesh.renderOrder = 1;
   return mesh;
@@ -78,17 +109,41 @@ export function roadRibbon(ed, pts, halfW, colorHex, opacity) {
 
 export function matRoad(tint = 0xffffff) {
   // 与「路块拼接」/程序化横纵路带同一张沥青表面贴图，编辑器内三种路面风格一致。
-  // tint 乘色（贴图为灰阶）：默认原色，可传高亮/暗色调区分状态
+  // tint 乘色（贴图为灰阶）：默认原色，可传高亮/暗色调区分状态。
+  // ADR-0008：深度偏置让描边路 / 面路同样强制盖住下沉主地面，消除边缘顶穿锯齿。
   return new THREE.MeshStandardMaterial({
     map: makeAsphaltTexture(), color: tint, roughness: 0.94, metalness: 0.0,
+    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
   });
 }
 export const matRiver = () => new THREE.MeshStandardMaterial({ color: 0x1d5f8f, transparent: true, opacity: 0.8, roughness: 0.25, metalness: 0.1 });
 export const matBuilding = () => new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.85 });
 export const matRoof = () => new THREE.MeshStandardMaterial({ color: 0x6f6a60, roughness: 0.9 });
 
+// 平面几何逐顶点贴地：编辑器没有运行时的 displaceGroup，所有路面 / 路块 / 面路
+// 必须在构建时把「该点真实地面高度」烘焙进顶点。origin 描述 wrapper 的平面定位
+// （拼接路块有 x/z/rot 且已按中心抬了 y；描边内容用世界坐标、wrapper 不抬升）。
+// 这样道路与放置模型走同一个高度权威 terrainHeightAt：横断面平整、纵坡平顺。
+export function fitGeometryToTerrain(ed, geo, yBase = 0.16, origin = null) {
+  const o = origin || { x: 0, z: 0, rot: 0, y: 0 };
+  const cs = Math.cos(o.rot), sn = Math.sin(o.rot);
+  const pos = geo.attributes.position;
+  const hasT = !!(ed.map && ensureTerrain(ed.map));
+  for (let i = 0; i < pos.count; i++) {
+    const lx = pos.getX(i), lz = pos.getZ(i);
+    const wx = o.x + lx * cs + lz * sn, wz = o.z - lx * sn + lz * cs;
+    // ADR-0009：采样补丁同款 8m 格点曲面，避免独立网格插值穿插
+    const h = hasT ? gridHeightAt(ed.map, wx, wz) : (ed._terrainY ? ed._terrainY(wx, wz) : 0);
+    const wy = yBase - ed._curveOffset(wx, wz) + h;
+    pos.setY(i, wy - o.y); // wrapper 已抬的部分要扣掉，避免双重抬升
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
+
 // 折线 → 带状网格（两三角/段 + 接头圆片补缝）；yBase 区分叠放层次
-export function stripGeometry(ed, points, width, yBase = 0.05) {
+export function stripGeometry(ed, points, width, yBase = 0.16) {
   const hw = width / 2;
   const verts = [], idx = [];
   const dirs = [];
@@ -99,15 +154,35 @@ export function stripGeometry(ed, points, width, yBase = 0.05) {
     const len = Math.hypot(dx, dz) || 1;
     dirs.push({ nx: -dz / len, nz: dx / len });
   }
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i], n = dirs[i];
-    const y = yBase - ed._curveOffset(p.x, p.z); // 贴合球面（中心零基准）
-    verts.push(p.x + n.nx * hw, y, p.z + n.nz * hw);
-    verts.push(p.x - n.nx * hw, y, p.z - n.nz * hw);
-    if (i < points.length - 1) {
-      const a = i * 2;
-      // 绕朝上（CCW）：A_i → A_{i+1} → B_i，否则正面朝下被剔除，从上看只剩接头圆片
-      idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+  // ADR-0009：与 roadRibbon 一致 —— 采样 8m 格点渲染曲面 gridHeightAt + 细分 2m，
+  // 让描边路与补丁共用同一张曲面，消除补丁三角面顶穿路面的菱形缺口。
+  const SUB = 2;
+  // 纵向细分到 2m
+  const path = [], pdirs = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i], b = points[i + 1], d = dirs[i];
+    const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / SUB));
+    for (let k = 0; k < n; k++) { path.push({ x: a.x + (b.x - a.x) * k / n, z: a.z + (b.z - a.z) * k / n }); pdirs.push(d); }
+  }
+  path.push(points[points.length - 1]); pdirs.push(dirs[dirs.length - 1]);
+  const cross = Math.max(1, Math.ceil(width / SUB));
+  const cols = cross + 1;
+  const hasT = !!(ed.map && ensureTerrain(ed.map));
+  for (let i = 0; i < path.length; i++) {
+    const p = path[i], n = pdirs[i];
+    for (let j = 0; j < cols; j++) {
+      const off = -hw + (2 * hw * j) / cross;
+      const wx = p.x + n.nx * off, wz = p.z + n.nz * off;
+      const h = hasT ? gridHeightAt(ed.map, wx, wz) : (ed._terrainY ? ed._terrainY(wx, wz) : 0);
+      const wy = yBase - ed._curveOffset(wx, wz) + h;
+      verts.push(wx, wy, wz);
+    }
+  }
+  for (let i = 0; i < path.length - 1; i++) {
+    for (let j = 0; j < cross; j++) {
+      const a = i * cols + j, b = a + 1, c = a + cols, d = c + 1;
+      // 绕朝上（CCW）
+      idx.push(a, c, b, b, c, d);
     }
   }
   const geo = new THREE.BufferGeometry();
@@ -115,36 +190,59 @@ export function stripGeometry(ed, points, width, yBase = 0.05) {
   geo.setIndex(idx);
   geo.computeVertexNormals();
   planarUV(geo);
-  // 接头圆片（uv 一并按世界坐标写入，与带状几何属性一致，mergeGeometries 才不返回 null）
+  // 接头圆片：水平圆盘在纵坡上会一头插进路基、一头悬空（旧实现整体取中心高度），
+  // 改为逐顶点按世界坐标采样，圆片自然变成贴着纵坡的锥面。
   const discs = [];
   for (const p of points) {
     const c = new THREE.CircleGeometry(hw, 12);
     c.rotateX(-Math.PI / 2);
-    c.translate(p.x, yBase - ed._curveOffset(p.x, p.z), p.z);
+    const cp = c.attributes.position;
+    for (let i = 0; i < cp.count; i++) {
+      const wx = p.x + cp.getX(i), wz = p.z + cp.getZ(i);
+      cp.setY(i, 0.004 + yBase - ed._curveOffset(wx, wz) + (ed._terrainY ? ed._terrainY(wx, wz) : 0));
+    }
+    cp.needsUpdate = true;
+    c.translate(p.x, 0, p.z); // y 已按世界坐标烘焙，只补平面位移
     discs.push(planarUV(c));
   }
   const discMerged = mergeGeometries(discs);
   return mergeGeometries([geo, discMerged]) || geo;
 }
 
+// 折线点 → 条带几何：有地形时按 ROAD_GRADE_STEP 重采样（与纵剖面采样点对齐，
+// 条带顶点密度足够才能贴合平顺纵坡，不会出现跨坡直线插值）
+function terrainResampled(ed, points) {
+  const pts = points.map(([x, z]) => ({ x, z }));
+  return ensureTerrain(ed.map) ? resamplePoints(pts, ROAD_GRADE_STEP) : pts;
+}
+
 export function buildRoadMesh(ed, data) {
   if (data.closed && data.points.length >= 3) {
-    // 取面道路：围合多边形整体填充为路面
+    // 取面道路：围合多边形整体填充。旧实现只有一个常数 y（完全不贴地形），
+    // 且三角形内部顶点稀疏 → 坡地上必然穿地形。细分后逐顶点贴到 area corridor
+    // 的平整台地上，边缘由路肩过渡带与周围地形平滑衔接。
     const shape = new THREE.Shape(data.points.map(([x, z]) => new THREE.Vector2(x, -z)));
-    const geo = planarUV(bendGeometry(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2)));
-    geo.translate(0, 0.05, 0);
+    let geo = new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
+    if (ensureTerrain(ed.map)) {
+      geo = tessellateFlat(geo, ROAD_GRADE_STEP, 20000);
+      planarUV(geo);
+      fitGeometryToTerrain(ed, geo, 0.16);
+    } else {
+      geo = planarUV(bendGeometry(geo));
+      geo.translate(0, 0.05, 0);
+    }
     const mesh = new THREE.Mesh(geo, matRoad());
     mesh.receiveShadow = true;
     return mesh;
   }
-  const geo = stripGeometry(ed, data.points.map(([x, z]) => ({ x, z })), data.width || 12);
+  const geo = stripGeometry(ed, terrainResampled(ed, data.points), data.width || 12);
   const mesh = new THREE.Mesh(geo, matRoad());
   mesh.receiveShadow = true;
   return mesh;
 }
 
 export function buildRiverMesh(ed, data) {
-  const geo = stripGeometry(ed, data.points.map(([x, z]) => ({ x, z })), data.width || 26);
+  const geo = stripGeometry(ed, terrainResampled(ed, data.points), data.width || 26);
   const mesh = new THREE.Mesh(geo, matRiver());
   mesh.position.y = -0.02;
   return mesh;

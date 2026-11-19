@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { activeLandmarks } from "../data/cityData.js";
 import { getMaterial } from "./materials.js";
+import { terrainHeightAt } from "./terrain.js";
 
 function box(w, h, d, x, y, z, mat) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
@@ -43,7 +44,9 @@ export function buildLandmarks(scene, city) {
 
   for (const l of activeLandmarks()) {
     const g = new THREE.Group();
-    g.position.set(l.x, 0, l.z);
+    // 地标是独立 scene 组，不在 city.group 内 → displaceGroup 覆盖不到。
+    // 按落点采样同一高度权威（含道路走廊塑形），坡地上不再整栋穿进地面。
+    g.position.set(l.x, terrainHeightAt(city.data, l.x, l.z), l.z);
     g.rotation.y = l.rot;
     group.add(g);
     let collW = 20, collD = 20;

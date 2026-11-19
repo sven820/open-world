@@ -48,6 +48,14 @@ import { listAssets, getAsset, getAssetRecordSync, putAsset, inferPlaceSize, cre
 import { getAssetTemplateIfReady, warmAssetTemplate, assetInstance, updateAssetAnimations, tracedUnitSize, invalidateAssetTemplate } from "../world/assetMesh.js";
 import { ensureBillboardAssets, billboardParamsFor, createAssetFromBillboard } from "../data/billboardAsset.js";
 import { billboardItemFromRecord } from "../world/billboard/billboardAssetBridge.js";
+import {
+  terrainHeightAt, ensureTerrain, buildRoadCorridors, roadBedDropAt,
+  buildRoadBedGeometry, buildGroundSurface, ROAD_GRADE_STEP, GROUND_STEP,
+} from "../world/terrain.js";
+import {
+  initTerrainTool, terrainRenderPanel, terrainOnDown, terrainOnMove, terrainLeave,
+  syncEditorCesiumTerrain, applyObjectPads,
+} from "./editor3d/terrain.js";
 
 export class MapEditor3d {
   // opts: { map, onSave(data)=>bool, onPlay(), onClose() }
@@ -97,10 +105,10 @@ export class MapEditor3d {
     this._rtOpIds = [];        // 本次链条操作放置的路块 id（一键清空只删这些，不影响之前加的路）
     this._measureResult = null; // 上次测距结果 { points: [{x,z}], length }
     this._cesiumOn = localStorage.getItem("tr_e3_basemap") !== "0"; // 记住上次选择
-    // 图层显隐状态（图层控制面板）：默认全开；持久化用 v2 键，
-    // 旧键 tr_e3_layers 里存有旧版勾选失效期间写入的错误状态，弃用不读
-    this._layerVis = { anno: true, area: true, skeleton: true, road: true, river: true, roadTile: true, object: true, origin: true, measure: true };
-    try { Object.assign(this._layerVis, JSON.parse(localStorage.getItem("tr_e3_layers_v2") || "{}")); } catch { /* 忽略脏数据 */ }
+    // 图层显隐状态（图层控制面板）：默认仅网格线关闭（避免网格干扰地形/底图观感，可在面板开启）；
+    // 持久化用 v3 键：v2 键里存有网格默认开启时写入的旧状态，弃用不读（更早的 v1 亦弃用）
+    this._layerVis = { anno: true, plate: true, grid: false, skeleton: true, road: true, river: true, roadTile: true, object: true, origin: true, measure: true };
+    try { Object.assign(this._layerVis, JSON.parse(localStorage.getItem("tr_e3_layers_v3") || "{}")); } catch { /* 忽略脏数据 */ }
     // 顶栏按钮等是 index.html 里的单例 DOM：监听挂到本实例 controller 上，
     // close() 一次性摘除。否则旧实例仍绑在同一个「保存」按钮上，保存时会把
     // 上一张地图按当前名称输入框的内容再写一遍（表现为另一张地图被改名）。
@@ -117,11 +125,13 @@ export class MapEditor3d {
 
     this._initThree();
     this._initUI();
+    initTerrainTool(this); // 地形工具：笔刷状态 + 光标环 + 笔画收尾
     this._rebuildAll();
     this._applyLayerVis(); // 应用记忆中的图层面板显隐（含 Cesium 就绪前的 Three 侧）
     this._pushUndo("打开编辑器");
     try {
       await this._initCesium(); // 失败不影响编辑（仅无底图）
+      syncEditorCesiumTerrain(this); // 地图带真实地形时：底图 Cesium 球挂同一地形源
     } catch (e) {
       console.warn("[editor3d] Cesium 底图加载失败：", e);
       this.status("Cesium 底图不可用（可继续编辑）");
@@ -263,6 +273,13 @@ export class MapEditor3d {
     });
     tc.addEventListener("mouseUp", () => {
       this._syncGizmoToData(true);
+      // 建筑落位后场地平整：新位置按「占地面积 × 系数」压平地基（坡地不陷入）
+      if (this.sel && this.sel.kind === "object" && ensureTerrain(this.map)) {
+        applyObjectPads(this);
+        this._bendArea();
+        const d = this.sel.data;
+        if (d && d.pos) this.sel.root.position.y = -this._curveOffset(d.pos[0], d.pos[1]) + this._terrainY(d.pos[0], d.pos[1]); // wrapper 贴到平整后的地基高度
+      }
       this._pushUndo("变换");
       // Gizmo 旋转/缩放后同步属性面板数值（旋转角度等）
       if (this.sel && this.sel.kind === "object" && this.sel.data && this.sel.data.type === "asset") this._renderProps();
@@ -279,7 +296,7 @@ export class MapEditor3d {
     this._selHelper.visible = false;
     scene.add(this._selHelper);
 
-    this._three = { renderer, scene, camera, canvas, raycaster, groundPlane, orbit, tc, areaGroup };
+    this._three = { renderer, scene, camera, canvas, raycaster, groundPlane, orbit, tc, areaGroup, groundMesh: null, bedMesh: null };
     this._initOriginMarkers();
     this._initArea();
     this._resize();
@@ -464,6 +481,19 @@ export class MapEditor3d {
       if (c.geometry) c.geometry.dispose();
       if (c.material) c.material.dispose();
     }
+    // ADR-0005：旧底板挂在 areaGroup 内，受 scale/rot 变换 → 顶点无法落在
+    // 8m 全局格点上，与路基补丁相位错位而互相穿插。重建时一并清理独立地面。
+    if (this._three.groundMesh) {
+      this._three.scene.remove(this._three.groundMesh);
+      this._three.groundMesh.geometry.dispose();
+      this._three.groundMesh.material.dispose();
+      this._three.groundMesh = null;
+    }
+    if (this._three.bedMesh) {
+      this._three.scene.remove(this._three.bedMesh);
+      this._three.bedMesh.geometry.dispose();
+      this._three.bedMesh = null; // 材质与 groundMesh 共用，由上方统一 dispose
+    }
     const a = this._areaEnsure();
     if (this._isPolyArea(a)) {
       // 几何按中心相对坐标构建（Group 恒在中心=Gizmo 锚点），平移不变、拖拽无需重建；
@@ -478,6 +508,7 @@ export class MapEditor3d {
         new THREE.MeshBasicMaterial({ color: 0x0d141c, transparent: true, opacity: 0.55, depthWrite: false }),
       );
       plate.userData.areaGrid = true; // 参与网格浓度调节
+      plate.userData.isPlate = true;  // 图层「范围底板」显隐开关
       plate.userData.baseOpacity = 0.55;
       // 描边：屏幕空间胖线（线宽恒定像素，任意视角/距离都清晰，不受雾影响）。
       // 深色衬底 + 亮金主线（casing），亮/暗影像上都清晰可辨
@@ -488,30 +519,129 @@ export class MapEditor3d {
       outline.renderOrder = 2;
       g.add(plate, casing, outline, ...this._buildPolyGrid(abs, ox, oz));
     } else {
-      const grid = new THREE.GridHelper(4000, 200, 0x3a4a5c, 0x22303e);
+      // 有地形时：底板不透明（受光材质，山丘明暗可辨），网格线铺在地表随地形起伏
+      const hasTerrain = !!ensureTerrain(this.map);
+      const grid = hasTerrain
+        ? new THREE.GridHelper(4000, 200, 0x4a5e74, 0x2e3f50)
+        : new THREE.GridHelper(4000, 200, 0x3a4a5c, 0x22303e);
       grid.userData.lift = 0.02;
       grid.userData.areaGrid = true; // 参与网格浓度调节
+      grid.userData.isGrid = true;   // 图层「网格线」显隐开关
       grid.userData.baseOpacity = 1;
-      const plate = new THREE.Mesh(
-        new THREE.PlaneGeometry(4000, 4000, 64, 64).rotateX(-Math.PI / 2), // 分段才能呈现球面弯曲
-        new THREE.MeshBasicMaterial({ color: 0x0d141c, transparent: true, opacity: 0.55, depthWrite: false }),
-      );
-      plate.userData.areaGrid = true;
-      plate.userData.baseOpacity = 0.55;
-      g.add(grid, plate);
+      const tOp = Math.min(1, Math.max(0, this.map.terrainOpacity ?? 1)); // 地形透明度（面板可调，透出底图）
+      const plateMat = hasTerrain
+        ? // 受光材质 + 顶点高度着色（_bendArea 填色）+ flatShading：
+          // 低处深、高处浅，山丘起伏与光照角度无关地醒目
+          new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0, flatShading: true, vertexColors: true, transparent: tOp < 1, opacity: tOp })
+        : new THREE.MeshBasicMaterial({ color: 0x0d141c, transparent: true, opacity: 0.55, depthWrite: false });
+      if (hasTerrain) {
+        // ADR-0005：地形底板改为独立全局格点地面（与 8m 路基补丁同相位）。
+        // 旧方案把 PlaneGeometry 挂在 areaGroup 内，受 scale/rot 变换后顶点
+        // 不落在 8m 格点上，与补丁各自的分段线性曲面互相穿插 → 路面显示不全。
+        // 独立挂在 scene 根，顶点 x/z 即世界坐标，与补丁完全同相。
+        const t = ensureTerrain(this.map);
+        const geo = buildGroundSurface(t.x0 - 40, t.z0 - 40, t.x1 + 40, t.z1 + 40, GROUND_STEP, 32);
+        if (geo) {
+          const ground = new THREE.Mesh(geo, plateMat);
+          ground.userData.gridOpaque = true;
+          ground.userData.isPlate = true;
+          ground.userData.baseOpacity = 0.55;
+          ground.userData.terrainPlate = true; // _bendArea：逐顶点贴地 + 法线 + 高度着色
+          ground.userData.terrainBed = true;   // 走廊内下沉 0.15m，补丁 lift 0.04 稳定盖在其上
+          this._three.scene.add(ground);
+          this._three.groundMesh = ground;
+        }
+        g.add(grid); // 网格线仍随 areaGroup 变换（视觉参考，不影响道路）
+      } else {
+        const plate = new THREE.Mesh(
+          new THREE.PlaneGeometry(4000, 4000, 64, 64).rotateX(-Math.PI / 2),
+          plateMat,
+        );
+        plate.userData.areaGrid = true;
+        plate.userData.isPlate = true;
+        plate.userData.baseOpacity = 0.55;
+        g.add(grid, plate);
+      }
+      this._refreshRoadBed(true); // 道路路基补丁（见下方方法）
     }
     this._applyGridOpacity();
     g.updateMatrixWorld(true);
+    this._applyLayerVis(); // 重建后重放图显隐（底板/网格线开关、图层记忆）
   }
 
-  // 网格层浓度（map.gridOpacity 1=默认 → 0=完全透出底图影像）：底板/网格线
-  // 按各自基准透明度等比缩放，金色边界描边不受影响（调淡后仍保留范围轮廓）
+  // 道路路基补丁：大底板分辨率（~31m）表达不了十米宽的平整走廊，这张 8m
+  // 高密度地表覆盖 core + 路肩过渡带，成为道路附近的可见地面。
+  // _rebuildAreaMeshes 只在地形 / 地图范围重建时跑，而 _rebuildAll 是道路增删、
+  // 移动、路网参数变化的统一收口 —— 两边都要刷新，否则新画的路上没有补丁，
+  // 粗底板仍会吞掉路面。用数据指纹跳过无关重建（拖物件时不会每帧重算底板）。
+  _refreshRoadBed(force = false) {
+    const m = this.map, g = this._three.areaGroup;
+    const sig = JSON.stringify([
+      m.features.roads, m.features.roadTiles, m.roadsX, m.roadsZ,
+      m.extRoads, m.area, m.terrain && m.terrain.maxGrade,
+    ]);
+    if (!force && sig === this._roadBedSig) return;
+    this._roadBedSig = sig;
+    let plateMat = null;
+    for (const c of g.children.slice()) {
+      if (c.userData.roadBed) { g.remove(c); c.geometry.dispose(); }
+      else if (c.userData.terrainPlate && c.userData.terrainBed) plateMat = c.material;
+    }
+    // ADR-0005：底板与补丁都在 scene 根，共用世界坐标 8m 格点。
+    // 补丁若留在 areaGroup，其全局格点坐标会被 group 的平移/旋转/缩放二次变换，
+    // 导致 area 中心非零或旋转时补丁错位、道路被吞。材质从 groundMesh 取。
+    if (this._three.bedMesh) {
+      this._three.scene.remove(this._three.bedMesh);
+      this._three.bedMesh.geometry.dispose();
+      this._three.bedMesh = null;
+    }
+    if (!plateMat && this._three.groundMesh) plateMat = this._three.groundMesh.material;
+    if (!plateMat || !ensureTerrain(m)) return;
+    const geo = buildRoadBedGeometry(m);
+    if (!geo) return;
+    const bed = new THREE.Mesh(geo, plateMat);
+    bed.userData.lift = -0.22;         // ADR-0011：低于路面 0.36m（吸收 8m/2m 剖分差），仍高于下沉主地面 0.20m 填平壕沟
+    bed.userData.terrainPlate = true;  // _bendArea：逐顶点贴地 + 法线 + 高度着色
+    bed.userData.isPlate = true;
+    bed.userData.gridOpaque = true;    // 跟随「地形透明度」滑杆
+    bed.userData.baseOpacity = 0.55;
+    this._three.scene.add(bed);
+    this._three.bedMesh = bed;
+    this._bendArea();          // 主地面下沉量 / 网格线高度也随新走廊变化
+    this._applyGridOpacity();  // 新补丁同步地形透明度
+    this._applyLayerVis();     // 新补丁同步图层显隐
+  }
+
+  // 网格层浓度（map.gridOpacity 1=默认 → 0=完全透出底图影像）：网格线按基准
+  // 透明度等比缩放，金色边界描边不受影响（调淡后仍保留范围轮廓）；
+  // 地形底板（gridOpaque）不跟网格浓度走，由「地形透明度」map.terrainOpacity 单独控制
   _applyGridOpacity() {
     const k = this.map.gridOpacity ?? GRID_OPACITY_DEFAULT;
+    const tOp = Math.min(1, Math.max(0, this.map.terrainOpacity ?? 1));
     for (const c of this._three.areaGroup.children) {
+      if (c.userData.gridOpaque) {
+        if (!c.material) continue;
+        // transparent 是材质编译期状态：false↔true 切换必须标 needsUpdate，否则
+        // 新透明度不生效（实测踩坑：滑杆拉到 0% 底板仍按初始不透明渲染）
+        const was = c.material.transparent;
+        c.material.transparent = tOp < 1;
+        if (was !== c.material.transparent) c.material.needsUpdate = true;
+        c.material.opacity = tOp;
+        c.material.depthWrite = tOp >= 1; // 半透明时不写深度，山丘相互透视自然
+        continue;
+      }
       if (!c.userData.areaGrid || !c.material) continue;
       c.material.transparent = true;
       c.material.opacity = (c.userData.baseOpacity ?? 1) * k;
+    }
+    // 独立全局地面与补丁共用同一材质，透明度随「地形透明度」滑杆
+    const gm = this._three.groundMesh;
+    if (gm && gm.material) {
+      const was = gm.material.transparent;
+      gm.material.transparent = tOp < 1;
+      if (was !== gm.material.transparent) gm.material.needsUpdate = true;
+      gm.material.opacity = tOp;
+      gm.material.depthWrite = tOp >= 1;
     }
   }
 
@@ -563,6 +693,7 @@ export class MapEditor3d {
       const ls = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color }));
       ls.userData.lift = 0.02;
       ls.userData.areaGrid = true; // 参与网格浓度调节
+      ls.userData.isGrid = true;   // 图层「网格线」显隐开关
       ls.userData.baseOpacity = 1;
       return ls;
     };
@@ -629,6 +760,11 @@ export class MapEditor3d {
     return dropAt(x, z) - dropAt(a.cx, a.cz);
   }
 
+  // 地形高度（世界米制，无地形=0）：编辑器内所有 y 计算的公共项
+  _terrainY(x, z) {
+    return terrainHeightAt(this.map, x, z);
+  }
+
   // 曲率差分：局部顶点 y = lift - curveOffset(世界x,z)，Group 贴椭球面（y=0）；
   // lift 区分叠放层次（网格 0.02 / 描边 0.05）；
   // 锚点立柱同步移到范围中心（= 地图在地球上的位置）
@@ -643,12 +779,64 @@ export class MapEditor3d {
       const pos = obj.geometry.attributes.position;
       if (!pos) continue; // 胖线（Line2）等非普通网格体：曲率已烘焙进端点，跳过
       const lift = obj.userData.lift || 0;
+      const bed = !!obj.userData.terrainBed; // 粗网格底板：路基范围内下沉，不吞路面
       for (let i = 0; i < pos.count; i++) {
         v.set(pos.getX(i), 0, pos.getZ(i)).applyMatrix4(g.matrixWorld);
-        pos.setY(i, lift - this._curveOffset(v.x, v.z));
+        const x = v.x, z = v.z;
+        pos.setY(i, lift - this._curveOffset(x, z) + this._terrainY(x, z) -
+          (bed ? roadBedDropAt(this.map, x, z) : 0));
       }
       pos.needsUpdate = true;
+      if (obj.userData.terrainPlate) this._shadeTerrainPlate(obj, g.matrixWorld);
+      else if (obj.userData.terrainNormals) obj.geometry.computeVertexNormals();
     }
+    // ADR-0005：主地面与路基补丁都在 scene 根（世界坐标即格点，不在 areaGroup 内）
+    // 共用同一套 8m 顶点：主地面走廊内下沉 0.15m，补丁不下沉且 lift 0.04m，
+    // 补丁恒高于主地面 ≥0.19m，彻底消除互相穿插导致的路面显示不全。
+    for (const mesh of [this._three.groundMesh, this._three.bedMesh]) {
+      if (!mesh || !mesh.geometry.attributes.position) continue;
+      const pos = mesh.geometry.attributes.position;
+      const lift = mesh.userData.lift || 0;
+      const bed = !!mesh.userData.terrainBed;
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i), z = pos.getZ(i); // 已是世界坐标，无 group 变换
+        pos.setY(i, lift - this._curveOffset(x, z) + this._terrainY(x, z) -
+          (bed ? roadBedDropAt(this.map, x, z) : 0));
+      }
+      pos.needsUpdate = true;
+      this._shadeTerrainPlate(mesh, mesh.matrixWorld);
+    }
+  }
+
+  // 地形面顶点着色（低处深 → 高处浅）+ 法线更新，起伏一眼可辨。
+  // matrix 为几何局部坐标 → 世界坐标的变换（areaGroup 内网格传 group 矩阵；
+  // 独立全局地面传自身单位矩阵）。
+  _shadeTerrainPlate(obj, matrix) {
+    const pos = obj.geometry.attributes.position;
+    obj.geometry.computeVertexNormals();
+    const t0 = ensureTerrain(this.map);
+    let hMn = Infinity, hMx = -Infinity;
+    if (t0) for (const h of t0.heights) { if (h < hMn) hMn = h; if (h > hMx) hMx = h; }
+    const span = hMx - hMn || 1;
+    if (!this._terrainColLow) {
+      this._terrainColLow = new THREE.Color(0x242f3b);  // 低处：深蓝灰
+      this._terrainColHigh = new THREE.Color(0xa7b4c2); // 高处：亮灰蓝
+      this._terrainColTmp = new THREE.Color();
+    }
+    let colors = obj.geometry.attributes.color;
+    if (!colors || colors.count !== pos.count) {
+      colors = new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3);
+      obj.geometry.setAttribute("color", colors);
+    }
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.set(pos.getX(i), 0, pos.getZ(i)).applyMatrix4(matrix);
+      const h = this._terrainY(v.x, v.z); // 直接取该点地形高度（底板已下沉，不能从 y 反推）
+      const t = Math.min(1, Math.max(0, (h - hMn) / span));
+      this._terrainColTmp.copy(this._terrainColLow).lerp(this._terrainColHigh, t);
+      colors.setXYZ(i, this._terrainColTmp.r, this._terrainColTmp.g, this._terrainColTmp.b);
+    }
+    colors.needsUpdate = true;
   }
 
   // 选中地图范围（工具入口），供 Gizmo 调整
@@ -687,6 +875,7 @@ export class MapEditor3d {
     document.querySelectorAll("#e3-tools .e3-tool").forEach((b) => b.classList.toggle("active", b.dataset.tool === t));
     this._syncRoadToolUI();
     if (t !== "place-road") rtLeave(this); // 离开路块工具：清链条 + 藏幽灵（工具间来回切保留链不做，简单一致）
+    if (t !== "terrain") terrainLeave(this); // 离开地形工具：收尾笔画 + 藏笔刷光标环
     if (t !== "place-asset") this._hideAssetGhost();
     if (t !== "place-billboard") this._hideBBGhost();
   }
@@ -765,12 +954,12 @@ export class MapEditor3d {
     this._three.raycaster.setFromCamera(this._ndc(e), this._three.camera);
     const ray = this._three.raycaster.ray;
     const hit = new THREE.Vector3();
-    // 地面已按曲率弯曲（y = -dropAt(x,z) 抛物面）：先与 y=0 平面求交，
-    // 再用交点处的下沉量更新平面高度迭代两次，收敛到 <1cm 误差
+    // 地面已按曲率弯曲 + 叠加地形高度场（y = -dropAt + terrainH）：
+    // 先与 y=0 平面求交，再用交点处的高度更新平面迭代三次，收敛到 <1cm 误差
     const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     if (!ray.intersectPlane(plane, hit)) return null;
-    for (let i = 0; i < 2; i++) {
-      plane.constant = dropAt(hit.x, hit.z);
+    for (let i = 0; i < 3; i++) {
+      plane.constant = dropAt(hit.x, hit.z) - this._terrainY(hit.x, hit.z);
       if (!ray.intersectPlane(plane, hit)) return null;
     }
     // 描边绘制中（草稿激活）绕过网格吸附：吸附会把弯路量化成锯齿台阶，严重走形；
@@ -815,6 +1004,7 @@ export class MapEditor3d {
 
   _onDown(e) {
     if (e.button !== 0 || this._three.tc.dragging) return;
+    if (this.tool === "terrain") { terrainOnDown(this, e, this._groundPoint(e, true)); return; } // 地形笔刷：原始光标点（绕过网格吸附）
     const pt = this._groundPoint(e);
     if (!pt) return;
     if (this.tool === "draw-road") {
@@ -908,6 +1098,7 @@ export class MapEditor3d {
   }
 
   _onMove(e) {
+    if (this.tool === "terrain") { terrainOnMove(this, e, this._groundPoint(e, true)); return; } // 笔刷光标环 + 拖动雕刻
     if (this.tool === "place-road") {
       if (this._rtMode === "edit") return; // 编辑模式：无幽灵跟随，Gizmo 拖拽由 TransformControls 自理
       this._roadTileMove(e); return; // 幽灵路块跟随（无需草稿）
@@ -971,6 +1162,8 @@ export class MapEditor3d {
         params: { height: 24, anchorCenter: true, footprint: pts.map(([x, z]) => [x - cx, z - cz]) },
       };
       this.map.objects.push(obj);
+      applyObjectPads(this); // 场地平整：地基范围（占地 × 系数）压平，建筑不陷入坡面
+      this._bendArea();
       this._rebuildObjects();
       this._pushUndo("生成建筑");
       this.status(`建筑已生成（${pts.length} 边，高 24m）· 选中后可调整高度/位置`);
@@ -1363,7 +1556,7 @@ export class MapEditor3d {
   _matBuilding() { return matBuilding(); }
   _matRoof() { return matRoof(); }
 
-  _stripGeometry(points, width, yBase = 0.05) { return stripGeometry(this, points, width, yBase); }
+  _stripGeometry(points, width, yBase = 0.09) { return stripGeometry(this, points, width, yBase); }
 
   _buildRoadMesh(data) { return buildRoadMesh(this, data); }
 
@@ -1381,9 +1574,9 @@ export class MapEditor3d {
     root.userData.entityRoot = true; // 标记必须设在场景根节点上，_rebuildAll 清理时据此移除旧网格
     root.userData.layerKind = kind; // 图层控制面板按此分类开关
     root.visible = this._layerVis[kind] !== false; // 重建出的实体保持面板里的显隐状态
-    // 物件整体下沉贴合球面（数据仍存平面 x/z，y 仅是渲染偏移，中心零基准）
-    if (kind === "object") root.position.set(data.pos[0], -this._curveOffset(data.pos[0], data.pos[1]), data.pos[1]), root.rotation.y = data.rot || 0;
-    else if (kind === "roadTile") root.position.set(data.x, -this._curveOffset(data.x, data.z), data.z), root.rotation.y = data.rot || 0;
+    // 物件整体下沉贴合球面 + 顶到地形高度（数据仍存平面 x/z，y 仅是渲染偏移，中心零基准）
+    if (kind === "object") root.position.set(data.pos[0], -this._curveOffset(data.pos[0], data.pos[1]) + this._terrainY(data.pos[0], data.pos[1]), data.pos[1]), root.rotation.y = data.rot || 0;
+    else if (kind === "roadTile") root.position.set(data.x, -this._curveOffset(data.x, data.z) + this._terrainY(data.x, data.z), data.z), root.rotation.y = data.rot || 0;
     root.add(object3d);
     const pickMeshes = [];
     let bbEmbedded = null;
@@ -1399,6 +1592,10 @@ export class MapEditor3d {
   }
 
   _rebuildAll() {
+    // 道路 / 地形 / 建筑地基任一变化都在这里收口：重算道路走廊纵坡塑形，
+    // 后续所有网格、拾取与保存共用同一份 terrain.corridors（随地图一起写出）
+    buildRoadCorridors(this.map);
+    this._refreshRoadBed(); // 道路增删 / 移动后路基补丁必须跟着走廊重铺
     this._wrappers = new Map();
     this._byPick = new Map();
     this._bbConstraints = null; // 路网/描边路/手绘建筑变了，摆放约束需重算
@@ -1484,10 +1681,11 @@ export class MapEditor3d {
         while (zs[0].at > b.minZ) zs.unshift(extAt(zs[0].at - EXT_STEP_Z, EXT_STEP_Z));
       }
     }
-    // 每 ~1000m 细分一次：路带条带与中心线跟随曲率下沉
-    // （条带是同一几何体无接缝重叠；1000m 弦弧差 ~0.02m 不可见）
+    // 每 ~1000m 细分一次跟随曲率下沉（1000m 弦弧差 ~0.02m 不可见）；
+    // 有地形时按纵剖面采样步距细分，路带才贴得住平顺纵坡而不是跨坡直线
+    const sub = ensureTerrain(this.map) ? ROAD_GRADE_STEP : 1000;
     const seg = (x0, z0, x1, z1) => {
-      const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, z1 - z0) / 1000));
+      const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, z1 - z0) / sub));
       const pts = [];
       for (let i = 0; i <= n; i++) pts.push({ x: x0 + ((x1 - x0) * i) / n, z: z0 + ((z1 - z0) * i) / n });
       return pts;
@@ -1500,7 +1698,7 @@ export class MapEditor3d {
       // 世界宽度路带：真实透视（近宽远窄），平视地球不失真
       g.add(this._roadRibbon(pts, worldW / 2, color, 1));
       // 中心引导线：远景路带缩到亚像素时仍可辨路网走向；近景淡化为路面标线
-      const line = this._fatLine(pts, sel ? 3 : 2, color, sel ? 0.95 : 0.8, 0.06);
+      const line = this._fatLine(pts, sel ? 3 : 2, color, sel ? 0.95 : 0.8, 0.18); // ADR-0011：高于路面 0.14/0.15
       line.userData.roadW = worldW;
       line.userData.baseOp = sel ? 0.95 : 0.8;
       this._roadLines.push(line);
@@ -1553,7 +1751,7 @@ export class MapEditor3d {
       if (!pts) continue;
       const sel = this.sel && this.sel.kind === "road" && this.sel.data === r;
       const color = sel ? 0xf2c14e : 0x8ea3bd;
-      const line = this._fatLine(pts, sel ? 3 : 2, color, sel ? 0.95 : 0.8, 0.06);
+      const line = this._fatLine(pts, sel ? 3 : 2, color, sel ? 0.95 : 0.8, 0.20); // ADR-0011：高于描边路面 0.16
       line.userData.roadW = r.width || 12;
       line.userData.baseOp = sel ? 0.95 : 0.8;
       this._roadLines.push(line);
@@ -2164,13 +2362,13 @@ export class MapEditor3d {
     if (this.sel.kind === "object") {
       this.sel.data.pos = [Math.round(r.position.x * 10) / 10, Math.round(r.position.z * 10) / 10];
       this.sel.data.rot = Math.round((r.rotation.y || 0) * 100) / 100;
-      r.position.y = -this._curveOffset(r.position.x, r.position.z); // 维持球面贴合
+      r.position.y = -this._curveOffset(r.position.x, r.position.z) + this._terrainY(r.position.x, r.position.z); // 球面贴合 + 地形高度（拖动不能丢贴地）
       if (this.sel.data.type === "billboard") this._updateBBSelection(); // 拖动中边界实时跟随
     } else if (this.sel.kind === "roadTile") {
       this.sel.data.x = Math.round(r.position.x * 10) / 10;
       this.sel.data.z = Math.round(r.position.z * 10) / 10;
       this.sel.data.rot = Math.round((r.rotation.y || 0) * 1000) / 1000;
-      r.position.y = -this._curveOffset(r.position.x, r.position.z); // 维持球面贴合
+      r.position.y = -this._curveOffset(r.position.x, r.position.z) + this._terrainY(r.position.x, r.position.z); // 球面贴合 + 地形高度
       if (commit) this._rtHealTile(this.sel.data); // 松手自愈：端口吸回邻近端口
     } else {
       const d = this.sel.data;
@@ -2238,9 +2436,12 @@ export class MapEditor3d {
     if (!this.sel && this.tool === "place-road") { rtRenderPanel(this); return; } // 路块工具无选中：右侧显示拼接面板（含添加/编辑模式切换），而非地图统计
     if (!this.sel && this.tool === "place-asset") { this._renderAssetPicker(el); return; } // 资产工具无选中：右侧显示「我的模型」选择面板
     if (!this.sel && this.tool === "place-billboard") { this._renderBBPicker(el); return; } // 大屏工具无选中：先选承载形式/尺寸
+    if (!this.sel && this.tool === "terrain") { terrainRenderPanel(this); return; } // 地形工具：右侧地形高模式面板
     if (!this.sel) {
       const f = this.map.features;
       const opT = Math.round((1 - (this.map.gridOpacity ?? GRID_OPACITY_DEFAULT)) * 100); // 网格透明度%（0=默认浓度，100=完全透出影像）
+      const terOpT = Math.round((this.map.terrainOpacity ?? 1) * 100); // 地形透明度%（有地形时显示，100=不透明）
+      const hasTerrain = !!ensureTerrain(this.map);
       el.innerHTML = `
         <h4 class="me-tiprow">地图内容<span class="me-tip" data-tip="描边道路：道路菜单 →「地图描边」沿影像勾画 · 河流：折线描边（双击结束）· 建筑：多边形描边（≥3 点自动闭合）· 树 / 路灯：点击放置 · W/E/R 切换移动 / 旋转 / 缩放">?</span></h4>
         <div class="me-stat">描边道路 <b>${f.roads.length}</b></div>
@@ -2249,10 +2450,16 @@ export class MapEditor3d {
         <div class="me-stat">建筑/物件 <b>${this.map.objects.length}</b></div>
         <div class="me-stat me-tiprow">程序化路网 <b>${this.map.roadsX.length}×${this.map.roadsZ.length}</b>（2D 编辑器管理）<span class="me-tip" data-tip="灰色路带 / 紫色圆点 / 绿色标记 = 程序化城市骨架，与游戏实际生成的街道一致，仅显示不可选中；手工道路可点选编辑。两个编辑器编辑的是同一张地图。">?</span></div>
         <label class="me-check me-tiprow" data-tip="勾选后按固定间距自动补满世界边缘的默认街道（游戏内与预览同步）；不勾选则只保留手工道路。放置拼接路且程序化城市开启时，游戏内仅在拼接路越出路网的外侧补一条不可见的虚拟边界（不画线、无路口、不进交通图），仅用于划分街区：横纵路标线延伸到拼接路，相交区域正常生成建筑。"><input id="ep-ext" type="checkbox" ${this.map.extRoads ? "checked" : ""} /> 程序化延伸街道</label>
+        <label class="me-check me-tiprow" data-tip="显示底板表面的 20m 网格（地形模式贴地起伏）；与下方网格透明度独立，取消勾选即完全隐藏网格线。"><input id="ep-grid" type="checkbox" ${this._layerVis.grid !== false ? "checked" : ""} /> 网格线</label>
         <div class="me-slider">
           <div class="me-slider-head"><span>网格透明度</span><b id="ep-grid-op-val">${opT}%</b></div>
           <input id="ep-grid-op-range" type="range" min="0" max="100" step="5" value="${opT}" style="--fill: ${opT}%" />
         </div>
+        ${hasTerrain ? `
+        <div class="me-slider me-tiprow" data-tip="地形底板的透明度（仅影响地形，不影响网格线）：调低后可透过山丘看到底图影像，方便对着真实路网摆放内容。0% = 完全透出影像，100% = 不透明地形。">
+          <div class="me-slider-head"><span>地形透明度</span><b id="ep-ter-op-val">${terOpT}%</b></div>
+          <input id="ep-ter-op-range" type="range" min="0" max="100" step="5" value="${terOpT}" style="--fill: ${terOpT}%" />
+        </div>` : ""}
         <h4 class="me-tiprow">程序化城市<span class="me-tip" data-tip="勾选后才会在手工路网之间自动生成街区（建筑、绿植、路灯）；不勾选则只保留手工路网与描边内容。保存后进入游戏生效，两个编辑器编辑的是同一张地图。">?</span></h4>
         ${genParamsHtml(this.map, "ep")}`;
       el.querySelector("#ep-ext").addEventListener("change", (e) => {
@@ -2261,11 +2468,20 @@ export class MapEditor3d {
         this._rebuildSkeleton();
         this._pushUndo("延伸街道开关");
       });
+      el.querySelector("#ep-grid").addEventListener("change", (e) => setLayerVis(this, "grid", !!e.target.checked));
       const opRange = el.querySelector("#ep-grid-op-range");
       opRange.addEventListener("input", () => {
         this.map.gridOpacity = 1 - +opRange.value / 100;
         el.querySelector("#ep-grid-op-val").textContent = `${opRange.value}%`;
         opRange.style.setProperty("--fill", `${opRange.value}%`);
+        this._applyGridOpacity();
+        this._dirty = true;
+      });
+      const terOpRange = el.querySelector("#ep-ter-op-range");
+      if (terOpRange) terOpRange.addEventListener("input", () => {
+        this.map.terrainOpacity = +terOpRange.value / 100;
+        el.querySelector("#ep-ter-op-val").textContent = `${terOpRange.value}%`;
+        terOpRange.style.setProperty("--fill", `${terOpRange.value}%`);
         this._applyGridOpacity();
         this._dirty = true;
       });
@@ -2790,7 +3006,7 @@ export class MapEditor3d {
     if (this.draft.cursor && this.tool !== "draw-building") pts.push(this.draft.cursor);
     const color = areaDraft ? 0xf2c14e : this.tool === "draw-river" ? 0x3fa7d6 : this.tool === "draw-building" ? 0xf2c14e : 0x9fb4c8;
     const line = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints(pts.map((p) => new THREE.Vector3(p.x, 0.3 - this._curveOffset(p.x, p.z), p.z))),
+      new THREE.BufferGeometry().setFromPoints(pts.map((p) => new THREE.Vector3(p.x, 0.3 - this._curveOffset(p.x, p.z) + this._terrainY(p.x, p.z), p.z))),
       new THREE.LineBasicMaterial({ color }),
     );
     g.add(line);
@@ -2798,7 +3014,7 @@ export class MapEditor3d {
     if (areaDraft && pts.length >= 3) {
       const close = new THREE.Line(
         new THREE.BufferGeometry().setFromPoints(
-          [pts[pts.length - 1], pts[0]].map((p) => new THREE.Vector3(p.x, 0.3 - this._curveOffset(p.x, p.z), p.z)),
+          [pts[pts.length - 1], pts[0]].map((p) => new THREE.Vector3(p.x, 0.3 - this._curveOffset(p.x, p.z) + this._terrainY(p.x, p.z), p.z)),
         ),
         new THREE.LineBasicMaterial({ color }),
       );
@@ -2806,7 +3022,7 @@ export class MapEditor3d {
     }
     for (const p of pts) {
       const dot = new THREE.Mesh(new THREE.SphereGeometry(0.9, 8, 6), new THREE.MeshBasicMaterial({ color }));
-      dot.position.set(p.x, 0.3 - this._curveOffset(p.x, p.z), p.z);
+      dot.position.set(p.x, 0.3 - this._curveOffset(p.x, p.z) + this._terrainY(p.x, p.z), p.z);
       g.add(dot);
     }
     // 建筑多边形/范围描边实时预览面
@@ -2934,7 +3150,7 @@ export class MapEditor3d {
 
   /* ---------------- undo / redo ---------------- */
   _snapshot() {
-    return JSON.stringify({ f: this.map.features, o: this.map.objects, origin: this.map.origin, area: this.map.area, rx: this.map.roadsX, rz: this.map.roadsZ, ex: !!this.map.extRoads, pg: !!this.map.procedural });
+    return JSON.stringify({ f: this.map.features, o: this.map.objects, origin: this.map.origin, area: this.map.area, rx: this.map.roadsX, rz: this.map.roadsZ, ex: !!this.map.extRoads, pg: !!this.map.procedural, t: this.map.terrain || null, to: this.map.terrainOpacity });
   }
   _pushUndo(label) {
     this.undoStack.push(this._snapshot());
@@ -2967,6 +3183,14 @@ export class MapEditor3d {
     if (d.rz) this.map.roadsZ = d.rz;
     this.map.extRoads = !!d.ex;
     if ("pg" in d) this.map.procedural = !!d.pg; // 旧快照无该字段 → 保持当前值
+    if ("t" in d) { // 地形高度场（旧快照无该字段 → 保持当前值）
+      this.map.terrain = d.t || null;
+      syncEditorCesiumTerrain(this);
+    }
+    if ("to" in d) { // 地形透明度
+      this.map.terrainOpacity = d.to ?? 1;
+      this._applyGridOpacity();
+    }
     this._rtChain = null; // 快照后的链端端口可能已不存在，断链让磁吸重新接管
     const extCb = document.getElementById("ep-ext");
     if (extCb) extCb.checked = this.map.extRoads;
@@ -2987,6 +3211,7 @@ export class MapEditor3d {
       ["draw-road", "║", "道路"],
       ["draw-river", "≈", "河流描边"],
       ["draw-building", "▲", "建筑描边"],
+      ["terrain", "⛰", "地形编辑"],
       ["place-tree", "♣", "放置树木"],
       ["place-lamp", "¶", "放置路灯"],
       ["place-billboard", "▣", "广告大屏"],
@@ -3046,6 +3271,7 @@ export class MapEditor3d {
         this.status({
           "draw-river": "河流描边：点击加点，双击结束（宽度默认 26m）",
           "draw-building": "建筑描边：点击多边形顶点（≥3 点自动闭合生成盒子）",
+          "terrain": "地形编辑：右侧选地形高模式（随机 / 真实（需卫星底图）/ 自定义笔刷雕刻）· 物件道路保存后自动贴地",
           "place-tree": "点击地面放置树木",
           "place-lamp": "点击地面放置路灯",
           "place-billboard": "先在右侧选承载形式（含转角包柱屏）与尺寸 · 移动鼠标看真实占位边界 · 自动吸附路缘/网格 · 红框禁止放置",
@@ -3171,6 +3397,8 @@ export class MapEditor3d {
       objects: this.map.objects,
       origin: this.map.origin,
       area: this._areaEnsure(),
+      terrain: this.map.terrain || null, // 地形高度场（无地形 = null）
+      terrainOpacity: this.map.terrainOpacity ?? 1, // 地形透明度（编辑器预览用）
     });
     this.status(ok ? `已保存 · ${new Date().toLocaleTimeString()}` : "保存失败");
     return ok;

@@ -44,6 +44,15 @@ docs/
 |---|---|---|
 | [ADR-0001 AI Agent 框架选型 Mastra](adr/ADR-0001-ai-agent-framework-selection.md) | accepted | 主网关选定 Mastra，分三阶段增量启用 |
 | [ADR-0002 建立项目文档体系](adr/ADR-0002-docs-system.md) | accepted | 建立 docs/ 中枢 + ADR 机制，文档随代码一起提交 |
+| [ADR-0003 地图地形高度场](adr/ADR-0003-terrain-heightfield.md) | accepted | 地图可选 terrain 高度场（随机/真实/自定义三模式），物件不存 y、渲染现场采样贴地 |
+| [ADR-0004 道路走廊纵坡塑形](adr/ADR-0004-road-corridor-grading.md) | accepted | 道路占用的地面整平为随地形起伏的平顺路基，路基补丁 + 底板下沉消除断续，动态实体统一贴地 |
+| [ADR-0005 可见地面网格同精度](adr/ADR-0005-visible-ground-mesh-parity.md) | accepted | 可见地面/标线网格与路基补丁同为 8m 格点，消除粗网格顶穿导致的深绿盖路/路面显示不全 |
+| [ADR-0006 路口高程贴地引道](adr/ADR-0006-junction-grade-blend.md) | accepted | 路口按高差自适应引道贴回原始地形，消除十字路口三角塌陷/断崖（修正 ADR-0004 的窄带回退） |
+| [ADR-0007 路面条带横断面同相位](adr/ADR-0007-road-ribbon-cross-section-parity.md) | accepted | 路面条带横向 8m 细分 + 逐点采样，与补丁同相位，消除路口路面阶梯状缺口 / 显示不全 |
+| [ADR-0008 路面强制深度偏置](adr/ADR-0008-road-surface-depth-bias.md) | accepted | 四类道路材质不透明 + 写深度 + polygonOffset，消除下沉主地面从下方顶穿路带边缘的锯齿 |
+| [ADR-0009 路面共用格点曲面](adr/ADR-0009-road-surface-grid-curve-parity.md) | accepted | 路面改采样 8m 格点渲染曲面 + 2m 细分，与补丁严格同曲面根治菱形/三角缺口（修正 ADR-0007/0008 的缓解方案） |
+| [ADR-0010 拼接路块横向细分](adr/ADR-0010-road-tile-cross-subdivision.md) | accepted | 拼接路 `rtTileQuadGeometry` 横向细分到 2m + 圆弧带径向细分，补齐 ADR-0009 遗漏的路面类别 |
+| [ADR-0011 路面分层余量](adr/ADR-0011-road-bed-layer-margin.md) | accepted | 主地面/补丁/路面三层垂直余量 > 8m 与 2m 剖分的面内偏差，根治三角面内部顶穿锯齿（修正 ADR-0009 的 lift 假设） |
 
 ### design/（研发设计）
 
@@ -51,6 +60,7 @@ docs/
 |---|---|---|
 | [ai-agent-gateway-design.md](design/ai-agent-gateway-design.md) | active | **AI 网关总设计**（阶段 1 实施）：Mastra 集成、能力注册表、协议、目录结构、前端接入 |
 | [chat-channel-design.md](design/chat-channel-design.md) | active | 频道聊天面板（右下角）设计：AI 助手/世界/系统三频道、消息模型、AI 调用链与回退、交互细节 |
+| [terrain-road-grading.md](design/terrain-road-grading.md) | active | 道路走廊纵坡塑形：算法、数据流、路基补丁/底板下沉、改动清单与验收命令 |
 
 ### requirements/（需求分析）
 

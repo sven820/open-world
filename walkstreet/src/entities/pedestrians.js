@@ -3,6 +3,7 @@ import {
   PED_PARTS, pedPartGeometry, makePedRig,
   SKIN_TONES, HAIR_COLORS, CLOTH_COLORS, PANTS_COLORS,
 } from "./models.js";
+import { surfaceHeightAt } from "../world/terrain.js";
 
 const _partMap = {
   head: "head", hair: "hair", torso: "torso", hips: "hips",
@@ -176,7 +177,9 @@ export class PedestrianCrowd {
       const hz = pos.dz * p.dir;
       const yaw = Math.atan2(hx, hz);
       const bob = p.pause > 0 ? 0 : Math.abs(Math.sin(p.phase)) * 0.035;
-      rig.root.position.set(pos.x, 0.16 + bob, pos.z);
+      // 行人沿 sidewalkLoops 走：旧实现固定 y=0.16，坡地上整排人悬空或入地。
+      // 与玩家 / 车辆共用 surfaceHeightAt，始终踩在地形 + 所在表面层高上。
+      rig.root.position.set(pos.x, surfaceHeightAt(this.city.data, pos.x, pos.z, this.city) + bob, pos.z);
       rig.root.rotation.y = yaw;
       rig.root.scale.setScalar(p.scale);
       this._pose(p);

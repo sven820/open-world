@@ -103,7 +103,8 @@ export function buildPlacedBillboard(city, item, pool, schedule, basePhase) {
     // 每个面独立成屏（坐标系与合并 group 一致：局部归零 + 外层按 item.pos/rot 定位）
     const group = new THREE.Group();
     group.add(fg); // 从合并 group 移出，独立成屏
-    group.position.set(item.pos[0], 0, item.pos[1]);
+    // 落地屏/立面屏基座贴地形：city 带地形高度场时按落点顶起（编辑器预览同款）
+    group.position.set(item.pos[0], city && city.data ? city.terrainHeight(item.pos[0], item.pos[1]) : 0, item.pos[1]);
     group.rotation.y = item.rot || 0;
 
     // 碰撞体按世界 AABB 注册（编辑器传 city=null 跳过）；转角两面同范围，仅注册一次

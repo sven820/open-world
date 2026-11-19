@@ -12,19 +12,13 @@ import { fmtDist } from "./util.js";
 // 场景内容层按分组节点与 wrapper kind 开关；显隐状态持久化在 localStorage。
 
 export function layerDefs(ed) {
-  // 图源面板（设置 → 地图图源）已接管底图选择，这里只保留注记层显隐；
+  // 图源面板（设置 → 地图图源）已接管底图选择；中文注记层常显，不再提供显隐开关；
   // 卫星影像/深色矢量不再单列（影像整体开关在顶栏「卫星底图」按钮）
-  const src = getBasemapSource();
-  const hasAnno = src === "tianditu" || src === "tianditu_vec_anno" || src === "geoq";
   return [
-    ...(hasAnno ? [{
-      title: "底图影像",
-      items: [{ key: "anno", label: "中文注记", hint: src === "geoq" ? "天地图 cva_w" : "天地图 cia_w/cva_w" }],
-    }] : []),
     {
       title: "场景内容",
       items: [
-        { key: "area", label: "范围网格", hint: "地图范围底板 + 网格" },
+        { key: "plate", label: "范围底板", hint: "地图范围的深色地面（地形模式 = 地形面）" },
         { key: "skeleton", label: "路网骨架", hint: "2D 数据：路网/地标/出生点" },
         { key: "road", label: "道路", hint: "描边/手工道路要素" },
         { key: "roadTile", label: "拼接路块", hint: "路块拼接工具放置的路块" },
@@ -92,7 +86,7 @@ export function closeLayers(ed) {
 
 export function setLayerVis(ed, key, on) {
   ed._layerVis[key] = on;
-  try { localStorage.setItem("tr_e3_layers_v2", JSON.stringify(ed._layerVis)); } catch { /* 忽略 */ }
+  try { localStorage.setItem("tr_e3_layers_v3", JSON.stringify(ed._layerVis)); } catch { /* 忽略 */ }
   try { ed._applyLayerVis(); } catch (e) { console.warn("[editor3d] 图层显隐应用失败：", e); }
 }
 
@@ -103,7 +97,14 @@ export function applyLayerVis(ed) {
   try { ed._applyImageryVis(); } catch (e) { console.warn("[editor3d] 影像层显隐应用失败：", e); }
   const t = ed._three;
   if (!t) return;
-  t.areaGroup.visible = vis.area !== false;
+  // 范围组内细分显隐：底板（地形面）/网格线各自开关；金色边界描边常显（范围轮廓）
+  for (const c of t.areaGroup.children) {
+    if (c.userData.isPlate) c.visible = vis.plate !== false;
+    else if (c.userData.isGrid) c.visible = vis.grid !== false;
+  }
+  // ADR-0005：独立全局地面 + 路基补丁（8m 同相位格点）跟随「范围底板」显隐
+  if (t.groundMesh) t.groundMesh.visible = vis.plate !== false;
+  if (t.bedMesh) t.bedMesh.visible = vis.plate !== false;
   if (ed._skeleton) ed._skeleton.visible = vis.skeleton !== false;
   if (ed._originMarker) ed._originMarker.visible = vis.origin !== false;
   if (ed._measureGroup) ed._measureGroup.visible = vis.measure !== false;

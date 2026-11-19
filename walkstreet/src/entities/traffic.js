@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { buildCar, buildBus, buildScooter } from "./models.js";
+import { surfaceHeightAt } from "../world/terrain.js";
 
 const CAR_COLORS = [0xe8e8e8, 0x1b1c20, 0xb8bcc2, 0x8a1f24, 0x1f3f7a, 0x2c5a3a, 0xd8d2c4, 0x6a6f78, 0x9a4a1f];
 const BUS_COLORS = [0x2a6bc4, 0x2f8a4a, 0xd07a1f];
@@ -110,8 +111,18 @@ export class Traffic {
     } else {
       v.yaw = v.yawTarget;
     }
-    v.group.position.set(p.x, 0.02, p.z);
-    v.group.rotation.y = v.yaw;
+    // 统一表面高度（地形塑形 + 路面层高）：旧实现只采车身中心且不加路面偏移，
+    // 长车在纵坡上前后轮悬空 / 入地，与描边路重叠时还会陷进路面 16cm。
+    const city = this.city, data = city.data;
+    const len = Math.hypot(dx, dz) || 1;
+    const half = Math.min(4, (v.len || 4) / 2);
+    const hx = (dx / len) * half, hz = (dz / len) * half;
+    const h = surfaceHeightAt(data, p.x, p.z, city);
+    const hF = surfaceHeightAt(data, p.x + hx, p.z + hz, city);
+    const hB = surfaceHeightAt(data, p.x - hx, p.z - hz, city);
+    const pitch = Math.atan2(hB - hF, 2 * half); // 车头朝局部 +Z：前高 → 抬头
+    v.group.position.set(p.x, h + 0.02, p.z);
+    v.group.rotation.set(pitch, v.yaw, 0, "YXZ");
   }
 
   _lightFor(axis) {

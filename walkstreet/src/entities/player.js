@@ -4,6 +4,7 @@ import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { makePedRig, pedPartGeometry, PED_PARTS } from "./models.js";
 import { activeSpawn } from "../data/cityData.js";
+import { surfaceHeightAt } from "../world/terrain.js";
 import { captureRigState, applyFaceParams, clampConfig } from "../creator/faceParams.js";
 
 const skin = new THREE.MeshStandardMaterial({ color: 0xe8b98f, roughness: 0.85 });
@@ -247,32 +248,11 @@ export class Player {
     this._updateCamera(0.016);
   }
 
-  // 脚下表面高度：描边道路路面 0.18 / 人行道 0.24（渲染在平台之上，优先判定）；
-  // 街廓人行道平台顶 0.16m；马路 0
+  // 脚下表面高度：统一走 terrain.surfaceHeightAt（地形含道路走廊塑形 + 描边
+  // 路面 0.18 / 人行道 0.24 / 街廓平台 0.16 的层高）。车辆、行人、驾驶共用
+  // 同一函数，不再各自写死 y，地形起伏时不会穿模或悬空。
   _groundHeightAt(x, z) {
-    const city = this.city;
-    if (!city) return 0;
-    const corridors = city.traceCorridors;
-    if (corridors && corridors.length) {
-      let best = Infinity, bestC = null;
-      for (const c of corridors) {
-        for (const s of c.segs) {
-          const dx = s.bx - s.ax, dz = s.bz - s.az;
-          const len2 = dx * dx + dz * dz;
-          const t = Math.min(1, Math.max(0, len2 ? ((x - s.ax) * dx + (z - s.az) * dz) / len2 : 0));
-          const d = Math.hypot(x - (s.ax + dx * t), z - (s.az + dz * t));
-          if (d < best) { best = d; bestC = c; }
-        }
-      }
-      if (bestC) {
-        if (best <= bestC.roadHalf) return 0.18;
-        if (best <= bestC.edgeHalf) return 0.24;
-      }
-    }
-    for (const b of city.blocks) {
-      if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1) return 0.16;
-    }
-    return 0;
+    return surfaceHeightAt(this.city && this.city.data, x, z, this.city);
   }
 
   dispose() {
@@ -630,8 +610,16 @@ export class Player {
     this.drivePos.z += Math.cos(this.driveYaw) * step;
 
     this.city.colliders.resolve(this.drivePos, v.userData.W * 0.5 + 0.3);
-    v.group.position.set(this.drivePos.x, 0.02, this.drivePos.z);
-    v.group.rotation.y = this.driveYaw;
+    // 玩家驾驶与 AI 车流同规则：踩在路面表面高度上，并按前后采样贴合纵坡
+    // （旧实现写死 y=0.02，进游戏第一帧就把车压回平面，坡地上必穿模）
+    const data = this.city.data;
+    const fx = Math.sin(this.driveYaw), fz = Math.cos(this.driveYaw);
+    const d = Math.min(4, (v.userData.L || 4) / 2);
+    const h = surfaceHeightAt(data, this.drivePos.x, this.drivePos.z, this.city);
+    const hF = surfaceHeightAt(data, this.drivePos.x + fx * d, this.drivePos.z + fz * d, this.city);
+    const hB = surfaceHeightAt(data, this.drivePos.x - fx * d, this.drivePos.z - fz * d, this.city);
+    v.group.position.set(this.drivePos.x, h + 0.02, this.drivePos.z);
+    v.group.rotation.set(Math.atan2(hB - hF, 2 * d), this.driveYaw, 0, "YXZ");
 
     // update camera target height etc
     this.pos.copy(this.drivePos);

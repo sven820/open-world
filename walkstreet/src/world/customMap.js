@@ -7,6 +7,7 @@ import { mapBounds } from "../data/cityData.js";
 import { getMaterial, scaleUVs, uvScaleFor, FACADE_UV, ROOF_UV } from "./materials.js";
 import { assetInstance, assetWorldAABB } from "./assetMesh.js";
 import { ASPHALT_TILE, makeAsphaltTexture, makeRoadTileTexture } from "./textures.js";
+import { ensureTerrain, resamplePoints, ROAD_GRADE_STEP, terrainHeightAt as fieldHeightAt } from "./terrain.js";
 
 const wallMat = () => new THREE.MeshStandardMaterial({ color: 0xb8b2a6, roughness: 0.85 });
 const roofMat = () => new THREE.MeshStandardMaterial({ color: 0x6f6a60, roughness: 0.9 });
@@ -286,7 +287,9 @@ export const rtEndKey = (e) => !e ? "-"
 // 内缩 —— 路缘石/边线像素列随端头转向，弯道标线视觉连续。arc 端在裁边之外拼接
 // 半段环形带（切线边与裁边重合、角平分面与邻块半带共边），圆弧段路缘石/标线
 // 连续，中心虚线自然延续后收笔。
-export function rtTileQuadGeometry(len, w, eA, eB, y) {
+// seg = 纵向分段数（默认 1 = 旧版四顶点平面）。有地形时按 ROAD_GRADE_STEP 细分，
+// displaceGroup / 编辑器逐顶点贴地后才能跟随平顺纵坡，不会整块斜插进路基。
+export function rtTileQuadGeometry(len, w, eA, eB, y, seg = 1, cross = 1) {
   const h = w / 2, L = len / 2;
   // 端头两角的 z：z1 = +x 侧角、z2 = −x 侧角（sign=+1 B 端 / -1 A 端）
   const endZ = (e, sign) => {
@@ -295,24 +298,40 @@ export function rtTileQuadGeometry(len, w, eA, eB, y) {
     return sign > 0 ? [L + e.m1, L + e.m2] : [-L - e.m1, -L - e.m2];
   };
   const [az1, az2] = endZ(eA, -1), [bz1, bz2] = endZ(eB, 1);
+  const n = Math.max(1, Math.min(256, seg | 0));
+  // ADR-0010：横向也细分（每站 cross+1 顶点）。旧版每站只有 ±x 两顶点，
+  // 8m 宽路面跨多个 8m 格点单元时，中间格点峰值顶穿路面（实测 0.88m）→
+  // 锯齿 / 显示不全。与横纵路 roadRibbon 一致细分到 2m 后顶穿消除。
+  // cross=1 保留旧行为（无地形 / 兼容调用）。
+  const m = Math.max(1, Math.min(64, cross | 0));
+  const cols = m + 1;
+  const pos = [], uv = [], nrm = [], idx = [];
+  for (let k = 0; k <= n; k++) {
+    const tt = k / n;
+    const z1 = az1 + (bz1 - az1) * tt, z2 = az2 + (bz2 - az2) * tt;
+    for (let j = 0; j <= m; j++) {
+      const u = j / m;                 // 0 = +x 侧, 1 = −x 侧
+      const x = h - 2 * h * u;         // +h → −h
+      const z = z1 + (z2 - z1) * u;    // 斜切端头按横向插值
+      pos.push(x, y, z);
+      uv.push(1 - u, z / len + 0.5);
+      nrm.push(0, 1, 0);
+    }
+    if (k) {
+      for (let j = 0; j < m; j++) {
+        const a = (k - 1) * cols + j, b = a + 1, c = k * cols + j, d = c + 1;
+        idx.push(a, d, c, a, b, d); // 俯视逆时针 → 法线朝上（绕序同旧版 m=1）
+      }
+    }
+  }
   const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.Float32BufferAttribute([
-    h, y, az1,  // A 端 +x 侧
-    h, y, bz1,  // B 端 +x 侧
-    -h, y, bz2, // B 端 −x 侧
-    -h, y, az2, // A 端 −x 侧
-  ], 3));
-  g.setAttribute("uv", new THREE.Float32BufferAttribute([
-    1, az1 / len + 0.5,
-    1, bz1 / len + 0.5,
-    0, bz2 / len + 0.5,
-    0, az2 / len + 0.5,
-  ], 2));
-  g.setAttribute("normal", new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
-  g.setIndex([0, 2, 1, 0, 3, 2]); // 上方看逆时针 → 法线朝上
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+  g.setIndex(idx);
   const parts = [g];
-  if (eA && eA.mode === "arc") parts.push(rtArcBandGeometry(len, w, eA, -1, y));
-  if (eB && eB.mode === "arc") parts.push(rtArcBandGeometry(len, w, eB, 1, y));
+  if (eA && eA.mode === "arc") parts.push(rtArcBandGeometry(len, w, eA, -1, y, m));
+  if (eB && eB.mode === "arc") parts.push(rtArcBandGeometry(len, w, eB, 1, y, m));
   return parts.length > 1 ? mergeGeometries(parts) : g;
 }
 
@@ -320,28 +339,36 @@ export function rtTileQuadGeometry(len, w, eA, eB, y) {
 // 与邻块半带在此共边。side = 弯道外侧在本地 ±x 侧；endSign = +1 B 端 / -1 A 端。
 // 圆心在弯内侧 (−side·R, z0)，内/外边缘半径 R∓h、R+h，贴图 v 随弧长 R·φ 延续
 // （t = R·tan(half) > R·half，v 始终落在 0..1 内，不触发 ClampToEdge）。
-function rtArcBandGeometry(len, w, e, endSign, y) {
+function rtArcBandGeometry(len, w, e, endSign, y, cross = 1) {
   const h = w / 2, L = len / 2;
   const { R, half, t, side } = e;
   const N = Math.max(2, Math.ceil(half / 0.17)); // ~10° 步进
   const z0 = endSign * (L - t);                   // 裁边位置
   const vT = endSign > 0 ? 1 - t / len : t / len; // 裁边处 v
   const uOut = side > 0 ? 1 : 0;                  // 外侧边 u（+x 侧为 1）
+  // ADR-0010：径向也按 cross 细分（外缘 R+h → 内缘 R−h），与主体横向密度一致，
+  // 弯道转角处补丁同样顶穿；默认 1 保留旧行为。
+  const m = Math.max(1, Math.min(64, cross | 0));
+  const cols = m + 1;
   const pos = [], uv = [], nrm = [];
   for (let k = 0; k <= N; k++) {
     const phi = (half * k) / N, c = Math.cos(phi), s = Math.sin(phi);
-    pos.push(side * ((R + h) * c - R), y, z0 + endSign * (R + h) * s); // 外边缘
-    pos.push(side * ((R - h) * c - R), y, z0 + endSign * (R - h) * s); // 内边缘
-    const v = vT + (endSign * R * phi) / len;
-    uv.push(uOut, v, 1 - uOut, v);
-    nrm.push(0, 1, 0, 0, 1, 0);
+    for (let j = 0; j <= m; j++) {
+      const q = j / m;
+      const r = R + h - 2 * h * q; // 外缘 → 内缘
+      pos.push(side * (r * c - R), y, z0 + endSign * r * s);
+      uv.push(uOut + (1 - 2 * uOut) * q, vT + (endSign * R * phi) / len);
+      nrm.push(0, 1, 0);
+    }
   }
   const idx = [];
   const flip = side * endSign > 0; // 换端/换侧的镜像会翻转三角形朝向
   for (let k = 0; k < N; k++) {
-    const a = k * 2;
-    if (flip) idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
-    else idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+    for (let j = 0; j < m; j++) {
+      const a = k * cols + j, b = a + 1, c = a + cols, d = c + 1;
+      if (flip) idx.push(a, b, c, b, d, c);
+      else idx.push(a, c, b, b, c, d);
+    }
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
@@ -680,16 +707,20 @@ export function buildLampGroup() {
   return g;
 }
 
-function treeMesh(obj) {
+// 树/路灯：几何与模板共享（不能逐顶点位移），按落点采样地形高度整体抬升，
+// 并打 terrainRoot 标记（displaceGroup 跳过其子树）
+function treeMesh(obj, data) {
   const g = buildTreeGroup();
   g.scale.setScalar(obj.sc || 1);
-  g.position.set(obj.pos[0], obj.baseY || 0, obj.pos[1]);
+  g.position.set(obj.pos[0], (obj.baseY || 0) + fieldHeightAt(data, obj.pos[0], obj.pos[1]), obj.pos[1]);
+  g.userData.terrainRoot = true;
   return g;
 }
 
-function lampMesh(obj) {
+function lampMesh(obj, data) {
   const g = buildLampGroup();
-  g.position.set(obj.pos[0], 0, obj.pos[1]);
+  g.position.set(obj.pos[0], fieldHeightAt(data, obj.pos[0], obj.pos[1]), obj.pos[1]);
+  g.userData.terrainRoot = true;
   return g;
 }
 
@@ -871,7 +902,9 @@ export function buildCustomMap(data, colliders, junctions = []) {
   for (let ri = 0; ri < roads.length; ri++) {
     const r = roads[ri];
     if (!r.points || r.points.length < 2) continue;
-    const pts = polyline(r.points);
+    // 有地形时按 ROAD_GRADE_STEP 重采样：与走廊纵剖面采样点对齐，
+    // 条带才不会跨坡直线插值而穿进路基（平面地图原样）
+    const pts = ensureTerrain(data) ? resamplePoints(polyline(r.points), ROAD_GRADE_STEP) : polyline(r.points);
     // 程序化街区平台顶 0.16 —— 描边路面抬到其上，穿越街区时路面不被平台盖住
     let m;
     if (r.closed && r.points.length >= 3) {
@@ -1002,7 +1035,7 @@ export function buildCustomMap(data, colliders, junctions = []) {
             const len = Math.hypot(b.x - a.x, b.z - a.z);
             while (next <= acc + len) {
               const t = (next - acc) / len;
-              group.add(treeMesh({ pos: [a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t], sc: 0.8, baseY: 0.38 }));
+              group.add(treeMesh({ pos: [a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t], sc: 0.8, baseY: 0.38 }, data));
               next += 22;
             }
             acc += len;
@@ -1013,7 +1046,7 @@ export function buildCustomMap(data, colliders, junctions = []) {
   }
   for (const r of data.features.rivers || []) {
     if (!r.points || r.points.length < 2) continue;
-    const m = new THREE.Mesh(stripGeometry(polyline(r.points), r.width || 26, 0.05), riverMat());
+    const m = new THREE.Mesh(stripGeometry(ensureTerrain(data) ? resamplePoints(polyline(r.points), ROAD_GRADE_STEP) : polyline(r.points), r.width || 26, 0.05), riverMat());
     m.receiveShadow = true;
     group.add(m);
   }
@@ -1024,7 +1057,10 @@ export function buildCustomMap(data, colliders, junctions = []) {
   for (const t of tiles) {
     const len = t.len || 3, w = t.w || 2;
     const mi = tileMiters.get(t.id);
-    const geo = rtTileQuadGeometry(len, w, mi && mi.a, mi && mi.b, 0.19);
+    const seg = ensureTerrain(data) ? Math.max(1, Math.ceil(len / ROAD_GRADE_STEP)) : 1;
+    // ADR-0010：横向细分到 2m，与编辑器 / 补丁同精度，消除弯道与宽路顶穿
+    const cross = ensureTerrain(data) ? Math.max(1, Math.ceil(w / 2)) : 1;
+    const geo = rtTileQuadGeometry(len, w, mi && mi.a, mi && mi.b, 0.19, seg, cross);
     const m = new THREE.Mesh(geo, roadTileMat(len, w, t.style || "dash", t.lanes || 1));
     m.position.set(t.x, 0, t.z);
     m.rotation.y = t.rot || 0;
@@ -1046,19 +1082,24 @@ export function buildCustomMap(data, colliders, junctions = []) {
       const ref = { id: o.assetId };
       const inst = assetInstance(ref, { pos: o.pos, rot: o.rot, scale: o.scale, hideBillboardProxies: true });
       if (inst) {
+        inst.position.y += fieldHeightAt(data, o.pos[0], o.pos[1]); // 落到地形表面
+        inst.userData.terrainRoot = true; // 几何与模板共享：整树抬升，不逐顶点位移
         group.add(inst);
         const aabb = assetWorldAABB(ref, { pos: o.pos, rot: o.rot, scale: o.scale });
         // 碰撞顶点取模型实际最高点，供相机遮挡判断
-        if (aabb) colliders.add(aabb.minX, aabb.minZ, aabb.maxX, aabb.maxZ, aabb.maxY);
+        if (aabb) colliders.add(aabb.minX, aabb.minZ, aabb.maxX, aabb.maxZ, aabb.maxY + fieldHeightAt(data, o.pos[0], o.pos[1]));
       }
     } else if (o.type === "tree") {
-      group.add(treeMesh(o));
+      group.add(treeMesh(o, data));
       colliders.add(o.pos[0] - 0.5, o.pos[1] - 0.5, o.pos[0] + 0.5, o.pos[1] + 0.5, 5);
     } else if (o.type === "lamp") {
-      group.add(lampMesh(o));
+      group.add(lampMesh(o, data));
       colliders.add(o.pos[0] - 0.3, o.pos[1] - 0.3, o.pos[0] + 0.3, o.pos[1] + 0.3, 6);
     }
   }
+  // 注意：本组不在此处按地形顶起 —— city._init 在建城收尾对整棵 city.group
+  // 统一 displaceGroup 一次（含程序化城市 + 本组），这里顶会导致双重抬升。
+  // 树/路灯/资产已按落点整体抬升并打 terrainRoot 标记（displaceGroup 跳过子树）
 
   return {
     group,

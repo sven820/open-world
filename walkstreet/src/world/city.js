@@ -26,6 +26,10 @@ import {
   buildParkedScooters, buildTrafficHeads,
 } from "./cityStreetObjects.js";
 import { ColliderGrid } from "./colliderGrid.js";
+import {
+  displaceGroup, ensureTerrain, buildRoadCorridors, buildRoadBedGeometry, buildGroundSurface,
+  terrainHeightAt as fieldHeightAt, GROUND_STEP,
+} from "./terrain.js";
 import { buildTraceCorridors, collectConstraints, resolvePlacement, footprintBox } from "./billboard/placement.js";
 import { normalizeSpec } from "./billboard/mounts.js";
 
@@ -116,6 +120,9 @@ export class City {
 
   async _init() {
     const yieldFrame = () => new Promise((r) => setTimeout(r, 0));
+    // 道路走廊纵坡塑形：按当前地图数据重算一次（旧地图 / 编辑器保存的快照都兼容），
+    // 建城全程的 terrainHeightAt、路基补丁、displaceGroup 都用同一份 corridors
+    buildRoadCorridors(this.data);
     // 地图引用的模型资产：先预热模板缓存（GLB 解析），buildCustomMap 才能
     // 同步克隆实例；排除区也需要资产的 AABB
     await preloadAssetTemplatesFromMap(this.data);
@@ -178,40 +185,108 @@ export class City {
       this.spawnPoint = sp && Number.isFinite(sp.x) && Number.isFinite(sp.z) ? sp : custom.center;
     }
     this._finalize();
+    // 地形高度场：把城市全部静态烘焙网格（地面/路网/街区平台/建筑/绿植/路灯/
+    // 描边内容）按地形高度整体顶起 —— 物件数据只存 pos(x,z)，渲染时统一按高度
+    // 场落地，改地形重新保存后自动重新贴地（不会陷入地下或飘在空中）；
+    // 顶起后同步分块包围球（分块调度/视锥剔除依赖它）
+    if (ensureTerrain(this.data)) {
+      displaceGroup(this.data, this.group);
+      for (const c of this.chunks) {
+        const bs = c.mesh.geometry.boundingSphere;
+        if (bs) { c.x = bs.center.x; c.z = bs.center.z; c.r = bs.radius; }
+      }
+    }
     this.readyState = true;
   }
 
+  // 任意点地形高度（无地形 = 0）：玩家/车辆等动态实体贴地用
+  terrainHeight(x, z) { return fieldHeightAt(this.data, x, z); }
+
   /* ---------------- ground ---------------- */
   _buildGround() {
-    const outer = new THREE.Mesh(
-      new THREE.PlaneGeometry(6000, 6000),
-      new THREE.MeshStandardMaterial({ color: 0x2c322c, roughness: 1 })
-    );
-    outer.rotation.x = -Math.PI / 2;
-    outer.position.y = -0.5; // 与路面保持大间距，避免高空俯瞰时深度冲突闪块
-    outer.receiveShadow = true;
-    this.group.add(outer);
-
+    // 有地形时地面必须加密细分（~60m 网格）：逐顶点按高度场顶起。1×1 分段的
+    // 大平面只有 4 个角点参与位移（角点都在地形网格外、采样≈0），内部保持全平
+    // → 建筑/物件被顶起后相对地面悬空（实测踩坑：世界地砖全平、楼在半空）
+    const hasTerrain = !!ensureTerrain(this.data);
     const b = this.bounds;
-    const w = b.maxX - b.minX + 60;
-    const d = b.maxZ - b.minZ + 60;
-    // 世界米制 planar uv（与描边路面 customMap.planarUV 同式）：横纵路地面与描边路
-    // 共用同一张贴图同一世界相位，交接处颗粒/明暗斑/轮迹无缝衔接（此前 repeat 平铺
-    // 与 planarUV 相位错开且 V 轴镜像，路缘两侧纹理对不上）
-    const geo = new THREE.PlaneGeometry(w, d)
-      .rotateX(-Math.PI / 2)
-      .translate((b.minX + b.maxX) / 2, 0, (b.minZ + b.maxZ) / 2);
-    const gpos = geo.attributes.position;
-    const guv = new Float32Array(gpos.count * 2);
-    for (let i = 0; i < gpos.count; i++) {
-      guv[i * 2] = gpos.getX(i) / ASPHALT_TILE;
-      guv[i * 2 + 1] = gpos.getZ(i) / ASPHALT_TILE;
+    // 主地面覆盖到 bounds 外 30m，与远景底板 inner 边界重合。
+    const pad = 30;
+    const gx0 = b.minX - pad, gx1 = b.maxX + pad;
+    const gz0 = b.minZ - pad, gz1 = b.maxZ + pad;
+
+    // ADR-0005：outer 远景底板改为「环形」（只覆盖主地面之外）。
+    // 旧版是一整张 6000×6000 平面，在道路区域与主地面/路基补丁重叠；粗网格
+    // 在凹曲面线性插值会高于真实曲面，从下方顶穿补丁与路面 —— 这就是截图里
+    // 深绿色 (0x2c322c) 盖住道路、路面断断续续的根因（实测最高顶穿 3.6m）。
+    // 改成环形后 outer 与道路区域不再有几何重叠，顶穿从根上消失。
+    const outerMat = new THREE.MeshStandardMaterial({ color: 0x2c322c, roughness: 1 });
+    const HALF = 3000;
+    const ring = [
+      { x0: -HALF, x1: HALF, z0: gz1, z1: HALF },      // 北
+      { x0: -HALF, x1: HALF, z0: -HALF, z1: gz0 },     // 南
+      { x0: -HALF, x1: gx0, z0: gz0, z1: gz1 },        // 西
+      { x0: gx1, x1: HALF, z0: gz0, z1: gz1 },         // 东
+    ];
+    for (const r of ring) {
+      if (r.x1 <= r.x0 || r.z1 <= r.z0) continue;
+      const rw = r.x1 - r.x0, rd = r.z1 - r.z0;
+      // 远景 32m 细分即可表达山丘；不标记 terrainBed（不再覆盖路面，无需下沉）
+      const sx = hasTerrain ? Math.max(1, Math.ceil(rw / 32)) : 1;
+      const sz = hasTerrain ? Math.max(1, Math.ceil(rd / 32)) : 1;
+      const m = new THREE.Mesh(
+        new THREE.PlaneGeometry(rw, rd, sx, sz)
+          .rotateX(-Math.PI / 2)
+          .translate((r.x0 + r.x1) / 2, 0, (r.z0 + r.z1) / 2),
+        outerMat
+      );
+      m.position.y = -0.5;
+      m.receiveShadow = true;
+      m.userData.terrainNormals = hasTerrain;
+      this.group.add(m);
     }
-    geo.setAttribute("uv", new THREE.BufferAttribute(guv, 2));
+
+    // ADR-0005：主可见地面改用 buildGroundSurface 生成 8m 全局格点网格，
+    // 与 8m 路基补丁完全同相位。此前 PlaneGeometry 32m/16m 网格与补丁相位
+    // 不同，两套分段线性曲面互相穿插，粗者顶穿补丁导致路面显示不全。
+    // uv 用世界米制 planar（与描边路 customMap.planarUV 同式），贴图无缝。
+    let geo = hasTerrain ? buildGroundSurface(gx0, gz0, gx1, gz1, GROUND_STEP, ASPHALT_TILE) : null;
+    if (!geo) {
+      // 降级：地图跨度极大（>80 万顶点）时退回分段平面，避免卡死
+      const segs = hasTerrain ? Math.min(512, Math.max(48, Math.ceil(Math.max(gx1 - gx0, gz1 - gz0) / (GROUND_STEP * 2)))) : 1;
+      geo = new THREE.PlaneGeometry(gx1 - gx0, gz1 - gz0, segs, segs)
+        .rotateX(-Math.PI / 2)
+        .translate((gx0 + gx1) / 2, 0, (gz0 + gz1) / 2);
+      const gp = geo.attributes.position;
+      const gu = new Float32Array(gp.count * 2);
+      for (let i = 0; i < gp.count; i++) {
+        gu[i * 2] = gp.getX(i) / ASPHALT_TILE;
+        gu[i * 2 + 1] = gp.getZ(i) / ASPHALT_TILE;
+      }
+      geo.setAttribute("uv", new THREE.BufferAttribute(gu, 2));
+    }
     const mat = new THREE.MeshStandardMaterial({ map: makeAsphaltTexture(), color: 0xffffff, roughness: 0.95, metalness: 0.0 });
     const road = new THREE.Mesh(geo, mat);
     road.receiveShadow = true;
+    road.userData.terrainNormals = hasTerrain;
+    // 同相位后主地面与补丁顶点重合；走廊内下沉 ROAD_BED_DROP(0.42m)，
+    // 补丁 lift=-0.23（高于主地面 0.19m 填壕沟），路面 0.19 高于补丁 0.42m ——
+    // 吸收 8m 格点曲面与路面三角面内部插值的最大偏差，杜绝补丁顶穿路面（ADR-0011）。
+    road.userData.terrainBed = hasTerrain;
     this.group.add(road);
+
+    // 道路路基补丁：大地面只有 ~50m 网格，表达不了十米宽的平整走廊。
+    // 这张 8m 高密度地表覆盖 core + 路肩，与 road 共用同一张沥青贴图，
+    // 路面 / 标线 / 人物 / 车辆都落在它上面（同一 terrainHeightAt）。
+    if (hasTerrain) {
+      const bedGeo = buildRoadBedGeometry(this.data, ASPHALT_TILE);
+      if (bedGeo) {
+        const bed = new THREE.Mesh(bedGeo, mat);
+        bed.position.y = -0.23; // ADR-0011：高于下沉主地面(-0.42) 0.19m，低于路面 0.42m 杜绝顶穿
+        bed.receiveShadow = true;
+        bed.userData.terrainNormals = true;
+        this.group.add(bed);
+      }
+    }
 
     this.materials.asphalt = mat;
   }
@@ -357,13 +432,13 @@ export class City {
   _solid(x, z0, z1, y, w, batch, yAxis = false) {
     const g = new THREE.PlaneGeometry(w, z1 - z0);
     g.rotateX(-Math.PI / 2);
-    g.translate(x, 0.018 + y, (z0 + z1) / 2);
+    g.translate(x, 0.06 + y, (z0 + z1) / 2);
     batch.add(g);
   }
   _solid2(x0, x1, z, w, batch) {
     const g = new THREE.PlaneGeometry(x1 - x0, w);
     g.rotateX(-Math.PI / 2);
-    g.translate((x0 + x1) / 2, 0.018, z);
+    g.translate((x0 + x1) / 2, 0.06, z);
     batch.add(g);
   }
   _dashesVertical(x, z0, z1, road) {
@@ -377,7 +452,7 @@ export class City {
           const off = inner + lane * LANE_W;
           const g = new THREE.PlaneGeometry(0.14, len);
           g.rotateX(-Math.PI / 2);
-          g.translate(x + s * off, 0.02, z + len / 2);
+          g.translate(x + s * off, 0.06, z + len / 2);
           this.markWhite.add(g);
         }
       }
@@ -393,7 +468,7 @@ export class City {
           const off = inner + lane * LANE_W;
           const g = new THREE.PlaneGeometry(len, 0.14);
           g.rotateX(-Math.PI / 2);
-          g.translate(x + len / 2, 0.02, z + s * off);
+          g.translate(x + len / 2, 0.06, z + s * off);
           this.markWhite.add(g);
         }
       }
@@ -442,7 +517,7 @@ export class City {
         const bx = x - span / 2 + k * (barW + gap) + barW / 2;
         const g = new THREE.PlaneGeometry(barW, depth);
         g.rotateX(-Math.PI / 2);
-        g.translate(bx, 0.024, cz);
+        g.translate(bx, 0.065, cz);
         this.markWhite.add(g);
       }
     }
@@ -455,7 +530,7 @@ export class City {
         const bz = z - span / 2 + k * (barW + gap) + barW / 2;
         const g = new THREE.PlaneGeometry(depth, barW);
         g.rotateX(-Math.PI / 2);
-        g.translate(cx, 0.024, bz);
+        g.translate(cx, 0.065, bz);
         this.markWhite.add(g);
       }
     }

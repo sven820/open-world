@@ -107,18 +107,14 @@ export function rebuildBasemap(ed) {
   if (ed._cesiumOn) viewer.scene.requestRender();
 }
 
-// 影像层显隐：注记层（cia/cva）受图层面板「中文注记」勾选控制，
+// 影像层显隐：注记层（cia/cva）常显（图层面板已不再提供开关），
 // 其余影像层常显（图源选择在设置面板，整体开关在顶栏「卫星底图」按钮）
 export function applyImageryVis(ed) {
   if (!ed._cesium) return;
   const { viewer } = ed._cesium;
   const layers = viewer.imageryLayers;
   for (let i = 0; i < layers.length; i++) {
-    const layer = layers.get(i);
-    const p = layer.imageryProvider || layer.provider || layer._imageryProvider;
-    const url = String(p?.url || "");
-    // cia/cva 均为天地图中文注记（影像注记/矢量注记），URL 被规范化时仍能命中
-    layer.show = url.includes("cia_w") || url.includes("cva_w") ? ed._layerVis.anno !== false : true;
+    layers.get(i).show = true;
   }
   if (ed._cesiumOn) { try { viewer.scene.requestRender(); } catch { /* 忽略 */ } }
 }
