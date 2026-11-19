@@ -28,7 +28,7 @@ import {
 import { ColliderGrid } from "./colliderGrid.js";
 import {
   displaceGroup, ensureTerrain, buildRoadCorridors, buildRoadBedGeometry, buildGroundSurface,
-  terrainHeightAt as fieldHeightAt, GROUND_STEP,
+  terrainHeightAt as fieldHeightAt, terrainBBox, GROUND_STEP,
 } from "./terrain.js";
 import { buildTraceCorridors, collectConstraints, resolvePlacement, footprintBox } from "./billboard/placement.js";
 import { normalizeSpec } from "./billboard/mounts.js";
@@ -355,23 +355,65 @@ export class City {
     }));
 
     // markings per segment
+    // 横纵路延伸到地图边界：走廊平整与路基本来就以整块地形板为界全长覆盖
+    // （编辑器骨架灰带通到边界），但标线此前只画在最外侧路口之间 —— 相交区域
+    // 之外的路成了“断头路”。这里给两端各补一段延伸标线：只画细标线（白边线 /
+    // 车道虚线 / 双黄线），中央绿化带等宽面几何只保留在路口之间的内段（长距离
+    // 延伸段上会连成贯穿地图的宽白带，在地形上呈“面状”）。只往既有合批里加
+    // 几何（不新增 draw call、不新增街道/路口/交通边），性能零感知。
+    // 延伸终点 = 世界边界 ∩ 地形板边界：用户地图取地形板边缘、默认街区取路网
+    // 缓冲边界 —— 两者的走廊平整与主地面都覆盖到那里，标线不会浮在未平整的野地上。
+    const tb = terrainBBox(this.data);
+    const ezLo = Math.max(b.minZ, tb.z0), ezHi = Math.min(b.maxZ, tb.z1);
+    const exLo = Math.max(b.minX, tb.x0), exHi = Math.min(b.maxX, tb.x1);
+    const zSegs = [];
+    for (let j = 0; j < zs.length - 1; j++) {
+      zSegs.push({ a: zs[j].at + asphaltHalf(zs[j]), b: zs[j + 1].at - asphaltHalf(zs[j + 1]), ext: false });
+    }
+    if (zs.length) {
+      const za = zs[0].at - asphaltHalf(zs[0]);
+      const zb = zs[zs.length - 1].at + asphaltHalf(zs[zs.length - 1]);
+      if (za - ezLo >= 8) zSegs.push({ a: ezLo, b: za, ext: true });
+      if (ezHi - zb >= 8) zSegs.push({ a: zb, b: ezHi, ext: true });
+    }
+    const xSegs = [];
+    for (let i = 0; i < xs.length - 1; i++) {
+      xSegs.push({ a: xs[i].at + asphaltHalf(xs[i]), b: xs[i + 1].at - asphaltHalf(xs[i + 1]), ext: false });
+    }
+    if (xs.length) {
+      const xa = xs[0].at - asphaltHalf(xs[0]);
+      const xb = xs[xs.length - 1].at + asphaltHalf(xs[xs.length - 1]);
+      if (xa - exLo >= 8) xSegs.push({ a: exLo, b: xa, ext: true });
+      if (exHi - xb >= 8) xSegs.push({ a: xb, b: exHi, ext: true });
+    }
     for (let i = 0; i < xs.length; i++) {
       const rx = xs[i];
       if (rx.virtual) continue; // 虚拟边界路不可见：不画标线
       const ah = asphaltHalf(rx);
-      for (let j = 0; j < zs.length - 1; j++) {
-        const za = zs[j].at + asphaltHalf(zs[j]);
-        const zb = zs[j + 1].at - asphaltHalf(zs[j + 1]);
-        if (zb - za < 8) continue;
-        this._dashesVertical(rx.at, za, zb, rx);
-        // outer edge lines
-        for (const s of [-1, 1]) {
-          this._solid(rx.at + s * (ah - 0.16), za, zb, 0, 0.14, this.markWhite, false);
-        }
-        if (rx.median > 0) this._medianVertical(rx, za, zb);
-        else {
-          this._solid(rx.at - 0.17, za, zb, 0, 0.1, this.markYellow);
-          this._solid(rx.at + 0.17, za, zb, 0, 0.1, this.markYellow);
+      for (const { a: za0, b: zb0, ext } of zSegs) {
+        if (zb0 - za0 < 8) continue;
+        this._dashesVertical(rx.at, za0, zb0, rx);
+        // 延伸段（数公里长）按 GROUND_STEP 分段生成：长平面整条落进同一个
+        // 合批格子，displaceGroup 的 tessellateFlat 顶点预算（6000）不够细分它，
+        // 残留的超长三角形随山地“抄直线”穿山/悬空，被 polygonOffset 常驻前景
+        // 画成宽白/黄带（实机实测）。8m 分段后每块顶点数远低于预算，逐顶点
+        // 贴地必然完整执行，标线严丝合缝趴在地形上。
+        const n = ext ? Math.max(1, Math.ceil((zb0 - za0) / GROUND_STEP)) : 1;
+        for (let k = 0; k < n; k++) {
+          const za = za0 + (zb0 - za0) * k / n;
+          const zb = za0 + (zb0 - za0) * (k + 1) / n;
+          // outer edge lines
+          for (const s of [-1, 1]) {
+            this._solid(rx.at + s * (ah - 0.16), za, zb, 0, 0.14, this.markWhite, false);
+          }
+          // 延伸段只画细标线：中央绿化带（平台盒 + 绿篱 + 行道树是宽面几何）只保留
+          // 在路口之间的内段 —— 几公里长的延伸段上它会连成一条贯穿地图的宽白带。
+          // 延伸段中央改画双黄线，与普通路段一致。
+          if (rx.median > 0 && !ext) this._medianVertical(rx, za, zb);
+          else {
+            this._solid(rx.at - 0.17, za, zb, 0, 0.1, this.markYellow);
+            this._solid(rx.at + 0.17, za, zb, 0, 0.1, this.markYellow);
+          }
         }
       }
     }
@@ -379,18 +421,21 @@ export class City {
       const rz = zs[j];
       if (rz.virtual) continue; // 虚拟边界路不可见：不画标线
       const ah = asphaltHalf(rz);
-      for (let i = 0; i < xs.length - 1; i++) {
-        const xa = xs[i].at + asphaltHalf(xs[i]);
-        const xb = xs[i + 1].at - asphaltHalf(xs[i + 1]);
-        if (xb - xa < 8) continue;
-        this._dashesHorizontal(rz.at, xa, xb, rz);
-        for (const s of [-1, 1]) {
-          this._solid2(xa, xb, rz.at + s * (ah - 0.16), 0.14, this.markWhite);
-        }
-        if (rz.median > 0) this._medianHorizontal(rz, xa, xb);
-        else {
-          this._solid2(xa, xb, rz.at - 0.17, 0.1, this.markYellow);
-          this._solid2(xa, xb, rz.at + 0.17, 0.1, this.markYellow);
+      for (const { a: xa0, b: xb0, ext } of xSegs) {
+        if (xb0 - xa0 < 8) continue;
+        this._dashesHorizontal(rz.at, xa0, xb0, rz);
+        const n = ext ? Math.max(1, Math.ceil((xb0 - xa0) / GROUND_STEP)) : 1;
+        for (let k = 0; k < n; k++) {
+          const xa = xa0 + (xb0 - xa0) * k / n;
+          const xb = xa0 + (xb0 - xa0) * (k + 1) / n;
+          for (const s of [-1, 1]) {
+            this._solid2(xa, xb, rz.at + s * (ah - 0.16), 0.14, this.markWhite);
+          }
+          if (rz.median > 0 && !ext) this._medianHorizontal(rz, xa, xb);
+          else {
+            this._solid2(xa, xb, rz.at - 0.17, 0.1, this.markYellow);
+            this._solid2(xa, xb, rz.at + 0.17, 0.1, this.markYellow);
+          }
         }
       }
     }

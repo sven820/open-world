@@ -2448,7 +2448,7 @@ export class MapEditor3d {
         <div class="me-stat">河流 <b>${f.rivers.length}</b></div>
         <div class="me-stat">拼接路块 <b>${(f.roadTiles || []).length}</b></div>
         <div class="me-stat">建筑/物件 <b>${this.map.objects.length}</b></div>
-        <div class="me-stat me-tiprow">程序化路网 <b>${this.map.roadsX.length}×${this.map.roadsZ.length}</b>（2D 编辑器管理）<span class="me-tip" data-tip="灰色路带 / 紫色圆点 / 绿色标记 = 程序化城市骨架，与游戏实际生成的街道一致，仅显示不可选中；手工道路可点选编辑。两个编辑器编辑的是同一张地图。">?</span></div>
+        <div class="me-stat me-tiprow">程序化路网 <b>${this.map.roadsX.length}×${this.map.roadsZ.length}</b>（2D 编辑器管理）<span class="me-tip" data-tip="灰色路带 / 紫色圆点 / 绿色标记 = 程序化城市骨架，与游戏实际生成的街道一致，仅显示不可选中；手工道路可点选编辑。两个编辑器编辑的是同一张地图。游戏内横纵路标线自最外侧路口一直延伸到地图边界（与预览灰带全长一致）。">?</span></div>
         <label class="me-check me-tiprow" data-tip="勾选后按固定间距自动补满世界边缘的默认街道（游戏内与预览同步）；不勾选则只保留手工道路。放置拼接路且程序化城市开启时，游戏内仅在拼接路越出路网的外侧补一条不可见的虚拟边界（不画线、无路口、不进交通图），仅用于划分街区：横纵路标线延伸到拼接路，相交区域正常生成建筑。"><input id="ep-ext" type="checkbox" ${this.map.extRoads ? "checked" : ""} /> 程序化延伸街道</label>
         <label class="me-check me-tiprow" data-tip="显示底板表面的 20m 网格（地形模式贴地起伏）；与下方网格透明度独立，取消勾选即完全隐藏网格线。"><input id="ep-grid" type="checkbox" ${this._layerVis.grid !== false ? "checked" : ""} /> 网格线</label>
         <div class="me-slider">
