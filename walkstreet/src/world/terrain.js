@@ -112,20 +112,60 @@ export function ensureTerrain(map) {
 
 /* ---------------- 采样 ---------------- */
 
+// 范围外远景解析山地（terrain-optimization-plan 第 3 条提前实现，ADR-0013）：
+// 边界外先按边缘延伸值衔接（mask=0 处与界内地形无缝），随出界距离用
+// ridged 分形噪声渐入山体 —— 站在高原（如基础高度 5000m）上望向界外，
+// 远景不再是死平延伸到地平线，而是绵延山形给出「高出看远」的纵深。
+// 纯几何实现：复用运行时 outer 环形板的 32m 顶点 + displaceGroup 位移，
+// 不动渲染层（计划里 shader 方案留作后续优化）。
+// 注：未依赖计划第 2 条的高度缓存 —— 出界点只在远景板位移与界外动态实体
+// 贴地时采样，量级可控；界内主路径（建城大头）完全不受影响。
+const FAR_SEED = 20261120;    // 远景山地噪声种子（固定值：同一地图界外山形稳定）
+const FAR_FADE_IN = 260;      // 山地渐入起点（出界距离 m，界内 + 40m 外扩板不受影响）
+const FAR_FADE_FULL = 2200;   // 山地满幅距离（m，outer 环形板 3000m 内可见大半山体）
+
+// ridged fbm：值噪声翻转 |2n-1| 取山脊感，3 层叠加，返回 0..1（1 = 山脊线）
+function farRelief01(x, z) {
+  let h = 0, f = 1, a = 1, norm = 0;
+  for (let o = 0; o < 3; o++) {
+    const n = noise2(x / (1100 / f), z / (1100 / f), FAR_SEED + o * 131);
+    h += (1 - Math.abs(n * 2 - 1)) * a;
+    norm += a; f *= 2.2; a *= 0.55;
+  }
+  return h / norm;
+}
+
+function farHeightOutside(t, x, z, edgeH) {
+  const dOut = Math.max(
+    x < t.x0 ? t.x0 - x : x > t.x1 ? x - t.x1 : 0,
+    z < t.z0 ? t.z0 - z : z > t.z1 ? z - t.z1 : 0,
+  );
+  const u = clamp((dOut - FAR_FADE_IN) / (FAR_FADE_FULL - FAR_FADE_IN), 0, 1);
+  const mask = u * u * (3 - 2 * u); // smoothstep：边界处 relief=0，无接缝无断崖
+  if (mask <= 0) return edgeH;
+  // 山体自边缘海拔起抬：幅度随边缘海拔放大（高原界外是高山、平原界外是丘陵），
+  // 5000m 高原界外山峰可再抬 ~2700m（平均约一半）
+  const amp = clamp(240 + Math.max(edgeH, 0) * 0.55, 280, 6000);
+  return edgeH + amp * farRelief01(x, z) * mask;
+}
+
 // 原始地表高度（不含道路塑形）：双线性插值 + 建筑地基 pads 精确覆盖 / 过渡带
-// 平滑混合。范围外按边缘延伸，无地形返回 0。道路设计纵坡由它派生 —— 生成
-// 走廊时只读这一层，避免「塑形结果 → heights → 下一轮塑形」的自反馈漂移。
+// 平滑混合。范围外按边缘延伸 + 远景解析山地（farHeightOutside），无地形返回 0。
+// 道路设计纵坡由它派生 —— 生成走廊时只读这一层，避免
+// 「塑形结果 → heights → 下一轮塑形」的自反馈漂移。
 export function baseHeightAt(map, x, z) {
   const t = ensureTerrain(map);
   if (!t) return 0;
   const { x0, z0, cols, rows, step, heights } = t;
   const fx = (x - x0) / step, fz = (z - z0) / step;
+  const outside = fx < 0 || fz < 0 || fx > cols - 1 || fz > rows - 1;
   const i = clamp(Math.floor(fx), 0, cols - 2);
   const j = clamp(Math.floor(fz), 0, rows - 2);
   const tx = clamp(fx - i, 0, 1), tz = clamp(fz - j, 0, 1);
   const r0 = j * cols + i, r1 = r0 + cols;
   const h00 = heights[r0], h10 = heights[r0 + 1], h01 = heights[r1], h11 = heights[r1 + 1];
-  const field = h00 + (h10 - h00) * tx + (h01 - h00) * tz + (h00 - h10 - h01 + h11) * tx * tz;
+  let field = h00 + (h10 - h00) * tx + (h01 - h00) * tz + (h00 - h10 - h01 + h11) * tx * tz;
+  if (outside) field = farHeightOutside(t, x, z, field); // 界内主路径零开销（一个布尔判断）
   const pads = t.pads;
   if (!pads || !pads.length) return field;
   for (const p of pads) {
@@ -653,16 +693,24 @@ function noise2(x, z, seed) {
   return a + (b - a) * sx + (c - a) * sz + (a - b - c + d) * sx * sz;
 }
 
-// 生成随机高度场：4 层 fbm（scale = 主起伏波长 m，amplitude = 峰谷幅度 m），
+// 生成随机高度场：4 层 fbm（scale = 主起伏波长 m），起伏上下非对称 ——
+// 真实陆地山可以很高（珠峰 8848m）而盆地相对浅，因此向上（山峰）与向下（盆地）
+// 各一个幅度，均以基础高度 base 为基准起算：峰顶最高 base+ampUp（≤5000），
+// 谷底最低 base-ampDown（≥base-1000）。
 // 范围边缘平滑回落到基础高度 base（防止世界边界出现断崖，也方便向外扩展平地）。
 // mode = custom：随机生成只是自定义地形的一种填充手段，生成后可继续笔刷雕刻；
-// seed/amplitude/scale/baseHeight 留在地形对象上供面板回显与重新生成
-export function generateRandomTerrain(map, { seed = 1, amplitude = 60, scale = 500, base = 0, step = TERRAIN_STEP_DEFAULT } = {}) {
+// seed/ampUp/ampDown/scale/baseHeight 留在地形对象上供面板回显与重新生成。
+// 兼容旧地图：只存了 amplitude（对称幅度）时，上下各取该值（向下会被钳到 200）
+export function generateRandomTerrain(map, { seed = 1, ampUp, ampDown, amplitude = 60, scale = 500, base = 0, step = TERRAIN_STEP_DEFAULT } = {}) {
   const g = makeTerrainGrid(map, step);
   const { x0, z0, x1, z1, cols, rows } = g;
   const fall = clamp(Math.min(x1 - x0, z1 - z0) * 0.15, 120, 400); // 边缘衰减带宽
-  const amp = clamp(amplitude, 2, 500);
-  const wl = clamp(scale, 60, 4000); // 主波长（原局部变量 base，避免与新参数重名改名）
+  const up = clamp(Math.round(ampUp ?? amplitude), 0, 5000);   // 山峰起伏（向上，青藏高原量级）
+  const down = clamp(Math.round(ampDown ?? amplitude), 0, 1000); // 盆地起伏（向下，可挖深谷/盆地）
+  const wl = clamp(scale, 60, 12000); // 主波长
+  // 反针尖保底：主波长不小于总起伏的 1.5 倍（自然山体「波长/起伏」经验下限），
+  // 大幅度配短波长会出噪声尖刺而非山形；用户设得更小则按保底值生效
+  const wlEff = Math.max(wl, Math.min((up + down) * 1.5, 12000));
   const heights = new Array(cols * rows);
   let k = 0;
   for (let j = 0; j < rows; j++) {
@@ -671,17 +719,18 @@ export function generateRandomTerrain(map, { seed = 1, amplitude = 60, scale = 5
       const x = x0 + i * g.step;
       let h = 0, f = 1, a = 1, norm = 0;
       for (let o = 0; o < 4; o++) {
-        h += noise2(x / (wl / f), z / (wl / f), seed + o * 101) * a;
+        h += noise2(x / (wlEff / f), z / (wlEff / f), seed + o * 101) * a;
         norm += a;
         f *= 2; a *= 0.5;
       }
       h = (h / norm - 0.5) * 2; // 归一到 [-1,1]
       const de = Math.min(x - x0, x1 - x, z - z0, z1 - z);
       const t = de >= fall ? 1 : de <= 0 ? 0 : (de / fall) * (de / fall) * (3 - 2 * (de / fall));
-      heights[k] = Math.round((base + h * amp * t) * 10) / 10;
+      const hh = h >= 0 ? h * up : h * down; // 非对称：山向上、盆地向下
+      heights[k] = Math.round((base + hh * t) * 10) / 10;
     }
   }
-  return { mode: "custom", seed: seed | 0, amplitude: amp, scale: wl, baseHeight: base, ...g, heights, originH: 0 };
+  return { mode: "custom", seed: seed | 0, amplitude: up, ampUp: up, ampDown: down, scale: wl, baseHeight: base, ...g, heights, originH: 0 };
 }
 
 // 空白高度场（custom 笔刷雕刻 / real 采样前的容器）：
@@ -1008,11 +1057,18 @@ export function gridHeightAt(map, x, z, step = GROUND_STEP) {
 
 // 凹曲面，两者各自的分段线性插值曲面互相穿插，粗者从下方顶穿补丁与路面，
 // 实测可高出 3.6m，表现就是「深绿底板盖住道路 / 路面断断续续」。
+// 主地面步距自适应：顶点超上限（80 万）时自动放粗步距（8→16→…→512m）保住
+// 可见地形面。编辑器裙边需要与主地面同一格距（边界顶点严丝合缝），故独立导出。
+export function groundStepFor(x0, z0, x1, z1, step = GROUND_STEP) {
+  while (step < 512 && (Math.ceil((x1 - x0) / step) + 2) * (Math.ceil((z1 - z0) / step) + 2) > 800000) step *= 2;
+  return step;
+}
+
 export function buildGroundSurface(x0, z0, x1, z1, step = GROUND_STEP, tile = 16, clipPoly = null) {
   // 极大地图保护：顶点超上限时自动放粗步距（8→16→…→512m）保住可见地形面。
   // 正常跨度（≤1.7 万米）在 8m 档从不触发，不影响 ADR-0005 的路基补丁同相位；
   // 超限地图上粗地面与补丁的插值差可能顶穿路面——属可接受的降级（总比没有地形面好）
-  while (step < 512 && (Math.ceil((x1 - x0) / step) + 2) * (Math.ceil((z1 - z0) / step) + 2) > 800000) step *= 2;
+  step = groundStepFor(x0, z0, x1, z1, step);
   const i0 = Math.floor(x0 / step), i1 = Math.ceil(x1 / step);
   const j0 = Math.floor(z0 / step), j1 = Math.ceil(z1 / step);
   const cols = i1 - i0 + 1, rows = j1 - j0 + 1;

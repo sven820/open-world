@@ -25,6 +25,7 @@ export function layerDefs(ed) {
         { key: "river", label: "河流", hint: "描边河流要素" },
         { key: "object", label: "物件", hint: "树木 / 路灯 / 建筑" },
         { key: "origin", label: "锚点标记", hint: "金色立柱 = 范围中心" },
+        { key: "axis", label: "坐标刻度", hint: "地平面 X(金)/Z(蓝) 轴线与米制数值" },
         { key: "measure", label: "测距结果", hint: "测距工具保留的标注" },
       ],
     },
@@ -105,8 +106,11 @@ export function applyLayerVis(ed) {
   // ADR-0005：独立全局地面 + 路基补丁（8m 同相位格点）跟随「范围底板」显隐
   if (t.groundMesh) t.groundMesh.visible = vis.plate !== false;
   if (t.bedMesh) t.bedMesh.visible = vis.plate !== false;
+  if (t.skirtMesh) t.skirtMesh.visible = vis.plate !== false; // 地形裙边随底板层（ADR-0013）
   if (ed._skeleton) ed._skeleton.visible = vis.skeleton !== false;
   if (ed._originMarker) ed._originMarker.visible = vis.origin !== false;
+  // 坐标轴线画在基准面上，卫星底图开启时基准面隐藏 → 轴线一并隐藏
+  if (ed._axisGroup) ed._axisGroup.visible = vis.axis !== false && !ed._cesiumOn;
   if (ed._measureGroup) ed._measureGroup.visible = vis.measure !== false;
   for (const w of ed._wrappers?.values() || []) w.root.visible = vis[w.kind] !== false;
 }

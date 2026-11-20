@@ -54,6 +54,8 @@ docs/
 | [ADR-0010 拼接路块横向细分](adr/ADR-0010-road-tile-cross-subdivision.md) | accepted | 拼接路 `rtTileQuadGeometry` 横向细分到 2m + 圆弧带径向细分，补齐 ADR-0009 遗漏的路面类别 |
 | [ADR-0011 路面分层余量](adr/ADR-0011-road-bed-layer-margin.md) | accepted | 主地面/补丁/路面三层垂直余量 > 8m 与 2m 剖分的面内偏差，根治三角面内部顶穿锯齿（修正 ADR-0009 的 lift 假设） |
 | [ADR-0012 随机地形并入自定义地形](adr/ADR-0012-merge-random-into-custom-terrain.md) | accepted | terrain.mode 收敛为 real/custom（ensureTerrain 惰性迁移旧 random），随机生成降级为 custom 填充手段；多边形范围补建裁剪主地面修复黑色区域不可雕刻（部分修正 ADR-0003） |
+| [ADR-0013 基础高度 5000m/边缘裙边/远景山地](adr/ADR-0013-terrain-base-height-5000-skirt-far-relief.md) | accepted | 基础高度改数字输入钳制 -200~5000m（修改 ADR-0012 第 7 条）；编辑器地形边缘裙边（基础高度高差在边缘可见，延续带方案经用户复测否决）+ 视角自动适配修复高原地图黑屏；远景解析山地提前实现优化计划第 3 条（纯几何方案） |
+| [ADR-0014 暂时禁用地图范围旋转](adr/ADR-0014-disable-area-rotation.md) | accepted | `area.rot` 未接入 Cesium 地理链路，只转网格不转地形/影像；暂时禁用旋转输入并归零数据，地理对齐改用中心坐标 + 描边要素对准卫星底图；未来若要做旋转须走局部坐标统一变换层并新建 ADR |
 
 ### design/（研发设计）
 
@@ -62,6 +64,7 @@ docs/
 | [ai-agent-gateway-design.md](design/ai-agent-gateway-design.md) | active | **AI 网关总设计**（阶段 1 实施）：Mastra 集成、能力注册表、协议、目录结构、前端接入 |
 | [chat-channel-design.md](design/chat-channel-design.md) | active | 频道聊天面板（右下角）设计：AI 助手/世界/系统三频道、消息模型、AI 调用链与回退、交互细节 |
 | [terrain-road-grading.md](design/terrain-road-grading.md) | active | 道路走廊纵坡塑形：算法、数据流、路基补丁/底板下沉、改动清单与验收命令 |
+| [terrain-theme.md](design/terrain-theme.md) | active | 地表主题（terrain.theme）：城市/草地/岩石/沙漠色表 + 坡地岩石/雪线顶点色规则，编辑器与运行时共用着色函数，主题/纹理 painter 注册表可拓展 |
 
 ### requirements/（需求分析）
 

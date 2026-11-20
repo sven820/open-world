@@ -438,6 +438,10 @@ kbd {
 .me-props .me-check input { flex: none !important; width: 15px; height: 15px; margin: 0; padding: 0; appearance: none; -webkit-appearance: none; border: 1px solid rgba(255,255,255,.4); border-radius: 3px; background: rgba(10,11,15,.9); cursor: pointer; transition: .15s; }
 .me-props .me-check input:checked { border-color: var(--gold); background: var(--gold) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2l2.6 2.6L9.5 3.2' fill='none' stroke='%2314161d' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/10px 10px no-repeat; box-shadow: 0 0 8px rgba(242,193,78,.35); }
 .me-props .me-check input:focus-visible { outline: 1px solid var(--gold); outline-offset: 2px; }
+/* 地形总开关与「清除地形」并排：面板内容宽约 218px，两者收紧字号/内边距才能同行放下 */
+.me-ter-head { display: flex; align-items: stretch; gap: 8px; margin-top: 12px; }
+.me-ter-head .me-check { flex: 1; min-width: 0; margin: 0; padding: 9px 8px; font-size: 10.5px; letter-spacing: .04em; }
+.me-ter-head .me-del { width: auto; flex: none; margin-top: 0; padding: 9px 8px; font-size: 10px; letter-spacing: 0; white-space: nowrap; }
 .me-slider { margin: 12px 0 0; padding: 9px 10px 10px; border: 1px solid var(--line); border-radius: 4px; background: rgba(20,22,30,.6); }
 .me-slider-head { display: flex; align-items: center; justify-content: space-between; font: 600 11.5px/1 var(--sans); letter-spacing: .08em; color: rgba(244,242,238,.75); }
 .me-slider-head b { font: 700 11px/1 var(--cond); letter-spacing: .06em; color: var(--gold); }
@@ -445,6 +449,8 @@ kbd {
 .me-slider input[type="range"]::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--gold); border: 2px solid #14161d; box-shadow: 0 0 6px rgba(242,193,78,.45); }
 .me-slider input[type="range"]::-moz-range-thumb { width: 9px; height: 9px; border-radius: 50%; background: var(--gold); border: 2px solid #14161d; }
 .me-slider input[type="range"]:disabled { opacity: .35; cursor: not-allowed; }
+/* me-slider 若写在 <label> 上，会被 .me-props label 的横向 flex 规则压扁（长标题竖排、输入框挤右侧），改回块级布局 */
+.me-props label.me-slider { display: block; }
 .me-pos { margin: 10px 0; font: 600 12px/1 var(--cond); letter-spacing: .1em; color: rgba(244,242,238,.7); }
 .me-hint { margin: 12px 0 0; font: 500 10.5px/1.7 var(--sans); color: rgba(244,242,238,.4); }
 /* 「我的模型」资产卡片（带缩略图） */

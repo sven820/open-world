@@ -10,8 +10,10 @@ import {
 import {
   signTileRect,
   makeSidewalkTexture, makeAsphaltTexture, makeRoofTexture, makeTileStripTexture,
+  makeTerrainTexture,
   ASPHALT_TILE,
 } from "./textures.js";
+import { themeOf, shadeTerrainVertex, terrainSlopeAt, shadeCtxFor, TERRAIN_THEMES } from "./terrainTheme.js";
 import { getFacadeMaterials, getStorefrontMaterials, getSignMaterial } from "./materials.js";
 import { preloadAssetTemplatesFromMap, assetWorldAABB, updateAssetAnimations, updateAssetNightGlow } from "./assetMesh.js";
 import { buildCustomMap, worldBounds, pointInPoly, footprintAABB } from "./customMap.js";
@@ -208,6 +210,11 @@ export class City {
     // 大平面只有 4 个角点参与位移（角点都在地形网格外、采样≈0），内部保持全平
     // → 建筑/物件被顶起后相对地面悬空（实测踩坑：世界地砖全平、楼在半空）
     const hasTerrain = !!ensureTerrain(this.data);
+    // 地表主题（docs/design/terrain-theme.md）：city = 现状沥青（零回归）；
+    // 其他主题野地主地面换主题贴图 + 顶点色规则（高度明暗 + 坡地岩石 + 雪线，
+    // 与编辑器共用 world/terrainTheme.js 同一实现）。道路补丁永远是沥青。
+    const themeKey = themeOf(ensureTerrain(this.data));
+    const wild = hasTerrain && themeKey !== "city";
     const b = this.bounds;
     // 主地面覆盖到 bounds 外 30m，与远景底板 inner 边界重合。
     const pad = 30;
@@ -219,7 +226,7 @@ export class City {
     // 在凹曲面线性插值会高于真实曲面，从下方顶穿补丁与路面 —— 这就是截图里
     // 深绿色 (0x2c322c) 盖住道路、路面断断续续的根因（实测最高顶穿 3.6m）。
     // 改成环形后 outer 与道路区域不再有几何重叠，顶穿从根上消失。
-    const outerMat = new THREE.MeshStandardMaterial({ color: 0x2c322c, roughness: 1 });
+    const outerMat = new THREE.MeshStandardMaterial({ color: wild ? TERRAIN_THEMES[themeKey].outer : 0x2c322c, roughness: 1 });
     const HALF = 3000;
     const ring = [
       { x0: -HALF, x1: HALF, z0: gz1, z1: HALF },      // 北
@@ -264,10 +271,32 @@ export class City {
       }
       geo.setAttribute("uv", new THREE.BufferAttribute(gu, 2));
     }
-    const mat = new THREE.MeshStandardMaterial({ map: makeAsphaltTexture(), color: 0xffffff, roughness: 0.95, metalness: 0.0 });
+    // 主地面材质：野地（非 city 主题）用主题贴图 + 顶点色规则；city 保持沥青无顶点色
+    // （旧地图观感零回归）。路基补丁独立沥青材质（道路是道路，主题只管野地；
+    // 补丁几何没有 color attribute，不能与 vertexColors 材质共用）。
+    const mat = wild
+      ? new THREE.MeshStandardMaterial({ map: makeTerrainTexture(themeKey), color: 0xffffff, roughness: 0.95, metalness: 0.0, vertexColors: true })
+      : new THREE.MeshStandardMaterial({ map: makeAsphaltTexture(), color: 0xffffff, roughness: 0.95, metalness: 0.0 });
+    const bedMat = new THREE.MeshStandardMaterial({ map: makeAsphaltTexture(), color: 0xffffff, roughness: 0.95, metalness: 0.0 });
     const road = new THREE.Mesh(geo, mat);
     road.receiveShadow = true;
     road.userData.terrainNormals = hasTerrain;
+    if (wild) {
+      // 顶点着色在 displaceGroup 之前、按世界坐标采样高度场烘焙
+      // （displaceGroup 位移不动 color；若触发 tessellateFlat 细分，color 属性
+      // 会随三角形剖分连带插值，无需特殊处理）。
+      const t0 = ensureTerrain(this.data);
+      const ctx = shadeCtxFor(t0);
+      const gp = geo.attributes.position;
+      const gc = new Float32Array(gp.count * 3);
+      const rgb = [0, 0, 0];
+      for (let i = 0; i < gp.count; i++) {
+        const x = gp.getX(i), z = gp.getZ(i);
+        shadeTerrainVertex(themeKey, fieldHeightAt(this.data, x, z), terrainSlopeAt(this.data, x, z), ctx, rgb);
+        gc[i * 3] = rgb[0]; gc[i * 3 + 1] = rgb[1]; gc[i * 3 + 2] = rgb[2];
+      }
+      geo.setAttribute("color", new THREE.BufferAttribute(gc, 3));
+    }
     // 同相位后主地面与补丁顶点重合；走廊内下沉 ROAD_BED_DROP(0.42m)，
     // 补丁 lift=-0.23（高于主地面 0.19m 填壕沟），路面 0.19 高于补丁 0.42m ——
     // 吸收 8m 格点曲面与路面三角面内部插值的最大偏差，杜绝补丁顶穿路面（ADR-0011）。
@@ -280,7 +309,7 @@ export class City {
     if (hasTerrain) {
       const bedGeo = buildRoadBedGeometry(this.data, ASPHALT_TILE);
       if (bedGeo) {
-        const bed = new THREE.Mesh(bedGeo, mat);
+        const bed = new THREE.Mesh(bedGeo, bedMat);
         bed.position.y = -BED_PATCH_LIFT; // ADR-0011：高于下沉主地面 0.19m，低于路面 0.42m 杜绝顶穿
         bed.receiveShadow = true;
         bed.userData.terrainNormals = true;

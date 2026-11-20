@@ -537,27 +537,25 @@ export function makeTileStripTexture() {
   return canvasTexture(c);
 }
 
-// 地形表面斑驳噪声（编辑器地形底板用）：灰底 + 明暗 blotch + 细颗粒，
-// 让全平的基础地形也有「地表」质感（与随机地形的着色观感一致）。
+// 地形表面斑驳噪声（编辑器地形底板 / 运行时野地主题地面用）：底色 + 明暗
+// blotch + 细颗粒，让全平的基础地形也有「地表」质感。
+// 按主题出图（主题注册表在 world/terrainTheme.js，本处只管「画得像什么」）；
+// 新增主题 = terrainTheme.js 加一条 + 这里 GROUND_PAINTERS 加一个 painter。
 // uv 每 1.0 = 32m（编辑器 buildGroundSurface / 路基补丁 tile=32）→ 单个 blotch ≈ 1~8m；
-// 每个 blotch 按 3×3 环绕复制绘制，保证纹理无缝平铺。全局单例。
-let terrainTexCache = null;
-export function makeTerrainTexture() {
-  if (terrainTexCache) return terrainTexCache;
-  const S = 256;
-  const c = makeCanvas(S, S);
-  const ctx = c.getContext("2d");
-  ctx.fillStyle = "#98a3af";
+// 每个 blotch 按 3×3 环绕复制绘制，保证纹理无缝平铺。按主题各自缓存单例。
+// 通用 blotch 绘制：base 底色 + light/dark（"r,g,b" 串）明暗径向斑块
+function paintGroundBlotches(ctx, S, base, light, dark, count = 700) {
+  ctx.fillStyle = base;
   ctx.fillRect(0, 0, S, S);
   const rand = rng(20261119);
-  for (let i = 0; i < 700; i++) {
+  for (let i = 0; i < count; i++) {
     const x = rand() * S, y = rand() * S, r = 4 + rand() * 22;
-    const light = rand() < 0.5;
+    const lit = rand() < 0.5;
     const a = 0.05 + rand() * 0.12;
     for (let dx = -S; dx <= S; dx += S) {
       for (let dy = -S; dy <= S; dy += S) {
         const g = ctx.createRadialGradient(x + dx, y + dy, 0, x + dx, y + dy, r);
-        g.addColorStop(0, light ? `rgba(214,224,234,${a})` : `rgba(44,56,68,${a})`);
+        g.addColorStop(0, lit ? `rgba(${light},${a})` : `rgba(${dark},${a})`);
         g.addColorStop(1, "rgba(0,0,0,0)");
         ctx.fillStyle = g;
         ctx.beginPath();
@@ -566,7 +564,33 @@ export function makeTerrainTexture() {
       }
     }
   }
+}
+const GROUND_PAINTERS = {
+  // 城市：灰蓝底 + 冷色斑驳（旧版观感原样保留）
+  city: (ctx, S) => paintGroundBlotches(ctx, S, "#98a3af", "214,224,234", "44,56,68"),
+  // 草地：草绿底 + 黄绿/深绿斑块
+  grass: (ctx, S) => paintGroundBlotches(ctx, S, "#46663a", "127,160,92", "36,54,31"),
+  // 岩石：灰褐底 + 亮灰/深褐斑块
+  rock: (ctx, S) => paintGroundBlotches(ctx, S, "#6b665e", "151,145,133", "58,54,47"),
+  // 沙漠：沙黄底 + 亮沙/土黄斑块
+  desert: (ctx, S) => paintGroundBlotches(ctx, S, "#cfaf72", "236,217,168", "143,116,64"),
+};
+let terrainTexCache = null;
+const terrainTexCacheByTheme = new Map();
+export function makeTerrainTexture(theme = "city") {
+  const key = GROUND_PAINTERS[theme] ? theme : "city";
+  if (key === "city") {
+    if (terrainTexCache) return terrainTexCache;
+  } else if (terrainTexCacheByTheme.has(key)) {
+    return terrainTexCacheByTheme.get(key);
+  }
+  const S = 256;
+  const c = makeCanvas(S, S);
+  const ctx = c.getContext("2d");
+  GROUND_PAINTERS[key](ctx, S);
   noise(ctx, S, S, 14);
-  terrainTexCache = canvasTexture(c);
-  return terrainTexCache;
+  const tex = canvasTexture(c);
+  if (key === "city") terrainTexCache = tex; // city 沿用旧全局单例变量（其余主题进 Map）
+  else terrainTexCacheByTheme.set(key, tex);
+  return tex;
 }

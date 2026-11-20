@@ -10,7 +10,7 @@ import { EXT_STEP_X, EXT_STEP_Z, extRoadSpec, genConfig, asphaltHalf, corridorHa
 import { areaPoly, clipAxisLine, worldBounds, polyCenterLine } from "../world/customMap.js";
 import { GRID_OPACITY_DEFAULT, ORIGIN_DEFAULT } from "../data/mapStore.js";
 import { genParamsHtml, bindGenParams } from "./genParams.js";
-import { clamp, uid, fmtDist, ROAD_KINDS, ROAD_KIND_ZH, lonLatAt, polyArea, polylineLen, smoothPath } from "./editor3d/util.js";
+import { clamp, uid, fmtDist, ROAD_KINDS, ROAD_KIND_ZH, lonLatAt, polyArea, polylineLen, smoothPath, M_PER_DEG_LAT } from "./editor3d/util.js";
 import {
   initCesium, toggleBasemap, applyBasemap, rebuildBasemap,
   applyImageryVis, resizeCesium, syncFrustum, updateEnu,
@@ -20,6 +20,7 @@ import {
   layerDefs, toggleLayers, openLayers, closeLayers, setLayerVis, applyLayerVis,
   settingsSections, wireOriginSearch, toggleSettings, openSettings, closeSettings,
 } from "./editor3d/panels.js";
+import { buildAxisMarkers } from "./editor3d/axis.js";
 import {
   startMeasure, endMeasure, clearMeasure, measureAddPoint, finishMeasure,
   renderMeasurePanel, updateMeasureLive, renderMeasureResult,
@@ -50,9 +51,10 @@ import { ensureBillboardAssets, billboardParamsFor, createAssetFromBillboard } f
 import { billboardItemFromRecord } from "../world/billboard/billboardAssetBridge.js";
 import {
   terrainHeightAt, ensureTerrain, buildRoadCorridors, roadBedDropAt,
-  buildRoadBedGeometry, buildGroundSurface, ROAD_GRADE_STEP, GROUND_STEP,
+  buildRoadBedGeometry, buildGroundSurface, groundStepFor, terrainBBox, ROAD_GRADE_STEP, GROUND_STEP,
 } from "../world/terrain.js";
 import { makeTerrainTexture } from "../world/textures.js";
+import { TERRAIN_THEMES, themeOf, shadeTerrainVertex, terrainSlopeAt, shadeCtxFor } from "../world/terrainTheme.js";
 import {
   initTerrainTool, terrainRenderPanel, terrainOnDown, terrainOnMove, terrainLeave,
   syncEditorCesiumTerrain, applyObjectPads,
@@ -108,7 +110,7 @@ export class MapEditor3d {
     this._cesiumOn = localStorage.getItem("tr_e3_basemap") !== "0"; // 记住上次选择
     // 图层显隐状态（图层控制面板）：全默认开启；
     // 持久化用 v4 键：v3 键里存有网格默认关闭时写入的旧状态（grid:false 会覆盖新默认），弃用不读
-    this._layerVis = { anno: true, plate: true, grid: true, skeleton: true, road: true, river: true, roadTile: true, object: true, origin: true, measure: true };
+    this._layerVis = { anno: true, plate: true, grid: true, skeleton: true, road: true, river: true, roadTile: true, object: true, origin: true, axis: true, measure: true };
     try { Object.assign(this._layerVis, JSON.parse(localStorage.getItem("tr_e3_layers_v4") || "{}")); } catch { /* 忽略脏数据 */ }
     // 顶栏按钮等是 index.html 里的单例 DOM：监听挂到本实例 controller 上，
     // close() 一次性摘除。否则旧实例仍绑在同一个「保存」按钮上，保存时会把
@@ -129,6 +131,7 @@ export class MapEditor3d {
     initTerrainTool(this); // 地形工具：笔刷状态 + 光标环 + 笔画收尾
     this._rebuildAll();
     this._applyLayerVis(); // 应用记忆中的图层面板显隐（含 Cesium 就绪前的 Three 侧）
+    this._fitViewIfNeeded(); // 高程较大的地形（如基础高度 500m+）默认机位会沉进地形里 → 自动拉起
     this._pushUndo("打开编辑器");
     try {
       await this._initCesium(); // 失败不影响编辑（仅无底图）
@@ -148,6 +151,14 @@ export class MapEditor3d {
       const { tc, scene } = this._three;
       try { tc.dispose(); } catch { /* three r169 dispose 内部 bug（r170 修复），忽略 */ }
       scene.remove(tc.getHelper());
+      if (this._axisGroup) { // 坐标标示组（geometry/material 逐对象释放）
+        scene.remove(this._axisGroup);
+        this._axisGroup.traverse((o) => {
+          if (o.geometry) o.geometry.dispose();
+          if (o.material) o.material.dispose();
+        });
+        this._axisGroup = null;
+      }
       this._three.orbit.dispose();
       this._three.renderer.dispose();
       this._three.canvas.remove();
@@ -160,6 +171,7 @@ export class MapEditor3d {
       for (const t of this._labelTex.values()) t.dispose();
       this._labelTex.clear();
     }
+    if (this._datumTex) { this._datumTex.dispose(); this._datumTex = null; } // 基准网格画布贴图
     rtDisposeGhost(this); // 路块幽灵网格（非 entityRoot，不在 _rebuildAll 清理范围）
     if (this._assetGhost) { // 模型幽灵盒（同上）
       if (this._three) this._three.scene.remove(this._assetGhost);
@@ -260,6 +272,12 @@ export class MapEditor3d {
     const orbit = new OrbitControls(camera, canvas);
     orbit.enableDamping = true;
     orbit.maxPolarAngle = Math.PI / 2.05;
+    // 最近距离限制：右键平移步长与「相机到目标点距离」成正比（OrbitControls
+    // panOffset = 2·Δpx·distance·tan(fov/2)），不设 minDistance 时滚轮能把
+    // 距离缩到趋近 0 → 最大放大后平移步长也趋近 0，表现为"右键拖不动地图"
+    orbit.minDistance = 5;
+    // 平移倍率不做静态设置：每帧由 _updatePanSpeed 按当前缩放距离动态计算
+    // （近景大幅加速、远景回归默认，见该方法注释）
     orbit.target.set(0, 0, 0);
     orbit.screenSpacePanning = false;
 
@@ -344,6 +362,7 @@ export class MapEditor3d {
       this._clock = this._clock || new THREE.Clock();
       updateAssetAnimations(this._clock.getDelta()); // 资产内建动画（如小火车）
       this._updateDraftPreview();
+      this._updatePanSpeed();
       this._updateRoadCenterlines();
       this._updateCompass();
       this._syncCesiumCamera();
@@ -366,7 +385,12 @@ export class MapEditor3d {
   /* ---------------- cesium base map ---------------- */
   async _initCesium() { await initCesium(this); }
 
-  _toggleBasemap() { toggleBasemap(this); }
+  _toggleBasemap() {
+    toggleBasemap(this);
+    // 灰色基准面与卫星底图互斥显示：影像球面本身就是基准参考（ADR-0013）
+    if (this._three) for (const m of this._three.datumMeshes || []) m.visible = !this._cesiumOn;
+    if (this._axisGroup) this._axisGroup.visible = !this._cesiumOn && this._layerVis.axis !== false;
+  }
 
   _applyBasemap() { applyBasemap(this); }
 
@@ -434,6 +458,40 @@ export class MapEditor3d {
     };
   }
 
+  // 整体平移整张地图的「局部落点」：范围中心/顶点、程序化路网、描边路/河/拼接路块、
+  // 物件、地标、出生点、地形高度场锚点全部随 (dx, dz) 搬移，origin（地球经纬锚点）不动
+  // —— lonLatAt(origin, area, x, z) 对每个内容点保持不变，影像/高程采样与底图渲染
+  // 映射同步平移，网格与地图、内容与影像不会错位。
+  // 与 _shiftOrigin 的分工：_shiftOrigin 用于「只改边界不搬内容」（描边重绘/拖拽多边形）；
+  // 本方法用于「改中心数值 = 整张地图平移」（范围属性面板的中心 X/Z 输入）。
+  _translateMap(dx, dz) {
+    if (!dx && !dz) return;
+    const a = this._areaEnsure();
+    a.cx += dx; a.cz += dz;
+    if (Array.isArray(a.pts)) a.pts = a.pts.map(([x, z]) => [x + dx, z + dz]);
+    for (const r of this.map.roadsX || []) r.at += dx;
+    for (const r of this.map.roadsZ || []) r.at += dz;
+    const f = this.map.features || {};
+    for (const r of f.roads || []) r.points = r.points.map(([x, z]) => [x + dx, z + dz]);
+    for (const r of f.rivers || []) r.points = r.points.map(([x, z]) => [x + dx, z + dz]);
+    for (const t of f.roadTiles || []) { t.x += dx; t.z += dz; }
+    for (const o of this.map.objects || []) { o.pos[0] += dx; o.pos[1] += dz; }
+    for (const l of this.map.landmarks || []) { l.x += dx; l.z += dz; }
+    if (this.map.spawn) { this.map.spawn.x += dx; this.map.spawn.z += dz; }
+    const t = this.map.terrain;
+    if (t) {
+      // 高度场锚点随地图搬移（heights 网格相对锚点存储，数值不变）；pad 存绝对坐标需平移
+      t.x0 += dx; t.x1 += dx; t.z0 += dz; t.z1 += dz;
+      for (const p of t.pads || []) {
+        p.minX += dx; p.maxX += dx; p.minZ += dz; p.maxZ += dz;
+        p.poly = p.poly.map(([x, z]) => [x + dx, z + dz]);
+      }
+      t.corridors = null; // 道路走廊由道路数据惰性重建（_rebuildAll 收口）
+    }
+    this._bbConstraints = null; // 摆放约束依赖道路/范围位置，全量失效
+    this._rtChain = null; this._rtPin = null; this._rtLastRef = null; // 路块放置会话状态（绝对坐标）
+  }
+
   _areaEnsure() {
     let a = this.map.area;
     if (a && Array.isArray(a.pts)) {
@@ -447,7 +505,10 @@ export class MapEditor3d {
     a.cx = a.cx || 0; a.cz = a.cz || 0;
     a.w = clamp(a.w || 4000, 200, 20000);
     a.d = clamp(a.d || 4000, 200, 20000);
-    a.rot = a.rot || 0;
+    // 范围旋转暂时禁用（ADR-0014）：rot 只转 areaGroup 内的网格，地形/高度场/
+    // 地理链路都不读它，旧值只会造成「网格转了地形没转」的错觉。统一归零，
+    // 让 terrainBBox / areaPoly 的裁剪多边形与可见网格保持一致。
+    a.rot = 0;
     return a;
   }
 
@@ -495,6 +556,19 @@ export class MapEditor3d {
       this._three.bedMesh.geometry.dispose();
       this._three.bedMesh = null; // 材质与 groundMesh 共用，由上方统一 dispose
     }
+    if (this._three.skirtMesh) {
+      this._three.scene.remove(this._three.skirtMesh);
+      this._three.skirtMesh.geometry.dispose();
+      this._three.skirtMesh.material.dispose();
+      this._three.skirtMesh = null;
+    }
+    if (this._three.datumMeshes) {
+      for (const m of this._three.datumMeshes) {
+        this._three.scene.remove(m);
+        m.geometry.dispose(); // 材质共享（this._datumMat），不在此释放
+      }
+      this._three.datumMeshes = null;
+    }
     const a = this._areaEnsure();
     if (this._isPolyArea(a)) {
       // 几何按中心相对坐标构建（Group 恒在中心=Gizmo 锚点），平移不变、拖拽无需重建；
@@ -509,11 +583,11 @@ export class MapEditor3d {
       const tOp = Math.min(1, Math.max(0, this.map.terrainOpacity ?? 1));
       let groundMade = false;
       if (t) {
-        const geo = buildGroundSurface(t.x0 - 40, t.z0 - 40, t.x1 + 40, t.z1 + 40, GROUND_STEP, 32, a.pts);
+        const geo = buildGroundSurface(t.x0, t.z0, t.x1, t.z1, GROUND_STEP, 32, a.pts);
         if (geo) {
           const ground = new THREE.Mesh(
             geo,
-            new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0, flatShading: true, vertexColors: true, map: makeTerrainTexture(), transparent: tOp < 1, opacity: tOp }),
+            new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0, flatShading: true, vertexColors: true, map: makeTerrainTexture(themeOf(t)), transparent: tOp < 1, opacity: tOp }),
           );
           ground.userData.gridOpaque = true;
           ground.userData.isPlate = true;
@@ -524,6 +598,8 @@ export class MapEditor3d {
           this._three.groundMesh = ground;
           groundMade = true;
         }
+        // 多边形范围不铺裙边：主地面被裁剪、边界沿格线锯齿，裙边（贴多边形
+        // 边界线）对不上锯齿边界会漏缝；需求来自矩形大范围高原地图
       }
       // 底板：多边形三角化（曲率下沉由 _bendArea 统一处理）；有地形且主地面建成时
       // 由主地面取代；主地面万一没建成（极端范围）回退深色底板，避免整片区域隐形
@@ -561,7 +637,7 @@ export class MapEditor3d {
       const plateMat = hasTerrain
         ? // 受光材质 + 顶点高度着色（_bendArea 填色）+ flatShading + 斑驳地表纹理：
           // 低处深、高处浅，山丘起伏与光照角度无关地醒目；全平基础地形也有地表质感
-          new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0, flatShading: true, vertexColors: true, map: makeTerrainTexture(), transparent: tOp < 1, opacity: tOp })
+          new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0, flatShading: true, vertexColors: true, map: makeTerrainTexture(themeOf(ensureTerrain(this.map))), transparent: tOp < 1, opacity: tOp })
         : new THREE.MeshBasicMaterial({ color: 0x0d141c, transparent: true, opacity: 0.55, depthWrite: false });
       if (hasTerrain) {
         // ADR-0005：地形底板改为独立全局格点地面（与 8m 路基补丁同相位）。
@@ -569,7 +645,7 @@ export class MapEditor3d {
         // 不落在 8m 格点上，与补丁各自的分段线性曲面互相穿插 → 路面显示不全。
         // 独立挂在 scene 根，顶点 x/z 即世界坐标，与补丁完全同相。
         const t = ensureTerrain(this.map);
-        const geo = buildGroundSurface(t.x0 - 40, t.z0 - 40, t.x1 + 40, t.z1 + 40, GROUND_STEP, 32);
+        const geo = buildGroundSurface(t.x0, t.z0, t.x1, t.z1, GROUND_STEP, 32);
         if (geo) {
           const ground = new THREE.Mesh(geo, plateMat);
           ground.userData.gridOpaque = true;
@@ -579,6 +655,7 @@ export class MapEditor3d {
           ground.userData.terrainBed = true;   // 走廊内下沉 0.15m，补丁 lift 0.04 稳定盖在其上
           this._three.scene.add(ground);
           this._three.groundMesh = ground;
+          this._buildTerrainSkirt(t); // 边缘裙边：从地图边缘能看到基础高度的高差
         } else {
           // 兜底：主地面极端情况建不出（正常已被 buildGroundSurface 自动放粗步距
           // 覆盖）时退回深色底板，避免有地形却整片隐形、看不出范围
@@ -604,9 +681,142 @@ export class MapEditor3d {
       }
       this._refreshRoadBed(true); // 道路路基补丁（见下方方法）
     }
+    this._buildDatumPlane(); // y=0 基准面环带（随地图范围重建，有签名去重）
     this._applyGridOpacity();
+    buildAxisMarkers(this); // 地平面 X/Z 坐标刻度（随范围/地形重建，签名去重）
     g.updateMatrixWorld(true);
     this._applyLayerVis(); // 重建后重放图显隐（底板/网格线开关、图层记忆）
+  }
+
+  // 基准网格画布（y=0 基准平面的无限延伸视觉参考，ADR-0013）：
+  // - 只铺地图 bbox 外的四条环带（不盖住地图范围：盆地图地形低于基准面，
+  //   平面铺进去会从上方吞掉地形）；外沿伸到地图外 100km（> 相机 far 50km）
+  //   → 视觉上无限延伸；
+  // - 网格画布样式：透明底 + 淡灰网格线的 Canvas 贴图（重复平铺），
+  //   整体近乎透明（不抢地形视觉）；与地图内网格区分 —— 地图内 GridHelper
+  //   20m 亮格、基准面 500m 暗格且只在界外；
+  // - 顶点按曲率下沉（与 _curveOffset 同式）并整体 -0.6m 避让底板/裙边底缘：
+  //   大距离拉远时平面与弯曲基准依然贴合（不会翘到地形之上），透明不写深度
+  //   也杜绝共面闪烁；分段按尺寸自适应（~2km 一段，二次曲率线性插值误差
+  //   < 0.1m），顶点总量 ~2 万，重建带签名去重（笔刷重建/拖动底板不重复建）；
+  // - 卫星底图开启时隐藏：影像球面本身即基准参考。
+  _buildDatumPlane() {
+    const a = this.map.area || { cx: 0, cz: 0 };
+    const bb = ensureTerrain(this.map) || terrainBBox(this.map); // 两者都有 x0/z0/x1/z1
+    const step = groundStepFor(bb.x0, bb.z0, bb.x1, bb.z1, GROUND_STEP);
+    // 内边界与主地面/裙边同格对齐：环带紧贴地图边界，不与地形面重叠
+    const ix0 = Math.floor(bb.x0 / step) * step, ix1 = Math.ceil(bb.x1 / step) * step;
+    const iz0 = Math.floor(bb.z0 / step) * step, iz1 = Math.ceil(bb.z1 / step) * step;
+    const EXT = 100000;
+    const ox0 = ix0 - EXT, ox1 = ix1 + EXT, oz0 = iz0 - EXT, oz1 = iz1 + EXT;
+    const sig = `${ix0}|${ix1}|${iz0}|${iz1}|${a.cx}|${a.cz}`;
+    if (this._datumSig === sig && this._three.datumMeshes) return; // 范围/中心没变不重建
+    this._datumSig = sig;
+    if (this._three.datumMeshes) {
+      for (const m of this._three.datumMeshes) {
+        this._three.scene.remove(m);
+        m.geometry.dispose();
+        m.material.dispose(); // 贴图为 _datumTex 的 clone（共享图像），材质随条带释放
+      }
+    }
+    // 网格画布贴图：单格 128px，极淡底色 + 1px 细线，重复平铺。
+    // 注意线宽是相对 500m 格的：2px ≈ 7.8m 实际线宽（近看太粗），1px ≈ 3.9m
+    if (!this._datumTex) {
+      const c = document.createElement("canvas");
+      c.width = c.height = 128;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "rgba(96, 110, 124, 0.04)"; // 极淡底色（画布感）
+      ctx.fillRect(0, 0, 128, 128);
+      ctx.strokeStyle = "rgba(168, 182, 196, 0.16)"; // 更淡的网格线，弱化存在感
+      ctx.lineWidth = 1;
+      ctx.strokeRect(0.5, 0.5, 127, 127);
+      this._datumTex = new THREE.CanvasTexture(c);
+      this._datumTex.wrapS = this._datumTex.wrapT = THREE.RepeatWrapping;
+    }
+    // 北/南全宽（含四角），东西补中间段 —— 与裙边/outer 环带同构
+    const strips = [
+      [ox0, iz1, ox1, oz1], // 北
+      [ox0, oz0, ox1, iz0], // 南
+      [ox0, iz0, ix0, iz1], // 西
+      [ix1, iz0, ox1, iz1], // 东
+    ];
+    const visible = !this._cesiumOn;
+    const CELL = 500; // 基准网格 500m 一格 —— 地图内 GridHelper 是 20m 亮格，粗细+明暗双重区分
+    this._three.datumMeshes = [];
+    for (const [x0, z0, x1, z1] of strips) {
+      if (x1 <= x0 || z1 <= z0) continue;
+      const nx = clamp(Math.round((x1 - x0) / 2000), 1, 96);
+      const nz = clamp(Math.round((z1 - z0) / 2000), 1, 96);
+      const geo = new THREE.PlaneGeometry(x1 - x0, z1 - z0, nx, nz)
+        .rotateX(-Math.PI / 2)
+        .translate((x0 + x1) / 2, 0, (z0 + z1) / 2);
+      const pos = geo.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        pos.setY(i, -this._curveOffset(pos.getX(i), pos.getZ(i)) - 0.6);
+      }
+      pos.needsUpdate = true;
+      const tex = this._datumTex.clone(); // 各条带尺寸不同 → clone 设各自 repeat（共享图像）
+      tex.needsUpdate = true;
+      tex.repeat.set((x1 - x0) / CELL, (z1 - z0) / CELL);
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.userData.isDatum = true;
+      mesh.renderOrder = -1; // 透明队列最先渲染（纯参考面，不与内容争混合顺序）
+      mesh.visible = visible;
+      this._three.scene.add(mesh);
+      this._three.datumMeshes.push(mesh);
+    }
+  }
+
+  // 地形边缘裙边（ADR-0013 最终方案）：顶环贴**地图边界**（与地形面齐平、
+  // 与主地面边界顶点同格同高，无接缝），底环 = 边界地形高度 − 基础高度
+  // —— 设置基础高度 500，从地图边缘看就是一圈往下延伸 500m 的侧壁。
+  // 顶点布局：0..N-1 = 顶环（y 由 _bendArea 按地形高度写入），N..2N-1 = 底环
+  // （y = 顶环高度 − skirtBase）。多边形范围不铺（主地面裁剪边界沿格线锯齿，
+  // 裙边对不上会漏缝）。
+  _buildTerrainSkirt(t) {
+    // 与主地面同一格距（groundStepFor）、同一对齐（floor/ceil 到格点）→ 顶环
+    // 与主地面边界顶点行严丝合缝；不再外扩 40m，裙边就在地图边界上
+    const x0 = t.x0, x1 = t.x1, z0 = t.z0, z1 = t.z1;
+    const step = groundStepFor(x0, z0, x1, z1, GROUND_STEP);
+    const i0 = Math.floor(x0 / step), i1 = Math.ceil(x1 / step);
+    const j0 = Math.floor(z0 / step), j1 = Math.ceil(z1 / step);
+    // 裙边深度 = 基础高度；real 模式无 baseHeight，退回高度场最低点（山体全高落地）
+    let base = t.baseHeight;
+    if (base == null) {
+      base = Infinity;
+      for (const h of t.heights) if (h < base) base = h;
+    }
+    const ring = [];
+    for (let i = i0; i < i1; i++) ring.push([i * step, j0 * step]); // 南边 → 东
+    for (let j = j0; j < j1; j++) ring.push([i1 * step, j * step]); // 东边 → 北
+    for (let i = i1; i > i0; i--) ring.push([i * step, j1 * step]); // 北边 → 西
+    for (let j = j1; j > j0; j--) ring.push([i0 * step, j * step]); // 西边 → 南（闭环）
+    const n = ring.length;
+    const pos = new Float32Array(n * 2 * 3);
+    const idx = new Uint32Array(n * 6);
+    for (let k = 0; k < n; k++) {
+      const [x, z] = ring[k];
+      pos[k * 3] = x; pos[k * 3 + 1] = 0; pos[k * 3 + 2] = z;              // 顶环
+      pos[(n + k) * 3] = x; pos[(n + k) * 3 + 1] = 0; pos[(n + k) * 3 + 2] = z; // 底环
+      const k2 = (k + 1) % n;
+      idx.set([k, n + k, n + k2, k, n + k2, k2], k * 6);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+      color: TERRAIN_THEMES[themeOf(t)].outer, roughness: 1, metalness: 0,
+      side: THREE.DoubleSide, flatShading: true,
+    }));
+    mesh.userData.terrainSkirt = n;    // 顶环数量（_bendArea 区分顶/底环、跳过着色）
+    mesh.userData.skirtBase = base;    // 裙边深度 = 基础高度（_bendArea：底环 = 顶环 − base）
+    mesh.userData.isPlate = true;      // 跟随「范围底板」图层显隐
+    mesh.frustumCulled = false;        // 顶点 y 后填，包围球不可靠，干脆不剔除
+    this._three.scene.add(mesh);
+    this._three.skirtMesh = mesh;
   }
 
   // 道路路基补丁：大底板分辨率（~31m）表达不了十米宽的平整走廊，这张 8m
@@ -807,13 +1017,18 @@ export class MapEditor3d {
 
   // 曲率差分：局部顶点 y = lift - curveOffset(世界x,z)，Group 贴椭球面（y=0）；
   // lift 区分叠放层次（网格 0.02 / 描边 0.05）；
-  // 锚点立柱同步移到范围中心（= 地图在地球上的位置）
+  // 锚点立柱同步移到范围中心（= 地图在地球上的位置），并贴到该点地形表面：
+  // 高基础高度地形（如数百米高原）会把固定在 y=0 的 60m 立柱整个埋住，
+  // 保存重进后地形高度场恢复 → 标记看不见，故这里跟随 _terrainY 抬升。
   _bendArea() {
     const g = this._three.areaGroup;
     g.position.y = 0;
     g.updateMatrixWorld(true);
     const a = this._areaEnsure();
-    if (this._originMarker) this._originMarker.position.set(a.cx, 0, a.cz);
+    if (this._originMarker) {
+      const my = -this._curveOffset(a.cx, a.cz) + this._terrainY(a.cx, a.cz);
+      this._originMarker.position.set(a.cx, my, a.cz);
+    }
     const v = new THREE.Vector3();
     for (const obj of g.children) {
       const pos = obj.geometry.attributes.position;
@@ -833,65 +1048,57 @@ export class MapEditor3d {
     // ADR-0005：主地面与路基补丁都在 scene 根（世界坐标即格点，不在 areaGroup 内）
     // 共用同一套 8m 顶点：主地面走廊内下沉 0.15m，补丁不下沉且 lift 0.04m，
     // 补丁恒高于主地面 ≥0.19m，彻底消除互相穿插导致的路面显示不全。
-    for (const mesh of [this._three.groundMesh, this._three.bedMesh]) {
+    for (const mesh of [this._three.groundMesh, this._three.bedMesh, this._three.skirtMesh]) {
       if (!mesh || !mesh.geometry.attributes.position) continue;
       const pos = mesh.geometry.attributes.position;
       const lift = mesh.userData.lift || 0;
       const bed = !!mesh.userData.terrainBed;
+      const skirtN = mesh.userData.terrainSkirt || 0;
+      const skirtBase = skirtN ? (mesh.userData.skirtBase || 0) : 0;
       for (let i = 0; i < pos.count; i++) {
         const x = pos.getX(i), z = pos.getZ(i); // 已是世界坐标，无 group 变换
-        pos.setY(i, lift - this._curveOffset(x, z) + this._terrainY(x, z) -
+        const h = this._terrainY(x, z);
+        // 裙边：顶环贴地形高度（与主地面边界同高，无接缝），
+        // 底环 = 顶环高度 − 基础高度（往下延伸一个基础高度）
+        const ySurf = i < skirtN ? h : h - skirtBase;
+        pos.setY(i, lift - this._curveOffset(x, z) + ySurf -
           (bed ? roadBedDropAt(this.map, x, z) : 0));
       }
       pos.needsUpdate = true;
+      if (skirtN) { mesh.geometry.computeVertexNormals(); continue; } // 裙边纯侧壁，不做地形着色
       this._shadeTerrainPlate(mesh, mesh.matrixWorld);
     }
   }
 
-  // 地形面顶点着色（低处深 → 高处浅）+ 法线更新，起伏一眼可辨。
+  // 地形面顶点着色（低处深 → 高处浅 + 坡地岩石 + 雪线）+ 法线更新。
+  // 着色规则在 world/terrainTheme.js（与运行时主地面共用同一实现），
+  // 这里只负责把世界坐标顶点算出 (h, slope) 喂给共享函数并写 color attribute。
   // matrix 为几何局部坐标 → 世界坐标的变换（areaGroup 内网格传 group 矩阵；
   // 独立全局地面传自身单位矩阵）。
   _shadeTerrainPlate(obj, matrix) {
     const pos = obj.geometry.attributes.position;
     obj.geometry.computeVertexNormals();
     const t0 = ensureTerrain(this.map);
-    let hMn = Infinity, hMx = -Infinity;
-    if (t0) for (const h of t0.heights) { if (h < hMn) hMn = h; if (h > hMx) hMx = h; }
-    const span = hMx - hMn; // 全平（基础高度平地）时为 0：下面按平地中间调处理，不做除法
-    if (!this._terrainColLow) {
-      this._terrainColLow = new THREE.Color(0x242f3b);  // 低处：深蓝灰
-      this._terrainColHigh = new THREE.Color(0xa7b4c2); // 高处：亮灰蓝
-      this._terrainColTmp = new THREE.Color();
-    }
+    const themeKey = themeOf(t0);
+    const ctx = shadeCtxFor(t0);
     let colors = obj.geometry.attributes.color;
     if (!colors || colors.count !== pos.count) {
       colors = new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3);
       obj.geometry.setAttribute("color", colors);
     }
-    // 自定义地形按「基础高度」锚定着色（0.85 = 基础平地的基准色）：抬升变亮、
-    // 下压变暗，未雕刻的基础平地永远保持同一亮度——此前按「最低点=最暗」归一化，
-    // 抬升一次后最低点就是基础平地本身，整个平地会瞬间变暗。对比度随高差自适应
-    // （最小 60m 满量程，小幅雕刻也能看出明暗）；真实地形保持旧的低点锚定
-    // （椭球高没有「基础」语义，深谷=暗、山峰=亮更自然）。
-    const isReal = t0 && t0.mode === "real";
-    const base = t0 && Number.isFinite(t0.baseHeight) ? t0.baseHeight : 0;
-    const scale = Math.max(60, span);
     const v = new THREE.Vector3();
+    const rgb = [0, 0, 0];
     for (let i = 0; i < pos.count; i++) {
       v.set(pos.getX(i), 0, pos.getZ(i)).applyMatrix4(matrix);
-      const h = this._terrainY(v.x, v.z); // 直接取该点地形高度（底板已下沉，不能从 y 反推）
-      const t = span > 0.5
-        ? (isReal
-          ? Math.min(1, Math.max(0, (h - hMn) / span))
-          : Math.min(1, Math.max(0, 0.85 + (h - base) / scale)))
-        : 0.85; // 全平：亮中间调（≈随机地形平均观感），不会与无地形底板混淆
-      this._terrainColTmp.copy(this._terrainColLow).lerp(this._terrainColHigh, t);
-      colors.setXYZ(i, this._terrainColTmp.r, this._terrainColTmp.g, this._terrainColTmp.b);
+      const x = v.x, z = v.z;
+      const h = this._terrainY(x, z); // 直接取该点地形高度（底板已下沉，不能从 y 反推）
+      shadeTerrainVertex(themeKey, h, terrainSlopeAt(this.map, x, z), ctx, rgb);
+      colors.setXYZ(i, rgb[0], rgb[1], rgb[2]);
     }
     colors.needsUpdate = true;
   }
 
-  // 选中地图范围（工具入口），供 Gizmo 调整
+  // 选中地图范围（工具入口）：不挂场景 Gizmo，移动/缩放走右侧面板数值
   _selectArea() {
     this._areaEnsure();
     this._applyAreaToGroup();
@@ -1826,6 +2033,76 @@ export class MapEditor3d {
     }
   }
 
+  // 视角自动适配（ADR-0013）：按地形高程包围盒把目标点与机位抬到地形之上，
+  // 距离取水平跨度与高差的大者，保证整片地形入画（fov 55° 的保守估计）。
+  // 基础高度大的地图（如 500m 高原）默认机位 y=140 会沉进地形面以下，
+  // 开编辑器只见黑屏 —— 这就是自动适配要解决的问题。
+  _fitViewToTerrain() {
+    const t = ensureTerrain(this.map);
+    if (!t || !this._three) return false;
+    let hMin = Infinity, hMax = -Infinity;
+    for (const h of t.heights) { if (h < hMin) hMin = h; if (h > hMax) hMax = h; }
+    const { camera, orbit } = this._three;
+    const g = this._three.areaGroup;
+    const cx = g ? g.position.x : (t.x0 + t.x1) / 2;
+    const cz = g ? g.position.z : (t.z0 + t.z1) / 2;
+    const span = Math.max(t.x1 - t.x0, t.z1 - t.z0, 400);
+    const rise = Math.max(hMax - hMin, 0);
+    orbit.target.set(cx, (hMin + hMax) / 2, cz);
+    const dist = Math.max(span * 0.95, rise * 1.6, 340);
+    camera.position.set(cx, hMax + dist * 0.5, cz + dist); // 正南机位，屏幕上方 = 北（与复位一致）
+    orbit.update();
+    return true;
+  }
+
+  // 按需适配：仅当相机沉到地形最高点以下（视野被地形面遮挡/位于山体内部）时
+  // 拉起；平地/盆地地图保持默认机位不折腾。返回是否实际适配了。
+  _fitViewIfNeeded() {
+    const t = ensureTerrain(this.map);
+    if (!t || !this._three) return false;
+    let hMax = -Infinity;
+    for (const h of t.heights) if (h > hMax) hMax = h;
+    if (this._three.camera.position.y >= hMax + 30) return false;
+    if (!this._fitViewToTerrain()) return false;
+    this.status("已按地形高程自动适配视角");
+    return true;
+  }
+
+  // 地形整体高度变了（重置为平地等）后，把轨道中心与相机一起平移到新地面：
+  // target 若停在旧高程（如高原 2000m），minDistance=5 只会让滚轮贴到那个空中点，
+  // 真正贴地的标记仍在 y≈10 → 拉近到头也放不大。整体平移保持当前缩放距离与方位不变。
+  _rebaseViewToTerrain() {
+    if (!this._three || !ensureTerrain(this.map)) return false;
+    const { camera, orbit } = this._three;
+    const newY = this._terrainY(orbit.target.x, orbit.target.z);
+    const delta = newY - orbit.target.y;
+    if (Math.abs(delta) < 1e-6) return false;
+    orbit.target.y = newY;
+    camera.position.y += delta;
+    orbit.update();
+    return true;
+  }
+
+  // 动态平移倍率（参考专业地图软件的「缩放等级 ↔ 平移速度」设计，如 Google
+  // Earth / Cesium 的幂律手感）：平移步长天然与距离成正比（1:1 跟手），但
+  // 最大放大下可视范围只有几米，1:1 拖满一屏才挪 5m，跨区移动极其费劲 ——
+  // 专业软件的做法是近距离给平移额外加速、远距离回归默认。
+  //
+  // 倍率采用幂律 M(d) = (dRef/d)^k 并钳制 [1, MMax]：
+  // - 缩放本身是乘性的（每次滚轮 ≈ ×0.95），幂律让「每个缩放档位」获得恒定
+  //   的速度增量，感知均匀 —— 这比线性收缩更符合缩放的指数直觉；
+  // - d ≥ dRef(500m)：M 钳回 1，远景平移不快于默认（不会一拖几千公里）；
+  // - d = dMin(5m)：M = MMax(20)，拖满一屏约 100m；
+  // - k 由两端锚点解出：k = ln(MMax) / ln(dRef/dMin)。
+  // OrbitControls 每次平移事件实时读取 panSpeed，渲染循环里按当前距离刷新即可。
+  _updatePanSpeed() {
+    const { camera, orbit } = this._three;
+    const d = Math.max(camera.position.distanceTo(orbit.target), 1e-3);
+    const dMin = orbit.minDistance || 5, dRef = 500, MMax = 20;
+    const k = Math.log(MMax) / Math.log(dRef / dMin);
+    orbit.panSpeed = clamp(Math.pow(dRef / d, k), 1, MMax);
+  }
+
   // 一键复位视角：回到正南方俯瞰范围中心的默认机位（与打开编辑器时一致，屏幕上方 = 北）
   _resetView() {
     const { camera, orbit } = this._three;
@@ -1834,7 +2111,9 @@ export class MapEditor3d {
     orbit.target.set(cx, 0, cz);
     camera.position.set(cx, 140, cz + 260);
     orbit.update();
-    this.status("视角已复位（正南方俯瞰范围中心）");
+    // 高程较大的地形默认机位仍沉在地形里 → 复位即自动拉起（与打开编辑器同逻辑）
+    const fitted = this._fitViewIfNeeded();
+    this.status(fitted ? "视角已复位（已按地形高程抬升机位）" : "视角已复位（正南方俯瞰范围中心）");
   }
 
   // 罗盘逐帧更新：视线方位角 = 视线方向相对真北（-Z）的顺时针夹角
@@ -2347,8 +2626,8 @@ export class MapEditor3d {
     this.sel = w;
     const tc = this._three.tc;
     if (w) {
-      tc.attach(w.root);
-      tc.setMode("translate");
+      if (w.kind === "area") tc.detach(); // 地图范围：不提供场景 Gizmo 拖拽（拖拽只带得动网格视觉），只走右侧面板数值编辑
+      else { tc.attach(w.root); tc.setMode("translate"); }
       this._renderProps();
     } else {
       tc.detach();
@@ -2462,7 +2741,7 @@ export class MapEditor3d {
 
   _deleteSel() {
     if (!this.sel) return;
-    if (this.sel.kind === "area") { this.status("地图范围不可删除，可在右侧重新描边或用 Gizmo 调整"); return; }
+    if (this.sel.kind === "area") { this.status("地图范围不可删除，可在右侧面板重新描边或数值调整"); return; }
     const { kind, data } = this.sel;
     if (kind === "roadX") this.map.roadsX = this.map.roadsX.filter((r) => r !== data);
     else if (kind === "roadZ") this.map.roadsZ = this.map.roadsZ.filter((r) => r !== data);
@@ -2545,7 +2824,11 @@ export class MapEditor3d {
     if (kind === "area") {
       const a = this._areaEnsure();
       const apply = (patch) => {
-        Object.assign(this._areaEnsure(), patch);
+        const a0 = this._areaEnsure();
+        const dx = (patch.cx ?? a0.cx) - a0.cx, dz = (patch.cz ?? a0.cz) - a0.cz;
+        if (dx || dz) this._translateMap(dx, dz); // 中心平移 = 整张地图（网格+地形+影像对齐+内容）一起搬
+        Object.assign(a0, patch);
+        if (dx || dz) this._rebuildAreaMeshes(); // 底板/裙边按新范围锚点重建（世界坐标几何随地图搬移）
         this._applyAreaToGroup();
         this._bendArea();
         this._rebuildAll(); // 曲率零基准变化，重建内容
@@ -2559,19 +2842,17 @@ export class MapEditor3d {
           <h4>地图范围 · 属性</h4>
           <div class="me-pos">多边形 · ${a.pts.length} 个顶点</div>
           <div class="me-xy">
-            <label>中心X(m)<input id="ep-cx" type="number" step="10" value="${a.cx}" /></label>
-            <label>中心Z(m)<input id="ep-cz" type="number" step="10" value="${a.cz}" /></label>
+            <label class="me-tiprow">中心X(m)<span class="me-tip" data-tip="范围中心的东西向坐标（米，+X = 东）。地图是水平面上的区域，高度由地形决定，所以只有 X/Z 两个中心坐标，没有 Y。">?</span><input id="ep-cx" type="number" step="10" value="${a.cx}" /></label>
+            <label class="me-tiprow">中心Z(m)<span class="me-tip" data-tip="范围中心的南北向坐标（米，+Z = 南）。地图是水平面上的区域，高度由地形决定，所以只有 X/Z 两个中心坐标，没有 Y。">?</span><input id="ep-cz" type="number" step="10" value="${a.cz}" /></label>
           </div>
           <button class="me-btn" id="ep-redraw">重新描边绘制</button>
           <button class="me-btn" id="ep-torect">转为矩形</button>
-          <p class="me-hint">Gizmo 拖拽整体移动（多边形不支持旋转/缩放）；重新描边可绘制任意形状</p>`;
+          <p class="me-hint">改中心数值 = 整张地图（含影像落点）平移；重新描边可绘制任意形状</p>`;
         const movePoly = () => {
           const a2 = this._areaEnsure();
           const dx = Math.round(num("#ep-cx")) - a2.cx, dz = Math.round(num("#ep-cz")) - a2.cz;
           if (!dx && !dz) return;
-          a2.pts = a2.pts.map(([x, z]) => [x + dx, z + dz]);
-          a2.cx += dx; a2.cz += dz;
-          this._shiftOrigin(dx, dz);
+          this._translateMap(dx, dz); // 顶点/中心/内容/地形锚点整体平移（origin 不动）
           this._rebuildAreaMeshes();
           this._applyAreaToGroup();
           this._bendArea();
@@ -2610,21 +2891,20 @@ export class MapEditor3d {
       el.innerHTML = `
         <h4>地图范围 · 属性</h4>
         <div class="me-xy">
-          <label>中心X(m)<input id="ep-cx" type="number" step="10" value="${a.cx}" /></label>
-          <label>中心Z(m)<input id="ep-cz" type="number" step="10" value="${a.cz}" /></label>
+          <label class="me-tiprow">中心X(m)<span class="me-tip" data-tip="范围中心的东西向坐标（米，+X = 东）。地图是水平面上的区域，高度由地形决定，所以只有 X/Z 两个中心坐标，没有 Y。">?</span><input id="ep-cx" type="number" step="10" value="${a.cx}" /></label>
+          <label class="me-tiprow">中心Z(m)<span class="me-tip" data-tip="范围中心的南北向坐标（米，+Z = 南）。地图是水平面上的区域，高度由地形决定，所以只有 X/Z 两个中心坐标，没有 Y。">?</span><input id="ep-cz" type="number" step="10" value="${a.cz}" /></label>
         </div>
         <div class="me-xy">
           <label>宽 W(m)<input id="ep-w" type="number" min="200" max="20000" step="100" value="${a.w}" /></label>
           <label>深 D(m)<input id="ep-d" type="number" min="200" max="20000" step="100" value="${a.d}" /></label>
         </div>
-        <label>旋转(°)<input id="ep-rot" type="number" min="-180" max="180" step="1" value="${Math.round((a.rot * 180) / Math.PI)}" /></label>
+        <label class="me-tiprow" data-tip="暂禁用：范围旋转未接入 Cesium 地理链路（经纬度换算、真实高程采样、相机同步都按 ENU 轴对齐），历史上只旋转网格、地形与影像不跟随，易造成错觉。地理对齐请用中心坐标 / 描边要素对准卫星底图（见 ADR-0014）。">旋转(°) <span class="me-tip">?</span><input id="ep-rot" type="number" value="0" disabled /></label>
         <button class="me-btn" id="ep-draw">描边绘制多边形</button>
-        <p class="me-hint">也可用 Gizmo：W 移动 / E 旋转方向 / R 缩放大小；描边可在底图上绘制任意形状范围</p>`;
+        <p class="me-hint">改中心数值 = 整张地图（含影像落点）平移；描边可在底图上绘制任意形状范围。旋转暂禁用：请通过中心坐标 / 描边要素对准 Cesium 卫星底图。</p>`;
       el.querySelector("#ep-cx").addEventListener("change", () => apply({ cx: num("#ep-cx") }));
       el.querySelector("#ep-cz").addEventListener("change", () => apply({ cz: num("#ep-cz") }));
       el.querySelector("#ep-w").addEventListener("change", () => apply({ w: clamp(num("#ep-w"), 200, 20000) }));
       el.querySelector("#ep-d").addEventListener("change", () => apply({ d: clamp(num("#ep-d"), 200, 20000) }));
-      el.querySelector("#ep-rot").addEventListener("change", () => apply({ rot: (clamp(num("#ep-rot"), -180, 180) * Math.PI) / 180 }));
       el.querySelector("#ep-draw").addEventListener("click", () => this._startAreaDraft());
       return;
     }
@@ -3316,8 +3596,8 @@ export class MapEditor3d {
         this._setTool(t); // 高亮 + 同步「道路」按钮子模式文案
         this._select(null);
         if (t === "area") {
-          this._selectArea(); // 选中地图范围，Gizmo 立即可用
-          this.status("地图范围：Gizmo 拖拽移动 · 右侧可数值编辑 / 描边绘制多边形");
+          this._selectArea(); // 选中地图范围（无场景 Gizmo，右侧面板数值编辑）
+          this.status("地图范围：右侧面板数值移动/旋转/缩放 · 可描边绘制多边形");
           return;
         }
         this.status({
